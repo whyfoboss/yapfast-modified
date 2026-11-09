@@ -3022,6 +3022,79 @@ fn hide_deleted_messages_dispatches_actions() {
 }
 
 #[test]
+fn right_click_on_deleted_message_opens_menu_with_hide_actions() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let window = showing(vec![ChatMessage {
+        author: "Alice".into(),
+        body: "Deleted message".into(),
+        deleted: true,
+        ..Default::default()
+    }]);
+    let button = PointerEventButton::Right;
+    let mut opened = false;
+    for y in (100..600).step_by(10) {
+        let position = slint::LogicalPosition::new(440., y as f32);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle(&window);
+        if window.get_menu_message().item == "i0" {
+            opened = true;
+            break;
+        }
+    }
+    assert!(
+        opened,
+        "Right clicking a deleted message row opened its context menu"
+    );
+    assert!(
+        window.get_menu_message().deleted,
+        "Menu message is marked deleted"
+    );
+}
+
+#[test]
+fn right_click_on_edited_message_preserves_view_edit_history() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let window = showing(vec![ChatMessage {
+        author: "Bob".into(),
+        body: "Edited message".into(),
+        deleted: false,
+        edited: true,
+        has_edit_history: true,
+        ..Default::default()
+    }]);
+    let button = PointerEventButton::Right;
+    let mut opened = false;
+    for y in (100..600).step_by(10) {
+        let position = slint::LogicalPosition::new(440., y as f32);
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle(&window);
+        if window.get_menu_message().item == "i0" {
+            opened = true;
+            break;
+        }
+    }
+    assert!(
+        opened,
+        "Right clicking an edited message row opened its context menu"
+    );
+    assert!(!window.get_menu_message().deleted, "Message is not deleted");
+    assert!(
+        window.get_menu_message().has_edit_history,
+        "Edit history is available"
+    );
+}
+
+#[test]
 fn a_nameplates_picture_is_asked_for_when_its_row_shows() {
     i_slint_backend_testing::init_no_event_loop();
     let window = classic_window();
@@ -7226,6 +7299,27 @@ fn edit_profile_opens_the_main_profile_editor() {
         window.get_profile_editor_prompt().too_long,
         "A display name can be up to 32 characters."
     );
+
+    // Pronouns and bio editing
+    window.invoke_write_profile(1, "they/them".into());
+    assert_eq!(
+        window.get_profile_editor_prompt().preview.pronouns,
+        "they/them"
+    );
+    assert!(window.get_profile_editor_prompt().changed);
+
+    window.invoke_write_profile(2, "Hello world bio".into());
+    assert_eq!(
+        window.get_profile_editor_prompt().preview.bio,
+        slint::StyledText::from_plain_text("Hello world bio")
+    );
+    assert!(window.get_profile_editor_prompt().changed);
+
+    // Undo reverts unsaved changes
+    window.invoke_undo_profile();
+    assert!(!window.get_profile_editor_prompt().changed);
+    assert_eq!(window.get_profile_editor_prompt().preview.name, "Alice");
+
     window.invoke_close_profile_editor();
     assert!(!window.get_profile_editor_open());
 }

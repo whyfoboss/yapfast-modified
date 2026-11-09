@@ -1955,9 +1955,9 @@ export component YapfastWindow inherits Window {
         emoji-picker.show();
     }
     // The message whose menu is open.
-    property <MessageRow> menu-message;
-    property <string> menu-item: menu-open ? root.menu-message.item : "";
-    property <bool> menu-open: message-menu.is-open;
+    out property <MessageRow> menu-message;
+    out property <string> menu-item: menu-open ? root.menu-message.item : "";
+    out property <bool> menu-open: message-menu.is-open;
     // The server, conversation or person whose menu is open. A profile chosen
     // from a person's menu opens where the menu did.
     property <string> menu-target;
@@ -3192,7 +3192,7 @@ export component YapfastWindow inherits Window {
                                                         }
                                                     }
                                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.down
-                                                        && !message.deleted && message.delivery == "" {
+                                                        && message.delivery == "" {
                                                         root.active-item = message.item;
                                                         root.anchor(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0px, 0px, true);
                                                         root.open-menu(message);
@@ -3269,7 +3269,7 @@ export component YapfastWindow inherits Window {
                                                         save-attachment(id, index) => { root.save-attachment(id, index); }
                                                         // A right click on a picture opens the message's menu with it.
                                                         media-menu(id, index, video, x, y) => {
-                                                            if !message.deleted && message.delivery == "" {
+                                                            if message.delivery == "" {
                                                                 root.active-item = message.item;
                                                                 root.anchor(x, y, 0px, 0px, true);
                                                                 root.open-message-menu(message, index, video);

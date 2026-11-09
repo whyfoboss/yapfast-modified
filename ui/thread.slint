@@ -208,7 +208,7 @@ export component ThreadPanel inherits Rectangle {
                         clicked => { root.active-item = message.item; }
                         pointer-event(event) => {
                             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down
-                                && !message.deleted && message.delivery == "" {
+                                && message.delivery == "" {
                                 root.active-item = message.item;
                                 root.open-menu(message, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0px, 0px);
                             }
@@ -258,7 +258,7 @@ export component ThreadPanel inherits Rectangle {
                                 view-image(id, index) => { root.view-image(id, index); }
                                 save-attachment(id, index) => { root.save-attachment(id, index); }
                                 media-menu(id, index, video, x, y) => {
-                                    if !message.deleted && message.delivery == "" {
+                                    if message.delivery == "" {
                                         root.active-item = message.item;
                                         root.open-media-menu(message, index, video, x, y);
                                     }

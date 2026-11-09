@@ -1511,10 +1511,41 @@ export component ProfileEditorDialog inherits Rectangle {
         root.editing = 0;
         scope.focus();
     }
+    function edit(field: int) {
+        root.editing = field;
+        root.colour-open = false;
+    }
+    function banner-clicked() {
+        if root.prompt.colour-shown {
+            root.colour-open = !root.colour-open;
+            root.editing = 0;
+        } else if root.prompt.banner-reset {
+            banner-menu.show();
+        } else {
+            root.pick(1);
+        }
+    }
+    function avatar-clicked() {
+        if root.prompt.avatar-reset {
+            avatar-menu.show();
+        } else {
+            root.pick(0);
+        }
+    }
     /// How far it's open, from 0 to 1; see PopupMotion.
     in property <float> motion: 1;
     background: rgba(0, 0, 0, 0.6 * root.motion);
-    TouchArea { clicked => { root.close(); } }
+    property <int> nudge;
+    property <length> bar-height: root.prompt.changed || root.prompt.saving ? 60px : 0px;
+    TouchArea {
+        clicked => {
+            if root.prompt.changed || root.prompt.saving {
+                root.nudge += 1;
+            } else {
+                root.close();
+            }
+        }
+    }
     card := Rectangle {
         opacity: Popup.opacity(root.motion); transform-scale: Popup.scale(root.motion);
         width: min(600px, root.width - 48px);
@@ -1525,13 +1556,25 @@ export component ProfileEditorDialog inherits Rectangle {
         drop-shadow-blur: 32px; drop-shadow-color: #00000066; drop-shadow-offset-y: 12px;
         accessible-role: groupbox;
         accessible-label: root.prompt.title;
-        // Clicks inside the card do not close it.
-        TouchArea { }
+        // A click on the card, outside what's being edited, ends the field editing.
+        TouchArea {
+            clicked => {
+                root.stop-editing();
+                root.colour-open = false;
+            }
+        }
         scope := FocusScope {
             init => { self.focus(); }
             key-pressed(event) => {
                 if event.text == Key.Escape {
-                    root.close();
+                    if root.editing != 0 || root.colour-open {
+                        root.stop-editing();
+                        root.colour-open = false;
+                    } else if root.prompt.changed || root.prompt.saving {
+                        root.nudge += 1;
+                    } else {
+                        root.close();
+                    }
                     return accept;
                 }
                 return reject;
@@ -1554,6 +1597,33 @@ export component ProfileEditorDialog inherits Rectangle {
                                     if root.prompt.preview.banner.width > 0: Image {
                                         width: parent.width; height: parent.height; source: root.prompt.preview.banner; image-fit: cover;
                                     }
+                                    if banner-touch.has-hover && (root.banner-editable || root.banner-locked): Rectangle { background: #00000059; }
+                                    if root.prompt.reading == "banner": Rectangle {
+                                        background: #00000099;
+                                        Text { text: "Reading..."; color: #ffffff; font-size: 13px; font-weight: 700; }
+                                    }
+                                    // Small circular pencil button in the upper-right area of the banner
+                                    if (root.banner-editable || root.banner-locked): Rectangle {
+                                        x: parent.width - 48px; y: 16px; width: 32px; height: 32px;
+                                        EditBadge { locked: root.banner-locked; }
+                                    }
+                                    banner-touch := TouchArea {
+                                        enabled: root.ready;
+                                        mouse-cursor: root.banner-editable ? MouseCursor.pointer : MouseCursor.default;
+                                        clicked => { if root.banner-editable { root.banner-clicked(); } }
+                                    }
+                                    banner-menu := PopupWindow {
+                                        x: parent.width - 192px; y: 48px; width: 180px;
+                                        Rectangle {
+                                            background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
+                                            drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
+                                            VerticalLayout {
+                                                padding: 6px; spacing: 2px;
+                                                MenuItem { text: "Change Banner"; icon: @image-url("icons/image.svg"); clicked => { banner-menu.close(); root.pick(1); } }
+                                                MenuItem { text: root.prompt.reset-word + " Banner"; icon: @image-url("icons/x.svg"); danger: true; clicked => { banner-menu.close(); root.reset(1); } }
+                                            }
+                                        }
+                                    }
                                 }
                                 Rectangle {
                                     x: 16px; y: 16px; width: detail-text.preferred-width + 20px; height: 28px; border-radius: 14px;
@@ -1564,37 +1634,155 @@ export component ProfileEditorDialog inherits Rectangle {
                                     x: root.pad - 6px; y: root.banner-height - root.avatar-size / 2 - 6px;
                                     width: root.avatar-size + 12px; height: self.width; border-radius: self.width / 2;
                                     background: root.plate;
-                                    Avatar { size: root.avatar-size; initial: root.prompt.preview.initial; tint: root.prompt.preview.tint; picture: root.prompt.preview.picture; }
+                                    Rectangle {
+                                        x: 6px; y: 6px; width: root.avatar-size; height: root.avatar-size; border-radius: root.avatar-size / 2;
+                                        clip: true;
+                                        Avatar { size: root.avatar-size; initial: root.prompt.preview.initial; tint: root.prompt.preview.tint; picture: root.prompt.preview.picture; }
+                                        if avatar-touch.has-hover && root.ready && root.prompt.reading != "avatar": Rectangle {
+                                            width: root.avatar-size; height: root.avatar-size; border-radius: root.avatar-size / 2;
+                                            background: #00000073;
+                                            EditBadge { locked: !root.prompt.avatar-enabled; }
+                                        }
+                                        if root.prompt.reading == "avatar": Rectangle {
+                                            width: root.avatar-size; height: root.avatar-size; border-radius: root.avatar-size / 2;
+                                            background: #00000099;
+                                            Text { text: "Reading..."; color: #ffffff; font-size: 13px; font-weight: 700; }
+                                        }
+                                    }
+                                    avatar-touch := TouchArea {
+                                        x: 6px; y: 6px; width: root.avatar-size; height: root.avatar-size;
+                                        enabled: root.ready;
+                                        mouse-cursor: root.avatar-editable ? MouseCursor.pointer : MouseCursor.default;
+                                        clicked => { if root.avatar-editable { root.avatar-clicked(); } }
+                                    }
+                                    avatar-menu := PopupWindow {
+                                        x: 12px; y: parent.height - 4px; width: 180px;
+                                        Rectangle {
+                                            background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
+                                            drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
+                                            VerticalLayout {
+                                                padding: 6px; spacing: 2px;
+                                                MenuItem { text: "Change Avatar"; icon: @image-url("icons/image.svg"); clicked => { avatar-menu.close(); root.pick(0); } }
+                                                MenuItem { text: root.prompt.reset-word + " Avatar"; icon: @image-url("icons/x.svg"); danger: true; clicked => { avatar-menu.close(); root.reset(0); } }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             VerticalLayout {
                                 padding-left: root.pad; padding-right: root.pad; spacing: 16px;
+                                if root.colour-open: Rectangle {
+                                    background: Theme.raised; border-radius: 8px;
+                                    VerticalLayout {
+                                        padding: 10px; spacing: 8px;
+                                        HorizontalLayout {
+                                            spacing: 8px; alignment: start;
+                                            Middle {
+                                                Rectangle {
+                                                    width: 28px; height: 28px; border-radius: 6px;
+                                                    background: root.prompt.has-colour ? root.prompt.colour : Theme.raised;
+                                                    border-width: 1px; border-color: Theme.line;
+                                                }
+                                            }
+                                            Middle {
+                                                TextField {
+                                                    init => { self.focus-input(); }
+                                                    width: 116px; min-height: 32px; text-size: 14px; pad: 8px;
+                                                    fill: root.prompt.colour-wrong ? Theme.danger.with-alpha(0.16) : Theme.raised;
+                                                    placeholder: "Default"; label: "Banner color";
+                                                    text <=> root.colour;
+                                                    edited(text) => { root.write(3, text); }
+                                                    accepted => { root.colour-open = false; scope.focus(); }
+                                                }
+                                            }
+                                            if root.prompt.colour-wrong: Middle { Text { text: "Not a colour"; color: Theme.danger; font-size: 13px; } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            if root.colour != "": Middle {
+                                                ActionButton {
+                                                    small: true; ghost: true; text: "Default";
+                                                    clicked => { root.colour = ""; root.write(3, ""); }
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 6px; alignment: start;
+                                            for swatch in [
+                                                { hex: "#5865f2", colour: #5865f2 }, { hex: "#3ba55d", colour: #3ba55d },
+                                                { hex: "#faa61a", colour: #faa61a }, { hex: "#ed4245", colour: #ed4245 },
+                                                { hex: "#eb459e", colour: #eb459e }, { hex: "#1abc9c", colour: #1abc9c },
+                                                { hex: "#9b59b6", colour: #9b59b6 }, { hex: "#607d8b", colour: #607d8b },
+                                                { hex: "#2c2f33", colour: #2c2f33 },
+                                            ]: Rectangle {
+                                                width: 26px; height: 26px; border-radius: 6px; background: swatch.colour;
+                                                border-width: root.colour == swatch.hex ? 2px : swatch-touch.has-hover ? 1px : 0px;
+                                                border-color: Theme.text;
+                                                accessible-role: button;
+                                                accessible-label: "Banner color " + swatch.hex;
+                                                accessible-action-default => { root.colour = swatch.hex; root.write(3, swatch.hex); }
+                                                swatch-touch := TouchArea {
+                                                    mouse-cursor: MouseCursor.pointer;
+                                                    clicked => { root.colour = swatch.hex; root.write(3, swatch.hex); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 VerticalLayout {
                                     spacing: 4px;
                                     // The display name.
-                                    HorizontalLayout {
+                                    if root.editing != 1: HorizontalLayout {
                                         spacing: 6px; alignment: start;
                                         StyledName {
                                             text: root.prompt.loading ? "Loading..." : root.prompt.preview.name;
                                             styles: root.prompt.preview.name-style; ink: Theme.text; font-weight: 700;
                                             font-size: root.prompt.main ? 24px : 26px;
+                                            HoverEdit {
+                                                x: -7px; y: (parent.height - self.height) / 2; width: max(136px, parent.width + 14px + 28px); height: 40px;
+                                                enabled: root.ready && root.prompt.name-enabled; pencil: true;
+                                                label: root.prompt.main ? "Edit display name" : "Edit server nickname";
+                                                clicked => { root.edit(1); }
+                                            }
                                         }
+                                    }
+                                    if root.editing == 1: TextField {
+                                        init => { self.focus-input(); }
+                                        min-height: 40px; text-size: 22px; pad: 8px;
+                                        placeholder: root.prompt.name-placeholder;
+                                        label: root.prompt.main ? "Display name" : "Server nickname";
+                                        text <=> root.name;
+                                        edited(text) => { root.write(0, text); }
+                                        accepted => { root.stop-editing(); }
                                     }
                                     // The username, then the pronouns.
                                     HorizontalLayout {
                                         spacing: 6px; alignment: start;
-                                        Middle { Text { text: root.prompt.handle + (root.pronouns != "" || root.prompt.pronouns-fallback != "" ? " ·" : ""); color: Theme.secondary; font-size: 14px; font-weight: 500; } }
-                                        if root.pronouns != "" || root.prompt.pronouns-fallback != "": Middle {
+                                        Middle { Text { text: root.prompt.handle + (root.pronouns != "" || root.prompt.pronouns-fallback != "" || root.editing == 2 ? " ·" : ""); color: Theme.secondary; font-size: 14px; font-weight: 500; } }
+                                        if root.editing != 2: Middle {
                                             Text {
-                                                text: root.pronouns != "" ? root.pronouns : root.prompt.pronouns-fallback;
-                                                color: Theme.secondary; font-size: 14px; font-weight: 500; overflow: elide;
+                                                text: root.pronouns != "" ? root.pronouns : root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add pronouns";
+                                                color: root.pronouns != "" || root.prompt.pronouns-fallback != "" ? Theme.secondary : Theme.muted;
+                                                font-size: 14px; font-weight: 500; overflow: elide;
+                                                HoverEdit {
+                                                    x: -5px; y: (parent.height - self.height) / 2; width: max(100px, parent.width + 10px + 24px); height: 32px;
+                                                    enabled: root.ready; pencil: true; label: "Edit pronouns";
+                                                    clicked => { root.edit(2); }
+                                                }
                                             }
                                         }
-                                        if root.prompt.main && root.prompt.tag-text != "": Middle {
+                                        if root.editing == 2: TextField {
+                                            init => { self.focus-input(); }
+                                            width: 220px; min-height: 30px; text-size: 14px; pad: 8px;
+                                            placeholder: root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add your pronouns";
+                                            label: "Pronouns";
+                                            text <=> root.pronouns;
+                                            edited(text) => { root.write(1, text); }
+                                            accepted => { root.stop-editing(); }
+                                        }
+                                        if root.prompt.main && root.editing != 2 && root.prompt.tag-text != "": Middle {
                                             ServerTagChip { text: root.prompt.tag-text; badge: root.prompt.tag-icon; }
                                         }
                                         // Badges
-                                        if root.prompt.main && root.prompt.preview.badges.length > 0: Middle {
+                                        if root.prompt.main && root.editing != 2 && root.prompt.preview.badges.length > 0: Middle {
                                             Rectangle {
                                                 height: 26px; border-radius: 8px; background: #00000059;
                                                 HorizontalLayout {
@@ -1612,11 +1800,79 @@ export component ProfileEditorDialog inherits Rectangle {
                                     activity: activity;
                                     open-link(url) => { root.open-link(url); }
                                 }
-                                if root.prompt.preview.has-bio: VerticalLayout {
+                                VerticalLayout {
                                     spacing: 6px;
-                                    ProfileHeading { text: root.prompt.main ? "Bio" : "ABOUT ME"; color: root.prompt.main ? Theme.text : Theme.muted; font-size: root.prompt.main ? 13px : 12px; font-weight: root.prompt.main ? 500 : 700; letter-spacing: root.prompt.main ? 0px : 0.6px; }
-                                    StyledText {
-                                        text: root.prompt.preview.bio; default-color: Theme.text; link-color: Theme.link;
+                                    HorizontalLayout {
+                                        spacing: 6px; alignment: start;
+                                        ProfileHeading { text: root.prompt.main ? "Bio" : "ABOUT ME"; color: root.prompt.main ? Theme.text : Theme.muted; font-size: root.prompt.main ? 13px : 12px; font-weight: root.prompt.main ? 500 : 700; letter-spacing: root.prompt.main ? 0px : 0.6px; }
+                                        if root.prompt.bio-enabled && root.editing != 3: Middle {
+                                            Rectangle {
+                                                width: 18px; height: 18px; border-radius: 9px;
+                                                background: bio-pencil-touch.has-hover ? #00000080 : transparent;
+                                                Image {
+                                                    x: 2px; y: 2px; width: 14px; height: 14px;
+                                                    source: @image-url("icons/pencil.svg");
+                                                    colorize: bio-pencil-touch.has-hover ? #ffffff : #ffffffb3;
+                                                }
+                                                bio-pencil-touch := TouchArea {
+                                                    mouse-cursor: MouseCursor.pointer;
+                                                    clicked => { root.edit(3); }
+                                                }
+                                            }
+                                        }
+                                        if !root.prompt.bio-enabled && !root.prompt.loading: Middle {
+                                            Image { source: @image-url("icons/lock.svg"); width: 13px; height: 13px; colorize: Theme.muted; }
+                                        }
+                                    }
+                                    if root.editing != 3: Rectangle {
+                                        height: bio-shown.preferred-height;
+                                        bio-shown := VerticalLayout {
+                                            if root.prompt.preview.has-bio: StyledText {
+                                                text: root.prompt.preview.bio; default-color: Theme.text; link-color: Theme.link;
+                                            }
+                                            if !root.prompt.preview.has-bio: Text {
+                                                text: root.prompt.bio-placeholder; color: Theme.muted; font-size: 14px; wrap: word-wrap;
+                                            }
+                                        }
+                                        HoverEdit {
+                                            x: -7px; y: round((parent.height - self.height) / 2px) * 1px; width: parent.width + 14px; height: max(28px, parent.height + 7px);
+                                            enabled: root.ready && root.prompt.bio-enabled; label: "Edit bio"; cursor: MouseCursor.text;
+                                            clicked => { root.edit(3); }
+                                        }
+                                    }
+                                    if root.editing == 3: VerticalLayout {
+                                        spacing: 4px;
+                                        Rectangle {
+                                            height: 110px; border-radius: 6px; background: Theme.sunken;
+                                            border-width: 1px; border-color: Theme.accent.with-alpha(0.8);
+                                            Text {
+                                                x: 10px; y: 8px; width: parent.width - 20px;
+                                                visible: root.bio == "";
+                                                text: root.prompt.bio-placeholder; color: Theme.muted; font-size: 14px;
+                                                wrap: word-wrap; overflow: elide;
+                                            }
+                                            TextInput {
+                                                init => { self.focus(); }
+                                                x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px;
+                                                text <=> root.bio;
+                                                single-line: false; wrap: word-wrap;
+                                                font-size: 14px; color: Theme.text;
+                                                selection-background-color: Theme.accent.with-alpha(0.35);
+                                                selection-foreground-color: Theme.text;
+                                                accessible-label: "Bio";
+                                                edited => { root.write(2, self.text); }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            Label { text: "You can use markdown and links if you'd like."; horizontal-stretch: 1; }
+                                            Text {
+                                                text: root.prompt.bio-left < 0 ? "Too long by " + (-root.prompt.bio-left) : root.prompt.bio-left + " left";
+                                                color: root.prompt.bio-left < 0 ? Theme.danger : Theme.muted; font-size: 12px;
+                                            }
+                                        }
+                                    }
+                                    if root.editing != 3 && root.prompt.bio-left < 0: Text {
+                                        text: "Too long by " + (-root.prompt.bio-left); color: Theme.danger; font-size: 12px;
                                     }
                                 }
                                 if root.prompt.preview.created != "" || root.prompt.preview.joined != "": VerticalLayout {
@@ -1637,6 +1893,15 @@ export component ProfileEditorDialog inherits Rectangle {
                                 if root.prompt.error != "": Text { text: root.prompt.error; color: Theme.danger; font-size: 14px; wrap: word-wrap; }
                             }
                         }
+                    }
+                    // Discord's bar, once there's something to save.
+                    if root.prompt.changed || root.prompt.saving: UnsavedBar {
+                        height: root.bar-height; pad: root.pad; saving: root.prompt.saving;
+                        nudge: root.nudge;
+                        may-reset: root.ready;
+                        may-save: root.ready && root.prompt.reading == "" && root.prompt.too-long == "" && root.prompt.bio-left >= 0 && !root.prompt.colour-wrong;
+                        undo => { root.stop-editing(); root.colour-open = false; root.undo(); }
+                        save => { root.stop-editing(); root.save(); }
                     }
                 }
             }
