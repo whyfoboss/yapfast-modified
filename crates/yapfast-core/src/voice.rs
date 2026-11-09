@@ -61,6 +61,9 @@ pub struct Participant {
     pub video: Option<crate::picture::Feed>,
     /// The address of their avatar; see [`crate::chat::DiscordCommand::Pictures`].
     pub avatar: Option<String>,
+    /// The RGB colour of their name from their highest coloured role in the
+    /// server, when this is a server call and their roles are known.
+    pub color: Option<u32>,
 }
 
 /// Sharing this account's screen in the call.

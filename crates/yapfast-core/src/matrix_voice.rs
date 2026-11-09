@@ -419,6 +419,7 @@ async fn connected(
                     connected,
                     problem: problem.map(str::to_owned),
                     avatar: None,
+                    color: None,
                     streaming: false,
                     video,
                 }

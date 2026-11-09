@@ -4,7 +4,7 @@ import { ActionButton, IconButton, Avatar, CallButton, VolumeSlider, MenuItem } 
 import { EmojiCell, EmojiFace } from "messages.slint";
 
 export struct PersonRow {
-    id: string, name: string, status: string, muted: bool, deafened: bool, speaking: bool, connected: bool, initial: string, tint: color, picture: image,
+    id: string, name: string, status: string, muted: bool, deafened: bool, speaking: bool, connected: bool, initial: string, tint: color, color: color, has-color: bool, picture: image,
     /// Sharing their screen.
     live: bool,
     /// Their camera is on.
@@ -706,6 +706,7 @@ component StageTile inherits Rectangle {
 // A tile's name, at its bottom left.
 component TileChip inherits Rectangle {
     in property <string> name;
+    in property <color> name-color: #ffffff;
     in property <bool> live;
     /// Why their tile may look wrong, such as a lost connection.
     in property <string> note;
@@ -718,7 +719,7 @@ component TileChip inherits Rectangle {
     chip := HorizontalLayout {
         padding-left: 8px; padding-right: 8px; spacing: 6px;
         @children
-        Text { text: root.name; color: #ffffff; font-size: 14px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+        Text { text: root.name; color: root.name-color; font-size: 14px; font-weight: 700; vertical-alignment: center; overflow: elide; }
         if root.live: Middle { LivePill { } }
         if root.note != "": Text { text: root.note; color: Theme.accent; font-size: 13px; vertical-alignment: center; overflow: elide; }
     }
@@ -917,6 +918,7 @@ export component ParticipantGrid inherits Flickable {
         }
         TileChip {
             tile-width: parent.width; tile-height: parent.height; name: stream.person.name; live: true;
+            name-color: stream.person.has-color ? stream.person.color : #ffffff;
             Image { source: @image-url("icons/screen-share.svg"); width: 14px; image-fit: contain; colorize: #ffffff; }
         }
     }
@@ -977,6 +979,7 @@ export component ParticipantGrid inherits Flickable {
             tile-width: parent.width; tile-height: parent.height;
             // A stream with a tile of its own is LIVE there.
             name: person.name; live: person.live && (person.local || !person.video);
+            name-color: person.has-color ? person.color : #ffffff;
             note: person.status != "Muted" && person.status != "Deafened" && person.status != "Speaking" && person.status != "Listening" ? person.status : "";
             if person.muted && !person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 14px; image-fit: contain; colorize: Theme.danger; }
             if person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 14px; image-fit: contain; colorize: Theme.danger; }

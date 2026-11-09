@@ -61,6 +61,9 @@ pub struct VoiceMember {
     pub name: String,
     /// The address of the avatar Discord shows for them on this server.
     pub avatar: String,
+    /// The RGB colour of their name from their highest coloured role in the
+    /// server, when this is a server call and their roles are known.
+    pub color: Option<u32>,
     /// Muted or deafened, by themselves or by the server.
     pub muted: bool,
     pub deafened: bool,

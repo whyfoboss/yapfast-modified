@@ -313,7 +313,12 @@ impl Adapter {
             Some(SettingsPage::Members(page)) => {
                 let roles = self.app.server_roles(&settings.server);
                 let join_method = self.app.may(&settings.server, Permission::ManageServer);
-                prompt.members = members_prompt(page, &roles, join_method);
+                prompt.members = members_prompt(
+                    page,
+                    &roles,
+                    join_method,
+                    self.layout.role_colors_everywhere,
+                );
             }
             Some(SettingsPage::Invites(page)) => {
                 let roles = self.app.server_roles(&settings.server);
@@ -1054,7 +1059,12 @@ fn join_method(joined: &JoinMethod) -> (String, bool) {
 }
 
 /// Members, a page of them; `roles` are the server's, highest first.
-fn members_prompt(page: &MembersPage, roles: &[ServerRole], join_method: bool) -> MembersPrompt {
+fn members_prompt(
+    page: &MembersPage,
+    roles: &[ServerRole],
+    join_method: bool,
+    role_colors: bool,
+) -> MembersPrompt {
     let now = clock::now_ms();
     let rows: Vec<ListedMemberRow> = page
         .on_page()
@@ -1063,11 +1073,15 @@ fn members_prompt(page: &MembersPage, roles: &[ServerRole], join_method: bool) -
             let person = &member.person;
             let (role, role_color_, more_roles) = role_chip(&member.roles, roles);
             // Discord colours a name by its highest coloured role.
-            let name_color = roles
-                .iter()
-                .filter(|role| member.roles.contains(&role.id))
-                .find_map(|role| role.color.filter(|color| *color != 0))
-                .map_or(slint::Color::default(), role_color);
+            let name_color = if role_colors {
+                roles
+                    .iter()
+                    .filter(|role| member.roles.contains(&role.id))
+                    .find_map(|role| role.color.filter(|color| *color != 0))
+                    .map_or(slint::Color::default(), role_color)
+            } else {
+                slint::Color::default()
+            };
             let created = person
                 .id
                 .parse::<u64>()

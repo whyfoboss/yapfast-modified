@@ -1602,6 +1602,7 @@ fn in_call(id: &str, local: bool, streaming: bool) -> voice::Participant {
         streaming,
         video: None,
         avatar: None,
+        color: None,
     }
 }
 
@@ -2403,6 +2404,7 @@ fn streams_sound_as_others_start_and_stop_watching() {
         streaming: false,
         video: None,
         avatar: None,
+        color: None,
     };
     let frames = std::sync::Arc::new(crate::frames::Frames::create(2, 2).unwrap());
     let call = |sharing: Option<&[&str]>, watching: Option<&[&str]>| voice::State {
@@ -2470,6 +2472,7 @@ fn others_going_live_and_ending_sounds_but_not_as_anyone_comes_or_goes_streaming
         streaming,
         video: None,
         avatar: None,
+        color: None,
     };
     let call = |me: bool, people: &[(&str, bool)]| voice::State {
         phase: Phase::Connected,
@@ -2529,6 +2532,7 @@ fn calls_sound_as_people_come_and_go_but_not_while_reconnecting_or_ringing() {
         streaming: false,
         video: None,
         avatar: None,
+        color: None,
     };
     let call = |phase: Phase, people: &[(&str, bool)]| voice::State {
         phase,
@@ -3002,6 +3006,7 @@ fn asks_once_for_the_pictures_on_screen() {
                 user_id: member.into(),
                 name: member.into(),
                 avatar: format!("{member}.png"),
+                color: None,
                 muted: false,
                 deafened: false,
                 streaming: false,
@@ -4619,6 +4624,28 @@ fn a_one_to_one_dm_shows_its_persons_profile_beside_it() {
     assert!(!view.large && view.profile.name == "Ann");
     assert_eq!(view.profile.avatar.as_deref(), Some("ann.png"));
     assert!(
+        !view.server_context,
+        "friends opened from friend list are not in a server context"
+    );
+    assert_eq!(view.role_color, None);
+    app.apply(Event::Profile {
+        user: "7".into(),
+        result: Ok(Profile {
+            id: "7".into(),
+            name: "Ann".into(),
+            roles: vec![chat::ProfileRole {
+                name: "Admin".into(),
+                color: Some(0xff0000),
+            }],
+            ..Default::default()
+        }),
+    });
+    let view = app.state.profile.as_ref().unwrap();
+    assert_eq!(
+        view.role_color, None,
+        "a friend profile never adopts a server role colour"
+    );
+    assert!(
         app.dispatch(Action::ShowFriendProfile {
             user: "99".into(),
             large: true
@@ -4682,6 +4709,7 @@ fn discord_dm_calls_start_ring_and_are_answered() {
         user_id: id.into(),
         name: name.into(),
         avatar: format!("{id}.png"),
+        color: None,
         muted: false,
         deafened: false,
         streaming: false,
@@ -4774,6 +4802,7 @@ fn do_not_disturb_shows_a_call_without_notifying() {
         user_id: "2".into(),
         name: "Ann".into(),
         avatar: "2.png".into(),
+        color: None,
         muted: false,
         deafened: false,
         streaming: false,
@@ -4795,6 +4824,7 @@ fn do_not_disturb_shows_a_call_without_notifying() {
             ringing: vec![VoiceMember {
                 user_id: "1".into(),
                 name: "Me".into(),
+                color: None,
                 ..ann.clone()
             }],
             ..Default::default()

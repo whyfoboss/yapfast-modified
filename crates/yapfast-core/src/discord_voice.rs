@@ -1177,6 +1177,7 @@ fn discord_participants(
                 connected: true,
                 problem: None,
                 avatar: Some(member.avatar.clone()),
+                color: member.color,
                 streaming: member.streaming,
                 video,
             }
@@ -1207,6 +1208,7 @@ fn discord_participants(
                 connected: false,
                 problem: Some("Calling...".into()),
                 avatar: Some(member.avatar.clone()),
+                color: None,
                 streaming: false,
                 video: None,
             });

@@ -220,6 +220,8 @@ pub(super) struct SidebarShown {
     discord_online: bool,
     /// What the profile switches let DM rows show.
     cosmetics: yapfast_core::application::Cosmetics,
+    /// Whether server names show their role colour.
+    role_colors: bool,
 }
 
 impl SidebarShown {
@@ -237,6 +239,7 @@ impl SidebarShown {
             list_changes: state.list_changes,
             discord_online: state.discord_online,
             cosmetics: state.cosmetics,
+            role_colors: window.get_role_colors_everywhere(),
         }
     }
 
@@ -268,6 +271,7 @@ impl SidebarShown {
             && self.category_changes == state.category_changes
             && self.list_changes == state.list_changes
             && self.discord_online == state.discord_online
+            && self.role_colors == window.get_role_colors_everywhere()
             && self.lists == Self::lists(state)
     }
 }
@@ -797,6 +801,7 @@ impl Adapter {
         }
         self.sidebar = Some(SidebarShown::of(&self.app.state, window));
         let state = &self.app.state;
+        let role_colors = self.layout.role_colors_everywhere;
         let cosmetics = state.cosmetics;
         let query = window.get_filter().to_lowercase();
         window.set_sidebar_title(match &state.navigation {
@@ -1101,6 +1106,12 @@ impl Adapter {
                                 name: person.name.clone().into(),
                                 initial: initial(&person.name),
                                 tint: tint(&person.id),
+                                color: if role_colors {
+                                    role_color(person.color)
+                                } else {
+                                    Default::default()
+                                },
+                                has_color: role_colors && person.color.is_some(),
                                 picture: cached_picture(
                                     &mut self.pictures,
                                     state,
@@ -1292,7 +1303,12 @@ impl Adapter {
                     profile: yapfast_core::chat::Profile::clone(&own.profile),
                     ..Default::default()
                 };
-                profile_data(&mut self.pictures, state, &view)
+                profile_data_with_role_colors(
+                    &mut self.pictures,
+                    state,
+                    &view,
+                    self.layout.role_colors_everywhere,
+                )
             });
             window.set_account_profile(data);
         }
@@ -1438,9 +1454,10 @@ impl Adapter {
         let starter = form.message.as_deref().and_then(|item| state.message(item));
         window.set_new_thread_from_message(starter.is_some());
         if let Some(starter) = starter {
-            window.set_new_thread_starter(super::messages::found_row(
+            window.set_new_thread_starter(super::messages::found_row_with_role_colors(
                 starter,
                 self.layout.twelve_hour_clock,
+                self.layout.role_colors_everywhere,
             ));
         }
         window.set_new_thread_can_private(form.can_private);
@@ -1577,9 +1594,10 @@ impl Adapter {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |now| now.as_millis() as u64);
+        let role_colors = self.layout.role_colors_everywhere;
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
-        (&sections, found, now / 60_000).hash(&mut hasher);
+        (&sections, found, now / 60_000, role_colors).hash(&mut hasher);
         let shown = hasher.finish();
         if self.threads_shown == Some(shown) {
             return;
@@ -1588,7 +1606,11 @@ impl Adapter {
         let mut rows = Vec::new();
         match found {
             Some(Some(Ok(found))) => {
-                rows.extend(found.iter().map(|thread| thread_row(thread, now)));
+                rows.extend(
+                    found
+                        .iter()
+                        .map(|thread| thread_row(thread, now, role_colors)),
+                );
             }
             _ => {
                 let headed = [
@@ -1604,9 +1626,15 @@ impl Adapter {
                         1 => format!("1 {one}"),
                         count => format!("{count} {many}"),
                     };
-                    push_section(&mut rows, threads, heading.to_uppercase(), now);
+                    push_section(&mut rows, threads, heading.to_uppercase(), now, role_colors);
                 }
-                push_section(&mut rows, &sections.older, "OLDER THREADS".into(), now);
+                push_section(
+                    &mut rows,
+                    &sections.older,
+                    "OLDER THREADS".into(),
+                    now,
+                    role_colors,
+                );
             }
         }
         let headings = rows.iter().filter(|row| !row.heading.is_empty()).count();
@@ -1653,15 +1681,16 @@ impl Adapter {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |now| now.as_millis() as u64);
+        let role_colors = self.layout.role_colors_everywhere;
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
-        (&posts, room, now / 60_000).hash(&mut hasher);
+        (&posts, room, now / 60_000, role_colors).hash(&mut hasher);
         let shown = hasher.finish();
         if self.forum_shown == Some(shown) {
             return;
         }
         self.forum_shown = Some(shown);
-        let row = |post| post_row(post, &info, now);
+        let row = |post| post_row(post, &info, now, role_colors);
         let rows: Vec<PostRow> = match &posts.found {
             Some(Some(Ok(found))) => found.iter().map(row).collect(),
             _ => {
@@ -1715,7 +1744,11 @@ impl Adapter {
         {
             self.guidelines_shown = topic.cloned();
             window.set_post_guidelines(topic.map_or_else(slint::StyledText::default, |topic| {
-                super::messages::topic_text(topic, false)
+                super::messages::topic_text_with_role_colors(
+                    topic,
+                    false,
+                    self.layout.role_colors_everywhere,
+                )
             }));
         }
         window.set_posting(post.posting);
@@ -1865,7 +1898,7 @@ impl Adapter {
             self.topic_shown = topic.cloned();
             let styled = |one_line| {
                 topic.map_or_else(slint::StyledText::default, |topic| {
-                    topic_text(topic, one_line)
+                    topic_text_with_role_colors(topic, one_line, self.layout.role_colors_everywhere)
                 })
             };
             window.set_room_topic(styled(true));
@@ -1912,7 +1945,12 @@ impl Adapter {
             Some(Ok(pinned)) => pinned.as_slice(),
             _ => &[],
         };
-        show_found(&self.models.pins, pinned, twelve_hour);
+        show_found(
+            &self.models.pins,
+            pinned,
+            twelve_hour,
+            self.layout.role_colors_everywhere,
+        );
 
         let search = state.search_shown();
         let server = search.is_some_and(|search| discord::parse_server(&search.place).is_some());
@@ -1964,6 +2002,7 @@ impl Adapter {
             search.map_or(&[][..], |search| &search.results),
             server,
             twelve_hour,
+            self.layout.role_colors_everywhere,
         );
 
         let picker = state
@@ -2018,6 +2057,7 @@ impl Adapter {
     /// The member list, the reactions offered on messages, and a role's card.
     fn show_members(&mut self, window: &YapfastWindow) {
         let state = &self.app.state;
+        let role_colors = self.layout.role_colors_everywhere;
         let cosmetics = state.cosmetics;
         // In a server, names show their style's font alone.
         let in_server = name_style::in_server(state.selected.as_deref());
@@ -2033,7 +2073,7 @@ impl Adapter {
         update_model(
             &self.models.roster_activity,
             match in_channel {
-                Some(room) => activity_panel(state, &room.id, members, now),
+                Some(room) => activity_panel(state, &room.id, members, now, role_colors),
                 None => Vec::new(),
             },
         );
@@ -2114,8 +2154,12 @@ impl Adapter {
                             .unwrap_or_default()
                             .into(),
                         presence: presence_name(member.presence).into(),
-                        color: role_color(member.color),
-                        has_color: member.color.is_some(),
+                        color: if role_colors {
+                            role_color(member.color)
+                        } else {
+                            Default::default()
+                        },
+                        has_color: role_colors && member.color.is_some(),
                         // One line under the name, as Discord shows it.
                         activity,
                         activity_emoji,
@@ -2195,8 +2239,12 @@ impl Adapter {
                 tint: tint(&member.name),
                 picture: slint::Image::default(),
                 picture_url: member.avatar.as_deref().unwrap_or_default().into(),
-                color: role_color(member.color),
-                has_color: member.color.is_some(),
+                color: if role_colors {
+                    role_color(member.color)
+                } else {
+                    Default::default()
+                },
+                has_color: role_colors && member.color.is_some(),
                 ..Default::default()
             })
             .collect();
@@ -2789,7 +2837,12 @@ impl Adapter {
             note: None,
             ..Default::default()
         };
-        let mut preview = profile_data(&mut self.pictures, &self.app.state, &view);
+        let mut preview = profile_data_with_role_colors(
+            &mut self.pictures,
+            &self.app.state,
+            &view,
+            self.layout.role_colors_everywhere,
+        );
         // Someone's own card offers them nothing.
         preview.friend = 0;
         // The tabs' lists stay as they are unless they changed, so a card
@@ -3452,6 +3505,7 @@ impl Adapter {
             restyle: std::mem::take(&mut self.aside_restyle),
             decorations: self.layout.cosmetics().decorations,
         };
+        let role_colors = self.layout.role_colors_everywhere;
         let layout = &self.layout;
         let in_server = name_style::in_server(Some(room));
         show_timeline(
@@ -3463,7 +3517,12 @@ impl Adapter {
             |message| {
                 let mut row = layout.restyle(
                     message,
-                    message_row_within(message, marks.revealed, Some(fit)),
+                    message_row_within_with_role_colors(
+                        message,
+                        marks.revealed,
+                        Some(fit),
+                        role_colors,
+                    ),
                 );
                 // In a server, an author's name shows its style's font alone.
                 row.name_style = name_style::font_only_in(in_server, row.name_style);
@@ -3496,6 +3555,7 @@ impl Adapter {
             found: state.found_members.len(),
             groups: state.mention_groups.len(),
             color: theme::mention_color(),
+            role_colors: self.layout.role_colors_everywhere,
         };
         if self.mentions_marked[slot]
             .as_ref()
@@ -3516,7 +3576,11 @@ impl Adapter {
             slot,
             marked.draft.as_str().into(),
             marks.into_iter().map(|(range, color)| {
-                let rgb = color.unwrap_or(sources.color) & 0xff_ffff;
+                let rgb = if sources.role_colors {
+                    color.unwrap_or(sources.color)
+                } else {
+                    sources.color
+                } & 0xff_ffff;
                 (range, slint::Color::from_argb_encoded(0xff00_0000 | rgb))
             }),
         );
@@ -3586,6 +3650,7 @@ impl Adapter {
         window.set_sending(state.sending.is_some());
         window.set_typing(state.typing_line().into());
         let suggestions = state.mention_suggestions();
+        let role_colors = self.layout.role_colors_everywhere;
         let mentions: Vec<MentionRow> = suggestions
             .iter()
             .enumerate()
@@ -3606,8 +3671,12 @@ impl Adapter {
                     initial: initial(&candidate.name),
                     tint: tint(&candidate.name),
                     picture: cached_picture(&mut self.pictures, state, candidate.avatar.as_deref()),
-                    color: role_color(candidate.color),
-                    has_color: candidate.color.is_some(),
+                    color: if role_colors || candidate.group {
+                        role_color(candidate.color)
+                    } else {
+                        Default::default()
+                    },
+                    has_color: (role_colors || candidate.group) && candidate.color.is_some(),
                     group: candidate.group,
                     detail: match candidate.mention.as_str() {
                         "@everyone" => "Everyone in this channel".into(),
@@ -3799,6 +3868,7 @@ impl Adapter {
                 restyle,
                 decorations: self.layout.cosmetics().decorations,
             };
+            let role_colors = self.layout.role_colors_everywhere;
             let layout = &self.layout;
             let in_server = name_style::in_server(state.selected.as_deref());
             show_timeline(
@@ -3808,7 +3878,10 @@ impl Adapter {
                 &state.messages,
                 &marks,
                 |message| {
-                    let mut row = layout.restyle(message, message_row(message, marks.revealed));
+                    let mut row = layout.restyle(
+                        message,
+                        message_row_with_role_colors(message, marks.revealed, role_colors),
+                    );
                     // In a server, an author's name shows its style's font alone.
                     row.name_style = name_style::font_only_in(in_server, row.name_style);
                     row
@@ -3932,6 +4005,7 @@ impl Adapter {
     /// ringing, and the devices.
     fn show_voice(&mut self, window: &YapfastWindow) {
         self.ring();
+        let role_colors = self.layout.role_colors_everywhere;
         // The server of a call shows it on the rail, so the rail follows a
         // call that starts, ends or moves; other voice events leave it be.
         let state = &self.app.state;
@@ -4115,6 +4189,12 @@ impl Adapter {
                 name: person.name.as_str().into(),
                 initial: initial(&person.name),
                 tint: tint(&person.id),
+                color: if role_colors {
+                    role_color(person.color)
+                } else {
+                    Default::default()
+                },
+                has_color: role_colors && person.color.is_some(),
                 picture: cached_picture(&mut self.pictures, state, person.avatar.as_deref()),
                 connected: true,
                 ..Default::default()
@@ -4174,6 +4254,12 @@ impl Adapter {
                         } else {
                             &person.user
                         })),
+                        color: if role_colors {
+                            role_color(person.color)
+                        } else {
+                            Default::default()
+                        },
+                        has_color: role_colors && person.color.is_some(),
                         speaking: person.speaking && !person.muted && person.connected,
                         connected: person.connected,
                         status: if let Some(problem) = &person.problem {
@@ -4456,7 +4542,12 @@ impl Adapter {
         window.set_profile_open(state.profile.is_some());
         window.set_panel_profile_shown(state.panel_profile.is_some());
         if let Some(view) = &state.panel_profile {
-            let mut data = profile_data(&mut self.pictures, state, view);
+            let mut data = profile_data_with_role_colors(
+                &mut self.pictures,
+                state,
+                view,
+                self.layout.role_colors_everywhere,
+            );
             // The DM list keeps up with whether they're around; the profile
             // was as it was when it opened.
             if let Some(room) = state.selected_room() {
@@ -4488,7 +4579,12 @@ impl Adapter {
         } else {
             view.profile.id.clone().into()
         });
-        let data = profile_data(&mut self.pictures, state, view);
+        let data = profile_data_with_role_colors(
+            &mut self.pictures,
+            state,
+            view,
+            self.layout.role_colors_everywhere,
+        );
         if let Some(data) = changed_profile(&window.get_profile(), data) {
             window.set_profile(data);
         }
@@ -5056,7 +5152,12 @@ fn permission_names(bits: u64) -> String {
 
 /// Shows found messages, building rows only for those not shown already:
 /// a search's next page adds to the end of the results.
-fn show_found(model: &VecModel<FoundRow>, messages: &[ChatMessage], twelve_hour: bool) {
+fn show_found(
+    model: &VecModel<FoundRow>,
+    messages: &[ChatMessage],
+    twelve_hour: bool,
+    role_colors: bool,
+) {
     let kept = model
         .iter()
         .zip(messages)
@@ -5066,7 +5167,11 @@ fn show_found(model: &VecModel<FoundRow>, messages: &[ChatMessage], twelve_hour:
         model.remove(model.row_count() - 1);
     }
     for message in &messages[kept..] {
-        model.push(found_row(message, twelve_hour));
+        model.push(found_row_with_role_colors(
+            message,
+            twelve_hour,
+            role_colors,
+        ));
     }
 }
 
@@ -5093,6 +5198,7 @@ fn show_hits(
     hits: &[yapfast_core::chat::SearchHit],
     server: bool,
     twelve_hour: bool,
+    role_colors: bool,
 ) {
     let kept = model
         .iter()
@@ -5114,7 +5220,7 @@ fn show_hits(
         model.push(FoundRow {
             room: hit.room.as_str().into(),
             heading: heading.into(),
-            ..found_row(&hit.message, twelve_hour)
+            ..found_row_with_role_colors(&hit.message, twelve_hour, role_colors)
         });
     }
 }
@@ -5169,9 +5275,10 @@ fn push_section(
     threads: &[yapfast_core::chat::ListedThread],
     heading: String,
     now: u64,
+    role_colors: bool,
 ) {
     for (index, thread) in threads.iter().enumerate() {
-        let mut row = thread_row(thread, now);
+        let mut row = thread_row(thread, now, role_colors);
         if index == 0 {
             row.heading = heading.clone().into();
         }
@@ -5181,7 +5288,7 @@ fn push_section(
 
 /// A thread as its list shows it: an active one with its newest message,
 /// an archived one with who started it, as Discord's client does.
-fn thread_row(thread: &yapfast_core::chat::ListedThread, now: u64) -> ThreadRow {
+fn thread_row(thread: &yapfast_core::chat::ListedThread, now: u64, role_colors: bool) -> ThreadRow {
     let ago = ago(thread.active_ms, now);
     let (person, lead, text, time) = match (&thread.recent, &thread.owner, thread.archived) {
         (Some(recent), _, false) => (Some(&recent.author), "", recent.text.as_str(), ago),
@@ -5199,8 +5306,12 @@ fn thread_row(thread: &yapfast_core::chat::ListedThread, now: u64) -> ThreadRow 
         initial: person.map_or(SharedString::default(), |person| initial(&person.name)),
         tint: person.map_or(slint::Color::default(), |person| tint(&person.name)),
         picture_url: person.map_or("", |person| person.avatar.as_str()).into(),
-        color: role_color(person.and_then(|person| person.color)),
-        has_color: person.is_some_and(|person| person.color.is_some()),
+        color: if role_colors {
+            role_color(person.and_then(|person| person.color))
+        } else {
+            Default::default()
+        },
+        has_color: role_colors && person.is_some_and(|person| person.color.is_some()),
         lead: lead.into(),
         text: text.into(),
         time: time.into(),
@@ -5240,6 +5351,7 @@ fn post_row(
     post: &yapfast_core::application::ForumPost,
     info: &yapfast_core::application::ForumInfo,
     now: u64,
+    role_colors: bool,
 ) -> PostRow {
     const TAGS: usize = 3;
     let thread = &post.thread;
@@ -5284,8 +5396,12 @@ fn post_row(
             more => format!("+{more}").into(),
         },
         person: person.map_or("", |person| person.name.as_str()).into(),
-        color: role_color(person.and_then(|person| person.color)),
-        has_color: person.is_some_and(|person| person.color.is_some()),
+        color: if role_colors {
+            role_color(person.and_then(|person| person.color))
+        } else {
+            Default::default()
+        },
+        has_color: role_colors && person.is_some_and(|person| person.color.is_some()),
         text: text.into(),
         has_reaction: reaction.is_some(),
         reaction_count: reaction
@@ -5416,6 +5532,7 @@ struct MentionSources {
     found: usize,
     groups: usize,
     color: u32,
+    role_colors: bool,
 }
 
 /// A soundboard's groups as its rows show them: each group's heading, then

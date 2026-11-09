@@ -211,8 +211,22 @@ pub(super) fn markdown(body: &str) -> slint::StyledText {
 /// HTML is escaped, so the only HTML left is the mentions' own. The
 /// mentions are where the body as rendered has them, so this comes before
 /// anything else changes it.
-fn with_mentions(body: &str, mentions: &[yapfast_core::mention::Mentioned]) -> String {
-    mention::linked(body, mentions, theme::mention_color())
+fn with_mentions(
+    body: &str,
+    mentions: &[yapfast_core::mention::Mentioned],
+    role_colors: bool,
+) -> String {
+    if role_colors {
+        return mention::linked(body, mentions, theme::mention_color());
+    }
+    let plain: Vec<_> = mentions
+        .iter()
+        .map(|mention| yapfast_core::mention::Mentioned {
+            color: None,
+            ..mention.clone()
+        })
+        .collect();
+    mention::linked(body, &plain, theme::mention_color())
 }
 
 /// Markdown as styled text, with web addresses linked. Slint's Markdown
@@ -326,6 +340,7 @@ pub(super) fn notice_text(
     message: &ChatMessage,
     notice: &yapfast_core::chat::Notice,
     time: &str,
+    role_colors: bool,
 ) -> slint::StyledText {
     use yapfast_core::chat::NoticeKind;
     let hex = |rgb: u32| format!("#{:06x}", rgb & 0xff_ffff);
@@ -341,7 +356,10 @@ pub(super) fn notice_text(
     let profile = (!sender.is_empty()).then(|| format!("{AUTHOR_LINK}{sender}"));
     let author = strong(
         &message.author,
-        message.color.unwrap_or_else(theme::text_color),
+        message
+            .color
+            .filter(|_| role_colors)
+            .unwrap_or_else(theme::text_color),
         profile.as_deref(),
     );
     let text = match &notice.kind {
@@ -462,16 +480,36 @@ pub(super) fn show_message(window: &YapfastWindow, index: usize, item: &str, lit
 /// A message as the timeline shows it. `revealed` holds the spoilers clicked, as
 /// `{item}/{index}` for text and `{item}/a{index}` for attachments, and what
 /// was picked or shown on polls; see `polls`.
+#[cfg(test)]
 pub(super) fn message_row(message: &ChatMessage, revealed: &HashSet<String>) -> MessageRow {
-    message_row_within(message, revealed, None)
+    message_row_with_role_colors(message, revealed, true)
+}
+
+/// [`message_row`] with role colours on or off.
+pub(super) fn message_row_with_role_colors(
+    message: &ChatMessage,
+    revealed: &HashSet<String>,
+    role_colors: bool,
+) -> MessageRow {
+    message_row_within_with_role_colors(message, revealed, None, role_colors)
 }
 
 /// [`message_row`] with its pictures, and its link previews', shrunk to fit
 /// `fit` pixels beside the avatar, as the narrow thread beside a channel has.
+#[cfg(test)]
 pub(super) fn message_row_within(
     message: &ChatMessage,
     revealed: &HashSet<String>,
     fit: Option<i32>,
+) -> MessageRow {
+    message_row_within_with_role_colors(message, revealed, fit, true)
+}
+
+pub(super) fn message_row_within_with_role_colors(
+    message: &ChatMessage,
+    revealed: &HashSet<String>,
+    fit: Option<i32>,
+    role_colors: bool,
 ) -> MessageRow {
     let laid_out =
         |previews: &[Preview<'_>], covered: &dyn Fn(usize) -> bool, room: Option<i32>| match room {
@@ -483,7 +521,7 @@ pub(super) fn message_row_within(
     // Custom emoji show as their glyphs once they have them, and clicking any
     // emoji, custom or Unicode, opens its card.
     let mentioned = if message.formatted {
-        with_mentions(&message.body, &message.mentions)
+        with_mentions(&message.body, &message.mentions, role_colors)
     } else {
         String::new()
     };
@@ -491,14 +529,14 @@ pub(super) fn message_row_within(
     let jumbo = message.formatted && custom_emoji::only_emoji(&glyphs);
     // Headings, quotes and code each show apart; text alone shows as one.
     let blocks = if message.formatted && message.notice.is_none() {
-        body_blocks(message, Some(revealed))
+        body_blocks(message, Some(revealed), role_colors)
     } else {
         None
     };
     let styled = if blocks.is_some() {
         slint::StyledText::default()
     } else if let Some(notice) = &message.notice {
-        notice_text(message, notice, &message.time)
+        notice_text(message, notice, &message.time, role_colors)
     } else if message.formatted {
         let carded = emoji_text::linked(&custom_emoji::linked(&mentioned, &message.emoji));
         if message.spoilers {
@@ -684,8 +722,12 @@ pub(super) fn message_row_within(
         sender: discord::sender_user(&message.sender)
             .unwrap_or(&message.sender)
             .into(),
-        color: role_color(message.color),
-        has_color: message.color.is_some(),
+        color: if role_colors {
+            role_color(message.color)
+        } else {
+            Default::default()
+        },
+        has_color: role_colors && message.color.is_some(),
         bot: message.bot,
         initial: initial(&message.author),
         tint: tint(&message.author),
@@ -720,11 +762,16 @@ pub(super) fn message_row_within(
         reply_author: reply_author.into(),
         reply_initial: initial(reply_author),
         reply_tint: tint(reply_author),
-        reply_color: role_color(message.reply.as_ref().and_then(|reply| reply.color)),
-        reply_has_color: message
-            .reply
-            .as_ref()
-            .is_some_and(|reply| reply.color.is_some()),
+        reply_color: if role_colors {
+            role_color(message.reply.as_ref().and_then(|reply| reply.color))
+        } else {
+            Default::default()
+        },
+        reply_has_color: role_colors
+            && message
+                .reply
+                .as_ref()
+                .is_some_and(|reply| reply.color.is_some()),
         // Virtualized avatars resolve their URLs when their components are built.
         reply_picture: slint::Image::default(),
         reply_body: message
@@ -977,6 +1024,7 @@ pub(super) fn markdown_blocks(markdown: &str) -> ModelRc<TextBlock> {
 fn body_blocks(
     message: &ChatMessage,
     revealed: Option<&HashSet<String>>,
+    role_colors: bool,
 ) -> Option<Vec<TextBlock>> {
     let mut spoilers = 0;
     blocks_of(&message.body, |block, text| {
@@ -995,7 +1043,8 @@ fn body_blocks(
                 })
             })
             .collect();
-        let linked = custom_emoji::linked(&with_mentions(text, &mentions), &message.emoji);
+        let linked =
+            custom_emoji::linked(&with_mentions(text, &mentions, role_colors), &message.emoji);
         let Some(revealed) = revealed else {
             return emoji_text::text(&spoiler::hide(&linked));
         };
@@ -1134,16 +1183,25 @@ const FOUND_GALLERY_WIDTH: i32 = 300;
 /// A pinned message or a search result as its card shows it, stamped as the
 /// timeline stamps it on the chosen clock, its spoilers hidden, its first
 /// pictures shown and its other files named.
+#[cfg(test)]
 pub(super) fn found_row(message: &ChatMessage, twelve_hour: bool) -> FoundRow {
+    found_row_with_role_colors(message, twelve_hour, true)
+}
+
+pub(super) fn found_row_with_role_colors(
+    message: &ChatMessage,
+    twelve_hour: bool,
+    role_colors: bool,
+) -> FoundRow {
     let blocks = if message.formatted {
-        body_blocks(message, None)
+        body_blocks(message, None, role_colors)
     } else {
         None
     };
     let styled = if blocks.is_some() {
         slint::StyledText::default()
     } else if message.formatted {
-        let linked = with_mentions(&message.body, &message.mentions);
+        let linked = with_mentions(&message.body, &message.mentions, role_colors);
         styled(&emoji_text::text(&spoiler::hide(&custom_emoji::text(
             &linked,
             &message.emoji,
@@ -1184,8 +1242,12 @@ pub(super) fn found_row(message: &ChatMessage, twelve_hour: bool) -> FoundRow {
         initial: initial(&message.author),
         tint: tint(&message.author),
         picture_url: message.avatar.clone().unwrap_or_default().into(),
-        color: role_color(message.color),
-        has_color: message.color.is_some(),
+        color: if role_colors {
+            role_color(message.color)
+        } else {
+            Default::default()
+        },
+        has_color: role_colors && message.color.is_some(),
         when: if message.timestamp == 0 {
             SharedString::default()
         } else {
@@ -1222,8 +1284,12 @@ pub(super) fn found_row(message: &ChatMessage, twelve_hour: bool) -> FoundRow {
 
 /// A Discord channel's topic, as its header shows it: on one line, or in
 /// full.
-pub(super) fn topic_text(topic: &yapfast_core::chat::Topic, one_line: bool) -> slint::StyledText {
-    let linked = with_mentions(&topic.body, &topic.mentions);
+pub(super) fn topic_text_with_role_colors(
+    topic: &yapfast_core::chat::Topic,
+    one_line: bool,
+    role_colors: bool,
+) -> slint::StyledText {
+    let linked = with_mentions(&topic.body, &topic.mentions, role_colors);
     let body = custom_emoji::text(&linked, &topic.emoji);
     let body = emoji_text::text(&body);
     let body = if one_line {

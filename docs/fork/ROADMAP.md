@@ -55,18 +55,20 @@ Goal: role colour on every name surface, and toggles that actually change it,
 plus the message-logger and animation controls from the same settings area.
 
 Today: the core keeps `ChatMember.color` (highest coloured role) and
-`ChatMember.roles`; messages, member lists, profile role rows and mention
-suggestions use it. `DiscordSettings` already owns per-device switches and
-writes `Layout`. Role colour is one flat colour; gradients and multiple role
-chips are not modelled.
+`ChatMember.roles`; `DiscordSettings` owns per-device switches and writes
+`Layout`. Role colour is one flat colour; gradients and multiple role chips
+are not modelled.
 
-Work: first decide the policy (keep the highest role colour, or draw a
-gradient when a role has colours). Apply it to the rail, voice participant
-rows, friends and request rows, search results, reply previews, mentions,
-profiles and the composer. Add a `Layout` field for the switch, a
-`DiscordSettings` row, a dispatch path, and apply it in `src/ui/refresh.rs`
-so no stale colour survives a toggle. Parse role gradient colours in the
-service if the policy needs them, with a fake member whose role has one.
+Done: `Layout::role_colors_everywhere` (default off) and the Discord
+settings' "Role colours everywhere" switch colour the highest role across
+server contexts: message and notice authors, replies, member and role-member
+lists, mention suggestions and the composer, search, threads, forums, voice
+participants, the Activity panel and profiles opened in a server. Names keep
+theme colours when off. Role badges, role management, permission screens and
+DM or global-friend lists are unchanged.
+
+Work: apply the same policy to friend and request rows if that scope is
+wanted, and parse role gradients in the service if the policy needs them.
 
 Message logger and better animations are separate sub-items; keep them in
 their own commits. A logger needs a bounded local store (the current cache is

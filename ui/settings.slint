@@ -1453,6 +1453,7 @@ export component DiscordSettings inherits VerticalLayout {
     in property <bool> sync-discord-reads;
     in property <bool> show-idle;
     in property <bool> hide-blocked;
+    in property <bool> role-colors-everywhere;
     /// Those the account blocked, by name.
     in property <[BlockedRow]> blocked;
     callback unlink-discord;
@@ -1464,6 +1465,7 @@ export component DiscordSettings inherits VerticalLayout {
     callback show-hidden-channels-toggled(bool);
     callback sync-discord-reads-toggled(bool);
     callback show-idle-toggled(bool);
+    callback role-colors-everywhere-toggled(bool);
     spacing: 16px;
     SettingsTitle { text: "Discord"; }
     if root.matrix-build: HorizontalLayout {
@@ -1491,6 +1493,12 @@ export component DiscordSettings inherits VerticalLayout {
         description: "After 10 minutes without using Yapfast, as in Discord. Either way, your phone gets notifications while you're away.";
         checked: root.show-idle;
         toggled(shown) => { root.show-idle-toggled(shown); }
+    }
+    SettingsSwitch {
+        text: "Role colours everywhere";
+        description: "Use each member's highest role colour for their name in servers: messages, member lists, mentions, replies, search, voice and profiles.";
+        checked: root.role-colors-everywhere;
+        toggled(on) => { root.role-colors-everywhere-toggled(on); }
     }
     SettingsSwitch {
         text: "Hide messages from people you blocked";

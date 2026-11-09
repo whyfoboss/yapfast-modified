@@ -314,6 +314,7 @@ impl Application {
                             connected: true,
                             problem: None,
                             avatar: None,
+                            color: None,
                             streaming: false,
                             video: None,
                         }],

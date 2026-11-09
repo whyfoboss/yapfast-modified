@@ -247,6 +247,7 @@ mod tests {
             streaming,
             video: filming.then(yapfast_core::picture::Feed::new),
             avatar: None,
+            color: None,
         }
     }
 

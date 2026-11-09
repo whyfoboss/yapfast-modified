@@ -434,9 +434,18 @@ Yapfast is back, rather than showing an error.
   another, with one request for an original at a time; if Discord doesn't
   answer, the line says it couldn't be loaded and still jumps there, and asks
   again the next time the channel opens.
-  In Discord's style the quote reads "@Name" in the author's role colour
-  (`Reply.color`, from the member's roles when the original is known), in
-  regular weight, before 13px text in the secondary colour.
+  The quote reads "@Name" in the author's role colour (`Reply.color`, from
+  the member's roles when the original is known), in regular weight, before
+  13px text in the secondary colour. With the role-colour setting below on,
+  it shows so in both styles; otherwise it keeps the secondary colour.
+- Discord settings' "Role colours everywhere" switch, off by default, gives
+  server usernames their highest coloured role's colour everywhere Discord's
+  server context reaches: message and notice authors, replies, member lists,
+  mention suggestions and the composer, search results, threads, forums,
+  voice participants, the Activity panel and profile cards. With it off they
+  keep the theme's normal text colours. A profile only takes a role colour
+  when it was opened in a server; DMs and the friends list never do. Role
+  badges, role management and permission screens keep their own colours.
 - A picture in a message sits straight on the message background: a
   transparent PNG or GIF shows no backdrop, as in Discord. Only the
   loading skeleton draws a fill.

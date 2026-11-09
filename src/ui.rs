@@ -1179,6 +1179,9 @@ struct Layout {
     game_executables: Vec<(String, String)>,
     /// Messages from people this account blocked don't show at all.
     hide_blocked: bool,
+    /// Server usernames take their highest role's colour, rather than the
+    /// theme's text colour.
+    role_colors_everywhere: bool,
     /// A call from someone's menu starts without asking first.
     skip_call_prompt: bool,
     /// The member list's Activity panel shows only its header.
@@ -1507,6 +1510,7 @@ impl Layout {
         self.apply_custom_games(window);
         window.set_show_idle(self.show_idle.unwrap_or(true));
         window.set_hide_blocked(self.hide_blocked);
+        window.set_role_colors_everywhere(self.role_colors_everywhere);
         window.set_skip_call_prompt(self.skip_call_prompt);
         window.set_activity_cards_hidden(self.activity_cards_hidden);
         window.set_flash_taskbar(self.flash_taskbar.unwrap_or(true));
@@ -1617,7 +1621,7 @@ impl Layout {
             if let Some(notice) = &message.notice
                 && !message.blocked
             {
-                row.styled = notice_text(message, notice, &sent);
+                row.styled = notice_text(message, notice, &sent, self.role_colors_everywhere);
             }
             row.time_styled = slint::StyledText::from_plain_text(&sent);
             row.time = sent.into();

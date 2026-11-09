@@ -2426,7 +2426,7 @@ export component MessageContent inherits VerticalLayout {
                     if message.reply-author != "": Text {
                         // Discord quotes "@Name" in the author's role colour, regular weight.
                         text: ClientStyle.enabled ? "@" + message.reply-author : message.reply-author;
-                        color: ClientStyle.enabled && message.reply-has-color ? message.reply-color : Theme.secondary;
+                        color: message.reply-has-color ? message.reply-color : Theme.secondary;
                         font-size: 14px; font-weight: ClientStyle.enabled ? 400 : 700; vertical-alignment: center;
                     }
                     Text {

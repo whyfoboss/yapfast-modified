@@ -64,8 +64,9 @@ errors make it taller than the minimum window. SSO and OAuth are still pending.
   other person's profile there instead, which the person icon in its header
   hides or shows. A Discord text channel
   lists whoever can read it, grouped as in Discord: under hoisted roles, then
-  ONLINE and OFFLINE, with counts, avatars, status dots, role colours,
-  custom statuses, and a red clock beside someone timed out. An app has an APP
+  ONLINE and OFFLINE, with counts, avatars, status dots, role colours when
+  the "Role colours everywhere" Discord setting is on, custom statuses, and a
+  red clock beside someone timed out. An app has an APP
   tag after its name and the server's owner a crown, in that order, as in
   Discord. Above a server channel's list, an Activity panel shows Discord's
   feed of what people there are doing and did lately; see

@@ -200,10 +200,16 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
 - Member data: `ChatMember` (`crates/yapfast-core/src/chat.rs:1033`) has
   `color` (highest coloured role, `:1061`), `roles: Arc<[String]>` (`:1068`),
   `role_icon`, and profile `roles: Vec<ProfileRole>` (`:861`).
-- Role colour is already used in messages, member lists, profile role rows,
-  and mention suggestions. It is not a gradient and does not show every role;
-  "role colour everywhere" needs a policy for multiple colours and applies at
-  each render site, not one global switch.
+- Role colour is one flat colour: the highest coloured role's, as
+  `ChatMember.color` and `Server::color` give it; gradients and every role's
+  chips are still not modelled. The per-device "Role colours everywhere"
+  switch in `DiscordSettings` (`Layout::role_colors_everywhere`) turns those
+  names' colours on across server contexts: messages, notices, replies,
+  member and role-member lists, mentions and the composer, search, threads,
+  forums, voice, the Activity panel and profile cards opened in a server. It
+  is off by default, then names keep their theme colours. Role badges, role
+  management, permission screens and DM or global-friend lists stay as they
+  are.
 
 ## 9. Gateway message delete/update/bulk delete
 

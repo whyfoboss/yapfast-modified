@@ -363,6 +363,11 @@ pub struct Viewer {
 pub struct ProfileView {
     pub profile: Profile,
     pub large: bool,
+    /// The role colour of this server's member, when this profile was opened
+    /// from a server.
+    pub role_color: Option<u32>,
+    /// This profile was opened in a server, so its role colour may show.
+    pub server_context: bool,
     /// The rest of a Discord profile is on its way.
     pub loading: bool,
     /// It shows the profile Yapfast kept from before while Discord's comes.

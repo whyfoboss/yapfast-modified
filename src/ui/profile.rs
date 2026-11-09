@@ -55,6 +55,7 @@ pub(super) fn activity_panel(
     room: &str,
     members: &[yapfast_core::chat::ChatMember],
     now_ms: u64,
+    role_colors: bool,
 ) -> Vec<MemberActivityRow> {
     use yapfast_core::{
         chat::{ActivityKind, FeedEntry, Presence},
@@ -89,9 +90,8 @@ pub(super) fn activity_panel(
         .filter_map(|entry| {
             let person = people.iter().find(|person| person.id == entry.author)?;
             let live = entry.live_at(now_ms);
-            let member = live
-                .then(|| members.iter().find(|member| *member.id == *entry.author))
-                .flatten();
+            let roster_member = members.iter().find(|member| *member.id == *entry.author);
+            let member = live.then_some(roster_member).flatten();
             // Discord's client leaves out what someone offline "is" doing.
             if member.is_some_and(|member| member.presence == Some(Presence::Offline)) {
                 return None;
@@ -123,6 +123,13 @@ pub(super) fn activity_panel(
                 name: (*person.name).into(),
                 initial: initial(&person.name),
                 tint: tint(&person.name),
+                color: if role_colors {
+                    role_color(roster_member.and_then(|member| member.color))
+                } else {
+                    Default::default()
+                },
+                has_color: role_colors
+                    && roster_member.is_some_and(|member| member.color.is_some()),
                 picture_url: (*person.avatar).into(),
                 icon: match entry.kind {
                     Kind::Game | Kind::Launched => 1,
@@ -166,6 +173,7 @@ pub(super) fn activity_panel(
     _room: &str,
     _members: &[yapfast_core::chat::ChatMember],
     _now_ms: u64,
+    _role_colors: bool,
 ) -> Vec<MemberActivityRow> {
     Vec::new()
 }
@@ -490,10 +498,20 @@ fn effect_layers(effect: &yapfast_core::chat::ProfileEffect) -> Vec<EffectLayer>
 }
 
 /// A profile as a card, the full profile or the DM panel shows it.
+#[cfg(test)]
 pub(super) fn profile_data(
     pictures: &mut HashMap<String, slint::Image>,
     state: &AppState,
     view: &ProfileView,
+) -> ProfileData {
+    profile_data_with_role_colors(pictures, state, view, true)
+}
+
+pub(super) fn profile_data_with_role_colors(
+    pictures: &mut HashMap<String, slint::Image>,
+    state: &AppState,
+    view: &ProfileView,
+    role_colors: bool,
 ) -> ProfileData {
     let profile = &view.profile;
     // Emoji in the bio whose pictures are here become glyphs now, so the
@@ -555,6 +573,11 @@ pub(super) fn profile_data(
         has_theme: profile.theme.is_some(),
         id: profile.id.clone().into(),
         name: profile.name.clone().into(),
+        name_color: role_color(
+            view.role_color
+                .filter(|_| role_colors && view.server_context),
+        ),
+        name_has_color: role_colors && view.server_context && view.role_color.is_some(),
         initial: initial(&profile.name),
         tint: tint(&profile.name),
         picture: avatar.clone(),

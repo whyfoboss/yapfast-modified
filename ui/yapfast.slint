@@ -434,6 +434,9 @@ export component YapfastWindow inherits Window {
     callback remove-game-executable(int);
     in-out property <bool> hide-blocked;
     callback hide-blocked-toggled(bool);
+    /// Server usernames show their highest role's colour.
+    in-out property <bool> role-colors-everywhere;
+    callback role-colors-everywhere-toggled(bool);
     /// A call from someone's menu starts without asking first; Yapfast stores it.
     in-out property <bool> skip-call-prompt;
     callback skip-call-prompt-toggled(bool);
@@ -4036,6 +4039,8 @@ export component YapfastWindow inherits Window {
             show-idle-toggled(shown) => { root.show-idle = shown; root.show-idle-toggled(shown); }
             hide-blocked: root.hide-blocked;
             hide-blocked-toggled(hide) => { root.hide-blocked = hide; root.hide-blocked-toggled(hide); }
+            role-colors-everywhere: root.role-colors-everywhere;
+            role-colors-everywhere-toggled(on) => { root.role-colors-everywhere = on; root.role-colors-everywhere-toggled(on); }
             blocked: root.blocked-people;
             unblock(id) => { root.unblock(id); }
             show-hidden-channels-toggled(shown) => { root.show-hidden-channels = shown; root.show-hidden-channels-toggled(shown); }

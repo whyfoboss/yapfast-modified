@@ -111,6 +111,18 @@ fn equal_lists_stay_so_rows_count_as_unchanged() {
     let state = yapfast_core::application::AppState::default();
     let mut pictures = HashMap::new();
     let shown = profile_data(&mut pictures, &state, &view);
+    assert!(!shown.name_has_color);
+    let mut server_view = view.clone();
+    server_view.server_context = true;
+    server_view.role_color = Some(0xff0000);
+    let server = profile_data_with_role_colors(&mut pictures, &state, &server_view, true);
+    assert!(server.name_has_color);
+    assert_eq!(
+        server.name_color,
+        slint::Color::from_rgb_u8(0xff, 0x00, 0x00)
+    );
+    let plain = profile_data_with_role_colors(&mut pictures, &state, &server_view, false);
+    assert!(!plain.name_has_color);
     let again = profile_data(&mut pictures, &state, &view);
     assert!(changed_profile(&shown, again).is_none());
     let mut renamed = view.clone();
@@ -2756,7 +2768,7 @@ fn the_activity_panel_shows_discords_feed_in_its_order_for_those_the_channel_may
     ]
     .into();
     state.activity_people = Some((room.clone(), ["7", "8", "9", "6"].map(person).into()));
-    let members = [
+    let mut members = [
         member(
             "7",
             Presence::DoNotDisturb,
@@ -2764,7 +2776,8 @@ fn the_activity_panel_shows_discords_feed_in_its_order_for_those_the_channel_may
         ),
         member("6", Presence::Offline, serde_json::json!([])),
     ];
-    let rows = activity_panel(&state, &room, &members, now);
+    members[0].color = Some(0x3498db);
+    let rows = activity_panel(&state, &room, &members, now, true);
     let shown: Vec<(&str, &str, &str)> = rows
         .iter()
         .map(|row| (row.name.as_str(), row.game.as_str(), row.since.as_str()))
@@ -2784,15 +2797,20 @@ fn the_activity_panel_shows_discords_feed_in_its_order_for_those_the_channel_may
     assert_eq!(rows[1].icon, 2);
     assert_eq!(rows[3].icon, 5);
     assert_eq!(rows[0].thumb_url, "discord-app-icon:42");
+    assert!(rows[0].has_color);
+    assert_eq!(rows[0].color, slint::Color::from_rgb_u8(0x34, 0x98, 0xdb));
+    let plain = activity_panel(&state, &room, &members, now, false);
+    assert!(!plain[0].has_color);
+    assert_eq!(plain[0].color, slint::Color::default());
 
     // Another channel of the server keeps them until its answer comes.
     assert_eq!(
-        activity_panel(&state, &room_id("1", "3"), &members, now).len(),
+        activity_panel(&state, &room_id("1", "3"), &members, now, true).len(),
         5
     );
-    assert!(activity_panel(&state, &room_id("4", "3"), &members, now).is_empty());
+    assert!(activity_panel(&state, &room_id("4", "3"), &members, now, true).is_empty());
     state.activity_people = None;
-    assert!(activity_panel(&state, &room, &members, now).is_empty());
+    assert!(activity_panel(&state, &room, &members, now, true).is_empty());
 }
 
 #[cfg(feature = "discord")]
@@ -2942,6 +2960,27 @@ fn the_nameplates_setting_is_remembered() {
     window.invoke_preferences_changed();
     assert_eq!(Layout::read(directory.path()).nameplates, Some(false));
     assert!(adapter.borrow().app.state.hide_nameplates);
+}
+
+#[test]
+fn role_colors_everywhere_is_remembered() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    assert!(!window.get_role_colors_everywhere());
+    assert!(!adapter.borrow().layout.role_colors_everywhere);
+    window.set_role_colors_everywhere(true);
+    window.invoke_role_colors_everywhere_toggled(true);
+    assert!(adapter.borrow().layout.role_colors_everywhere);
+    assert!(Layout::read(directory.path()).role_colors_everywhere);
+    assert!(window.get_role_colors_everywhere());
 }
 
 #[test]
@@ -6657,6 +6696,7 @@ fn members_and_invites_list_as_discords_pages_do() {
     mod_.timed_out_until = now + 3_660_000;
     {
         let mut adapter = adapter.borrow_mut();
+        adapter.layout.role_colors_everywhere = true;
         adapter.app.apply(Event::ServerSettingsLoaded {
             server: "discord:10".into(),
             section: SettingsSection::Members,
@@ -8312,6 +8352,184 @@ fn an_embed_shows_headings_and_code_in_its_description_and_fields() {
         ..row
     });
     assert_eq!(text, "Status\nall good\nPlain\njust text\nQuoted\nsaid");
+}
+
+#[test]
+fn role_colors_everywhere_switches_message_and_reply_colours() {
+    i_slint_backend_testing::init_no_event_loop();
+    let message = ChatMessage {
+        author: "Bob".into(),
+        color: Some(0x3498db),
+        reply: Some(yapfast_core::chat::Reply {
+            author: "Ann".into(),
+            avatar: None,
+            body: String::new(),
+            item: None,
+            color: Some(0x3498db),
+        }),
+        ..Default::default()
+    };
+    let on = message_row_with_role_colors(&message, &HashSet::new(), true);
+    assert!(on.has_color);
+    assert_eq!(on.color, slint::Color::from_rgb_u8(0x34, 0x98, 0xdb));
+    assert!(on.reply_has_color);
+    assert_eq!(on.reply_color, slint::Color::from_rgb_u8(0x34, 0x98, 0xdb));
+
+    let off = message_row_with_role_colors(&message, &HashSet::new(), false);
+    assert!(!off.has_color);
+    assert_eq!(off.color, slint::Color::default());
+    assert!(!off.reply_has_color);
+    assert_eq!(off.reply_color, slint::Color::default());
+
+    let found = found_row_with_role_colors(&message, false, false);
+    assert!(!found.has_color);
+    assert_eq!(found.color, slint::Color::default());
+
+    let notice = yapfast_core::chat::Notice {
+        kind: yapfast_core::chat::NoticeKind::Pinned(Some("1".into())),
+        text: "pinned a message.".into(),
+    };
+    let on_notice = notice_text(&message, &notice, "12:00", true);
+    let off_notice = notice_text(&message, &notice, "12:00", false);
+    assert_ne!(on_notice, off_notice);
+
+    let topic = yapfast_core::chat::Topic {
+        body: "Hello @Bob".into(),
+        mentions: vec![yapfast_core::mention::Mentioned {
+            text: "@Bob".into(),
+            target: yapfast_core::mention::Target::User("2".into()),
+            color: Some(0x3498db),
+            at: vec![6],
+        }],
+        emoji: Vec::new(),
+    };
+    let on_topic = topic_text_with_role_colors(&topic, false, true);
+    let off_topic = topic_text_with_role_colors(&topic, false, false);
+    assert_ne!(on_topic, off_topic);
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn role_colors_everywhere_switches_mention_suggestions_and_voice() {
+    let (window, adapter, _folder) = discord_server_window();
+    let mut adapter_mut = adapter.borrow_mut();
+    adapter_mut
+        .app
+        .dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    adapter_mut.action(&window, Action::SelectRoom("discord:10:11".into()));
+
+    let member = |id: &str, name: &str| yapfast_core::chat::ChatMember {
+        bot: false,
+        id: id.into(),
+        name: name.into(),
+        username: None,
+        role: yapfast_core::chat::Role::Member,
+        avatar: None,
+        decoration: None,
+        nameplate: None,
+        style: None,
+        color: None,
+        roles: std::sync::Arc::from([]),
+        group: None,
+        group_icon: None,
+        role_icon: None,
+        presence: None,
+        activity: None,
+        activities: std::sync::Arc::from([]),
+        boosting_since: None,
+        tag: None,
+        timed_out_until: None,
+    };
+    adapter_mut.app.state.members = Some(Ok(vec![yapfast_core::chat::ChatMember {
+        color: Some(0x3498db),
+        ..member("2", "Bob")
+    }]));
+    adapter_mut.app.state.mention_groups = vec![yapfast_core::chat::MentionGroup {
+        mention: "@Mods".into(),
+        name: "Mods".into(),
+        color: Some(0xe74c3c),
+        channel: false,
+        voice: false,
+    }];
+    adapter_mut
+        .app
+        .dispatch(Action::MentionQuery(Some(('@', "".into()))));
+
+    // Default is role_colors_everywhere == false
+    assert!(!adapter_mut.layout.role_colors_everywhere);
+    adapter_mut.show_composer(&window);
+    let mentions: Vec<_> = adapter_mut.models.mentions.iter().collect();
+    let bob = mentions.iter().find(|m| m.name == "Bob").unwrap();
+    assert!(
+        !bob.has_color,
+        "Bob username should not have role colour when OFF"
+    );
+    assert_eq!(bob.color, slint::Color::default());
+
+    let mods = mentions.iter().find(|m| m.name == "Mods").unwrap();
+    assert!(
+        mods.has_color,
+        "Mods role badge should remain coloured when OFF"
+    );
+    assert_eq!(mods.color, slint::Color::from_rgb_u8(0xe7, 0x4c, 0x3c));
+
+    // Turn ON
+    adapter_mut.layout.role_colors_everywhere = true;
+    adapter_mut.show_composer(&window);
+    let mentions_on: Vec<_> = adapter_mut.models.mentions.iter().collect();
+    let bob_on = mentions_on.iter().find(|m| m.name == "Bob").unwrap();
+    assert!(
+        bob_on.has_color,
+        "Bob username should have role colour when ON"
+    );
+    assert_eq!(bob_on.color, slint::Color::from_rgb_u8(0x34, 0x98, 0xdb));
+
+    let mods_on = mentions_on.iter().find(|m| m.name == "Mods").unwrap();
+    assert!(
+        mods_on.has_color,
+        "Mods role badge should remain coloured when ON"
+    );
+    assert_eq!(mods_on.color, slint::Color::from_rgb_u8(0xe7, 0x4c, 0x3c));
+
+    // Test voice participants
+    adapter_mut.app.state.voice = yapfast_core::voice::State {
+        phase: yapfast_core::voice::Phase::Connected,
+        room: Some("discord:10:14".into()),
+        participants: vec![yapfast_core::voice::Participant {
+            id: "2".into(),
+            person: "2".into(),
+            user: "Bob".into(),
+            color: Some(0x3498db),
+            connected: true,
+            speaking: false,
+            local: false,
+            muted: false,
+            deafened: false,
+            server_muted: false,
+            server_deafened: false,
+            streaming: false,
+            video: None,
+            avatar: None,
+            problem: None,
+        }],
+        ..Default::default()
+    };
+    adapter_mut.refresh(&window);
+    let participants: Vec<_> = adapter_mut.models.participants.iter().collect();
+    assert_eq!(participants.len(), 1);
+    assert!(participants[0].has_color);
+    assert_eq!(
+        participants[0].color,
+        slint::Color::from_rgb_u8(0x34, 0x98, 0xdb)
+    );
+
+    // Turn OFF and check voice participant
+    adapter_mut.layout.role_colors_everywhere = false;
+    adapter_mut.refresh(&window);
+    let participants_off: Vec<_> = adapter_mut.models.participants.iter().collect();
+    assert_eq!(participants_off.len(), 1);
+    assert!(!participants_off[0].has_color);
+    assert_eq!(participants_off[0].color, slint::Color::default());
 }
 
 #[test]

@@ -83,7 +83,7 @@ component ActivityPicture inherits Rectangle {
 
 /// A card in the panel above the member list, from Discord's activity feed.
 export struct MemberActivityRow {
-    id: string, name: string, initial: string, tint: color, picture-url: string,
+    id: string, name: string, color: color, has-color: bool, initial: string, tint: color, picture-url: string,
     /// The game, artist or show, the words about it, and its picture's address.
     game: string, since: string, thumb-url: string,
     /// The icon for its kind, as in StatusText.icon.
@@ -204,7 +204,7 @@ export component MemberPanel inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 6px; alignment: start;
                                 Middle { Avatar { size: 16px; initial: row.initial; tint: row.tint; picture-url: row.picture-url; } }
-                                Text { text: row.name; color: Theme.secondary; font-size: 14px; font-weight: 500; overflow: elide; vertical-alignment: center; }
+                                Text { text: row.name; color: row.has-color ? row.color : Theme.secondary; font-size: 14px; font-weight: 500; overflow: elide; vertical-alignment: center; }
                             }
                             Text { text: row.game; color: Theme.text; font-size: 14px; font-weight: 600; overflow: elide; }
                             HorizontalLayout {
@@ -397,7 +397,7 @@ export struct ProfileWishlistRow { name: string, initial: string, url: string }
 export struct ProfileRecentRow { title: string, subtitle: string, url: string, initial: string, music: bool, when: string }
 
 export struct ProfileData {
-    id: string, name: string, initial: string, tint: color, picture: image,
+    id: string, name: string, name-color: color, name-has-color: bool, initial: string, tint: color, picture: image,
     /// The address of the decoration around their avatar, and how their name
     /// is drawn.
     decoration-url: string, name-style: [NameStyleRow],
@@ -1043,14 +1043,14 @@ export component ProfileCard inherits Rectangle {
                             // Discord; the picture and the banner open the full
                             // profile.
                             if root.data.name-style.length == 0: TextInput {
-                                text: root.data.name; color: Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
+                                text: root.data.name; color: root.data.name-has-color ? root.data.name-color : Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
                                 read-only: true; single-line: true;
                                 selection-background-color: Theme.accent.with-alpha(0.35);
                                 selection-foreground-color: Theme.text;
                                 accessible-label: "Name";
                             }
                             if root.data.name-style.length > 0: StyledName {
-                                text: root.data.name; styles: root.data.name-style; ink: Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
+                                text: root.data.name; styles: root.data.name-style; ink: root.data.name-has-color ? root.data.name-color : Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
                                 if !root.large && !root.preview: TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.enlarge(); } }
                             }
                             if root.data.handle != "" || root.data.tag != "" || root.data.badges.length > 0: HorizontalLayout {

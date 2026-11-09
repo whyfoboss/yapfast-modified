@@ -2251,6 +2251,22 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     });
     let state = adapter.clone();
     let weak = window.as_weak();
+    window.on_role_colors_everywhere_toggled(move |on| {
+        let mut adapter = state.borrow_mut();
+        adapter.layout.role_colors_everywhere = on;
+        adapter.layout.write(&adapter.root);
+        if let Some(window) = weak.upgrade() {
+            window.set_role_colors_everywhere(on);
+            adapter.restyle = true;
+            adapter.aside_restyle = true;
+            adapter.topic_shown = None;
+            adapter.models.pins.set_vec(Vec::new());
+            adapter.models.search_results.set_vec(Vec::new());
+            adapter.refresh(&window);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
     window.on_show_idle_toggled(move |shown| {
         let mut adapter = state.borrow_mut();
         adapter.layout.show_idle = Some(shown);

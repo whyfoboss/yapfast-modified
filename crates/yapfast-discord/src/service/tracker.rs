@@ -1590,6 +1590,7 @@ impl Tracker {
                 user_id: user.clone(),
                 name: name(user).to_owned(),
                 avatar: names.avatar(None, user),
+                color: None,
                 muted: false,
                 deafened: false,
                 server_muted: false,
@@ -1730,6 +1731,11 @@ impl Tracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut voice: HashMap<String, Vec<VoiceMember>> = HashMap::new();
         for ((guild, user), entry) in &self.voice {
+            let color = self
+                .servers
+                .iter()
+                .find(|server| server.id == guild.as_str())
+                .and_then(|server| server.color(names.roles(guild, user)));
             voice
                 .entry(entry.channel.clone())
                 .or_default()
@@ -1737,6 +1743,7 @@ impl Tracker {
                     user_id: user.clone(),
                     name: names.name(guild, user).unwrap_or("Discord user").to_owned(),
                     avatar: names.avatar(server(guild), user),
+                    color,
                     muted: entry.muted || entry.server_muted,
                     deafened: entry.deafened || entry.server_deafened,
                     server_muted: entry.server_muted,

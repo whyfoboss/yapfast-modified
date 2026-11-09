@@ -467,6 +467,9 @@ pub struct VoicePerson {
     pub name: String,
     /// The address of their avatar; see [`DiscordCommand::Pictures`].
     pub avatar: Option<String>,
+    /// The RGB colour of their name from their highest coloured role in the
+    /// server, when this is a server call and their roles are known.
+    pub color: Option<u32>,
     /// Muted or deafened, by themselves or by a Discord server.
     pub muted: bool,
     pub deafened: bool,

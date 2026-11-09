@@ -1526,6 +1526,11 @@ async fn reads_history_and_member_lists() {
     assert_eq!(in_voice, ["Bob", "Carol", "Dave"]);
     assert!(snapshot.voice[&lounge][0].streaming, "Bob is live");
     assert_eq!(snapshot.voice[&lounge][0].user_id, bob);
+    assert_eq!(
+        snapshot.voice[&lounge][0].color,
+        Some(0x3498db),
+        "Bob's role colour in the call"
+    );
     let last_read = general_shown.marks.last_read;
 
     // Two pages of history: 50, then the rest, oldest first. The latest

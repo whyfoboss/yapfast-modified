@@ -493,7 +493,7 @@ popout does (`application/threads.rs`, `ThreadsPopover`): "N joined
 threads", the active ones the account is in, then "N other active
 threads", then "Older threads", the archived ones, each section with the
 newest message first. An active thread's row shows its newest message, its
-author's avatar and name in their role colour, and how long ago ("5m ago",
+author's avatar and name in their role colour when the role-colour setting is on, else the theme's text colour, and how long ago ("5m ago",
 ">30d ago"), or "No recent messages"; an archived one's shows "Started by"
 its owner and when it was last active. On the right are a few of its
 members' avatars and how many are in it. Clicking a row opens the thread in
@@ -592,7 +592,7 @@ layout does: a pin for a pinned post and its first three tags, "+N" for
 more; its title, bright when the account opened it and has messages to
 read there, and "NEW" for a post made since the forum was last read that
 the account never opened (it has no read state of its own); the first
-message's author in their role colour and its text, or "Original message
+message's author in their role colour when the role-colour setting is on, else the theme's text colour, and its text, or "Original message
 was deleted"; the reaction most given, with super reactions, or the
 forum's default reaction without a count; the replies; how long ago it was
 last active, or made; and its first picture, a 72px thumbnail from a file

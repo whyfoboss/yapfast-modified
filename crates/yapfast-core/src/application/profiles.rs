@@ -52,8 +52,10 @@ impl Application {
                 .collect(),
             ..Default::default()
         };
+        let server_context = !room.direct;
+        let role_color = server_context.then_some(member.color).flatten();
         let room = room.id.clone();
-        self.open_profile(room, profile, large)
+        self.open_profile(room, profile, large, role_color, server_context)
     }
 
     /// Opens a Discord profile named only by its user id, as behind a
@@ -90,6 +92,10 @@ impl Application {
         let Some(room) = room else {
             return vec![];
         };
+        let server_context = self.state.selected_room().is_some_and(|room| !room.direct);
+        let role_color = server_context
+            .then(|| self.state.person(&user).and_then(|member| member.color))
+            .flatten();
         self.open_profile(
             room,
             Profile {
@@ -98,6 +104,8 @@ impl Application {
                 ..Default::default()
             },
             large,
+            role_color,
+            server_context,
         )
     }
 
@@ -112,7 +120,7 @@ impl Application {
             return vec![];
         };
         let profile = dm_profile(room, person);
-        self.open_profile(id, profile, true)
+        self.open_profile(id, profile, true, None, false)
     }
 
     pub(super) fn show_friend_profile(&mut self, user: String, large: bool) -> Vec<Effect> {
@@ -155,7 +163,9 @@ impl Application {
         let Some(room) = room else {
             return vec![];
         };
-        self.open_profile(room, profile, large)
+        // A friend's profile opened from the friends list or mutual friends
+        // is outside any server context, so it never takes a server role colour.
+        self.open_profile(room, profile, large, None, false)
     }
 
     pub(super) fn show_role(&mut self, role: String) -> Vec<Effect> {
@@ -192,12 +202,16 @@ impl Application {
         room: String,
         profile: Profile,
         large: bool,
+        role_color: Option<u32>,
+        server_context: bool,
     ) -> Vec<Effect> {
         let fetch = Network::of(&room) == Network::Discord && !self.state.preview;
         let user = profile.id.clone();
         self.state.profile = Some(ProfileView {
             profile,
             large,
+            role_color,
+            server_context,
             loading: fetch,
             kept: false,
             note: None,
@@ -456,6 +470,12 @@ fn fill_profile(view: &mut ProfileView, profile: &Profile) {
         keep_board(&mut filled, &mut view.profile);
     }
     view.profile = filled;
+    if view.server_context && !profile.roles.is_empty() {
+        view.role_color = profile
+            .roles
+            .iter()
+            .find_map(|role| role.color.filter(|color| *color != 0));
+    }
 }
 
 /// Whether `new` has the board `old` already asked Discord to name.

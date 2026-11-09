@@ -181,8 +181,9 @@ threads](servers.md#a-channels-list-of-threads).
 - Notices, such as that someone pinned a message, joined, started a thread
   or a call, or that a poll closed, show as Discord's client shows them: a
   row of their own with an icon in place of the avatar, the author's name
-  in bold in their role colour, which opens their card, what happened, and
-  when. A pin's says "pinned **a message** to this channel. See all
+  in bold in their role colour when the role-colour setting is on, else in
+  the theme's text colour, which opens their card, what happened, and when.
+  A pin's says "pinned **a message** to this channel. See all
   **pinned messages**.", linking to the message its `message_reference`
   names and to the pinned messages.
 - Search, as in Discord, looks through the DM in a DM, with `GET
@@ -216,8 +217,8 @@ threads](servers.md#a-channels-list-of-threads).
   a voice channel closes the search.
 - In a server, pins and results carry no member profiles, so Yapfast asks the
   gateway for those of authors it doesn't know yet and waits up to five
-  seconds for them; then they show with their server nickname, avatar and
-  role colour.
+  seconds for them; then they show with their server nickname, avatar and,
+  when the role-colour setting is on, role colour.
 - Clicking a pin or a result jumps to it in the timeline, as a reply's
   original does; see [jumping to a message](messages.md#jumping-to-a-message).
   Pins and results show their text and name their files, without
