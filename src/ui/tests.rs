@@ -9154,7 +9154,7 @@ fn yapfast_docked_profile_opens_the_existing_full_profile() {
     let opened = Rc::new(Cell::new(false));
     let seen = opened.clone();
     window.on_enlarge_panel_profile(move || seen.set(true));
-    let position = slint::LogicalPosition::new(970., 722.);
+    let position = slint::LogicalPosition::new(900., 100.);
     window.window().dispatch_event(WindowEvent::PointerPressed {
         position,
         button: PointerEventButton::Left,

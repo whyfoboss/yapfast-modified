@@ -1721,7 +1721,7 @@ export component YapfastWindow inherits Window {
     changed browse-open => { Tip.text = ""; }
     property <bool> profile-docked: root.profile-available && root.profile-panel && root.panel-profile-shown && !root.search-open && !root.aside-docked;
     // Search results take the place of the member list or the profile.
-    property <length> docked-width: root.search-open ? 420px : root.aside-docked ? root.aside-shown : (root.members-docked ? ClientStyle.members-width : 0px) + (root.profile-docked ? ClientStyle.profile-width : 0px);
+    property <length> docked-width: root.search-open ? 420px : root.aside-docked ? root.aside-shown : (root.members-docked ? ClientStyle.members-width : 0px) + (root.profile-docked ? 300px : 0px);
     // The pin and add buttons open their popovers under themselves.
     property <length> popover-x;
     property <length> popover-y;
@@ -3757,10 +3757,9 @@ export component YapfastWindow inherits Window {
                         open-member-menu(id, x, y) => { root.open-context-menu(id, true, x, y); }
                     }
                     if root.profile-docked: Rectangle {
-                        width: ClientStyle.profile-width;
+                        width: 300px;
                         ProfileCard {
-                            x: ClientStyle.profile-inset; y: ClientStyle.profile-inset;
-                            docked: true; width: parent.width - 2 * ClientStyle.profile-inset; height: parent.height - 2 * ClientStyle.profile-inset;
+                            docked: true; width: parent.width; height: parent.height;
                             data: root.panel-profile;
                             enlarge => { root.enlarge-panel-profile(); }
                             befriend => { root.befriend(root.panel-profile.id); }
