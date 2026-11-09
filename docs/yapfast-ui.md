@@ -34,8 +34,9 @@ small (14px) and large (18px) message sizes remain. Provenance and license:
 
 The rail uses 40px tiles with a pinned Home and one separator. DM rows are 42px.
 Message groups have a 16px leading gap, with a smaller timestamp. The docked
-profile is a 320px column with a View Full Profile button. User settings open as
-a modal with a 266px sidebar and a content column up to 696px.
+profile is a 300px column like v0.3.0; its avatar and banner open the full
+profile, and the user panel is the flat 56px block. User settings open as a
+modal with a 266px sidebar and a content column up to 696px.
 
 ## Not yet Discord
 

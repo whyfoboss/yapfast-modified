@@ -49,7 +49,7 @@ import { ServerRow, RoomRow, StatusDot, ServerRail, ServerHeader, RoomList } fro
 import { StagedFile, StagedTile, Composer, MentionRow, MentionList, EmojiSuggestions, RequestBar } from "composer.slint";
 import { EmojiCell, EmojiRow, EmojiTile, EmojiSection, RailSection, EmojiCard, EmojiCardView, MessageStickerCard, MessageStickerCardView, MessageRow, ReactionToggle, EmojiButton, EmojiPicker, MessageMenu, MessageGallery, MessageStickers, FileCard, MessageContent, EmbedView, BotTag, NoConversation, ConversationStart, HistoryEdge, UnreadBar, PresentBar, ImageViewer, VideoViewer, VideoPlayer, Polls } from "messages.slint";
 import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable } from "settings.slint";
-import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ProfileModal, ServerCard, RoleCard } from "people.slint";
+import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ServerCard, RoleCard } from "people.slint";
 import { RequestRow, FriendRow, FriendsScreen, HeaderTab, RequestsScreen, AddFriendDialog } from "friends.slint";
 import { ContactRow, PlaceRow, ReactionPill, ReactorRow, StatusDialog, NewDmDialog, ForwardDialog, QuickSwitcher, ReactionsDialog, StatusMenu, PersonPrompt, PersonDialog, LeavingDialog, PollAnswerDraft, PollDialog } from "dialogs.slint";
 import { InvitePrompt, InviteDialog, JoinPrompt, JoinDialog, EventPrompt, EventDialog, GiftPrompt, GiftDialog, OAuthPrompt, OAuthDialog, ChannelPrompt, ChannelDialog, ProfileEditorPrompt, ProfileEditorDialog } from "server.slint";
@@ -771,8 +771,6 @@ export component YapfastWindow inherits Window {
     callback message-from-profile(string, string);
     /// Open the DM with this person, from the buttons of the full profile.
     callback message-person(string);
-    /// Save the note on this person: the id, then the note ("" removes it).
-    callback save-note(string, string);
     in property <bool> viewer-open;
     in property <image> viewer-image;
     in property <[image]> viewer-frames;
@@ -1267,8 +1265,6 @@ export component YapfastWindow inherits Window {
     in property <bool> discord-links-available;
     callback restart();
     callback preferences-changed();
-    /// A tab of the full profile opened, by ProfileModal's page.
-    callback profile-tab-opened(int);
     /// The built-in themes, and the one shown by its id; choose-theme shows
     /// and keeps another.
     in property <[ThemeCard]> themes;
@@ -4271,21 +4267,20 @@ export component YapfastWindow inherits Window {
                 return reject;
             }
         }
-        ProfileModal {
+        ProfileCard {
             opacity: Popup.opacity(large-profile-motion.amount); transform-scale: Popup.scale(large-profile-motion.amount);
-            width: min(max(root.width * 0.7, 720px), root.width - 32px); height: min(max(root.height * 0.75, 520px), root.height - 32px);
+            large: true;
+            width: min(600px, root.width - 64px); limit: root.height - 64px;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             data: root.profile;
             close => { root.close-profile(); }
             befriend => { root.befriend(root.profile.id); }
             message-person(user) => { root.close-profile(); root.message-person(user); }
-            save-note(user, note) => { root.save-note(user, note); }
             more(x, y) => { root.open-context-menu(root.profile.id, true, x, y); }
             open-link(link) => { root.open-link(link); }
             open-server(server, x, y, width, height) => { root.open-server-card(server, x, y, width, height); }
             // In the full profile, a friend's opens full too.
             open-friend(id, x, y, width, height) => { root.show-friend-profile(id, true); }
-            tab-opened(page) => { root.profile-tab-opened(page); }
             edit-profile => { root.close-profile(); root.edit-profile(); }
         }
     }

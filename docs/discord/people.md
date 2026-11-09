@@ -233,32 +233,35 @@ threads](servers.md#a-channels-list-of-threads).
 
 Clicking someone in a channel's member list or under a voice channel, or
 following a Discord `/users/{id}` link,
-shows their profile in a small card beside it, whose picture or name
-enlarges it into a centred one. The card leaves the dates and the roles'
-heading to the full profile, and ends in a box, "Message @name", as
-Discord's does: Enter opens or starts the DM with them and sends what it
-holds there, without touching the DM's own composer. The box shows only for
-someone Yapfast can message, never for this account;
-right-clicking a DM and choosing "Profile" opens the full one. A one-to-one
-DM shows its other person's profile in a panel on the right, with the bio in
-full and the mutual servers and friends. Mutual servers show their icon and
-the person's nickname there; clicking one opens a card beside it with the
-server's banner, member count (from READY's `member_count`), channel count
-and "Go to server". Mutual friends show their avatar and status dot;
-clicking one opens their profile card beside it, or their full profile from
-a full profile; the person icon in the DM's header
-hides or shows it, and Yapfast remembers the choice in `layout.json`. Yapfast fetches the
-profile once each time the open DM changes to someone else. Yapfast fetches it
-from `GET /users/{id}/profile` with the open server's id, so the server's
-nickname, avatar, banner, bio and pronouns win over the person's own, and the
-profile lists their roles in role order, when they joined Discord and the server,
-and the servers and friends the account shares with them. Profiles are kept for
-five minutes, at most 32 of them. On this account's own profile the lists are
-its own friends and servers, which it shares with nobody, so the card and its
-tabs say "5 friends" and "2 servers" rather than "5 mutual friends" and
-"2 mutual servers", and an empty tab says "No friends." rather than "No friends
-in common." Presence and activity come from the member
-list, since the profile doesn't carry them. Their custom status, or what
+shows their profile in a small card beside it, whose picture, banner or name
+enlarges it into a centred one. The card leaves the dates and roles to the
+full profile, and ends in a box, "Message @name", as Discord's does: Enter
+opens or starts the DM with them and sends what it holds there, without
+touching the DM's own composer. The box shows only for someone Yapfast can
+message, never for this account; right-clicking a DM and choosing "Profile"
+opens the full one. The full profile is one column with no tabs: the banner,
+the avatar and the name, the relationship buttons and a small "Edit Profile"
+on one's own, the activities, About Me, the roles, any connections, Member
+since, then the mutual servers and friends. Badges sit as small icons beside
+the name. The note box has left the profile card; notes are still written
+from a DM's "Add note" dialog. A one-to-one DM shows the same card in a 300px
+panel on the right; its avatar and banner open the full profile, and the
+person icon in the DM's header hides or shows the panel, which Yapfast
+remembers in `layout.json`. Mutual servers show their icon and the person's
+nickname there; clicking one opens a card beside it with the server's banner,
+member count (from READY's `member_count`), channel count and "Go to server".
+Mutual friends show their avatar and status dot; clicking one opens their
+profile card beside it, or their full profile from a full profile. Yapfast
+fetches the profile once each time the open DM changes to someone else. Yapfast
+fetches it from `GET /users/{id}/profile` with the open server's id, so the
+server's nickname, avatar, banner, bio and pronouns win over the person's own,
+and the profile lists their roles in role order, when they joined Discord and
+the server, and the servers and friends the account shares with them. Profiles
+are kept for five minutes, at most 32 of them. On this account's own profile
+the lists are its own friends and servers, which it shares with nobody, so the
+card says "5 friends" and "2 servers" rather than "5 mutual friends" and
+"2 mutual servers". Presence and activity come from the member list, since the
+profile doesn't carry them. Their custom status, or what
 they're doing, sits in a thought bubble beside the picture, as in
 Discord's: two lines at most, and all of it while pointed at. One's
 own card, small or full, has Edit Profile in place of the friend and
@@ -386,78 +389,12 @@ and then leaves the panel empty. A wait that ends while it can't ask leaves the
 feed due, for the next time it can. The answer's shape comes from Discord's
 client, as docs.discord.food doesn't cover this endpoint.
 
-## The full profile's tabs
+## The full profile
 
-The full profile has tabs beside the card, in the client's order and by its
-rules:
-
-| Tab | Shows when |
-| --- | --- |
-| Board | It's one's own, or they have widgets |
-| Activity | Always |
-| Wishlist | It's one's own, or it's public and they're a friend or share a server |
-| Mutual friends, mutual servers | Always |
-
-It opens on Activity. Activity lists their activities, then, under "Recent
-activity", from `GET /content-inventory/users/{id}/outbox` when the tab first
-opens, what they listened to (`extra.entries[0].media`: its `title`, first
-artist and `image_url`), watched (`extra.media_title`) and played
-(`extra.game_name`), each with how long ago, from `ended_at`, else
-`started_at`, else the snowflake of a listening session's `id`.
-
-Board and Wishlist come only for the full profile, and only when their tab
-opens, read-only: a small card and the DM's panel ask for neither. A
-wishlist that failed is asked for again when its tab next opens, and a
-profile that arrives after a tab opened asks then. The client fetches a
-wishlist when the window opens, and hides the tab if it's empty; Yapfast
-asks when the tab opens, and an empty one says so in a line. It leaves out
-the wishlist's age check (`nsfwAllowed`), Filter and Browse the Shop.
-
-The Board comes with the profile: `widgets`, each `{id, data: {type,
-...}}`. A game list's `data` holds `games: [{game_id, comment, tags}]`, read
-as the client reads them, a game listed twice showing once and an unknown
-type left out. Their headings are the client's:
-
-| `type` | Heading | Shows |
-| --- | --- | --- |
-| `favorite_games` | Favorite Game | Its game and comment |
-| `current_games` | Games in Rotation | Its games |
-| `want_to_play_games` | Want to Play | Its games |
-| `played_games` | Games I Like | Its games |
-| `application` | The application's name, from `GET /applications/public` | A line that it only shows in Discord |
-| `personal` | Personal | The same line |
-| `clips_gallery` | Clips Gallery | The same line |
-
-Games are named by `GET /games?game_ids=...`, at most 20 at once as the
-client asks, when the tab first opens, and only if it has any. A game's
-picture is `media.icon`, else `media.cover`, each `{type: "hash" | "url",
-value}`, where a hash is at `/app-icons/{game}/{hash}.png`. One Discord
-doesn't know is an "Unknown game", as in the client. Tags aren't shown.
-
-The Wishlist is `GET /wishlists/{id}?source=user_profile`, which the client
-uses for its own account's and for anyone's, the first id in the profile's
-`wishlist_settings` `{id: {updated_at, visibility}}`, where visibility 0 is
-private. Its only other route Yapfast knows of, `POST
-/users/@me/wishlist/items`, adds an item, which Yapfast never sends. With no
-id there's nothing on it, and a 403 or 404 says it's private; a private list
-of one's own loads, and says that. An item in `wishlist_items` is named by
-`sku.name`, else `sku_name`, and pictured by what it is, `sku.product_line`,
-else the item's `sku_product_line`:
-
-| Line | What | Picture |
-| --- | --- | --- |
-| 1 | Nitro | None: the client draws its own, so the card shows a letter |
-| 7 | Avatar decoration, by `type` 0 | `/avatar-decoration-presets/{asset}.png`, its still |
-| 7 | Profile effect, by `type` 1 | `thumbnailPreviewSrc`, else `reducedMotionSrc`, `staticFrameSrc` |
-| 7 | Nameplate, by `type` 2 | `/media/v1/collectibles-shop/{sku}/static` |
-| 7 | Profile frame, by `type` 3 | `/media/v1/collectibles-shop/{sku}/{layer}/static`, the first layer not `responsive` |
-| 7 | Bundle | `sku.preview_asset_paths.fg_static`, else the first thing in it with a picture |
-| 14 | A game's item | `/app-assets/{sku.application_id}/store/{asset}.webp`, the asset being `tenant_metadata.social_layer.card_image_asset_id`, else `thumbnail_asset_id` |
-
-A collectible's kind and `asset` are in `sku.tenant_metadata.collectibles.item`,
-else the item's `collectibles_item` or `bundle_items`. The client's card shows
-only lines 1, 7 and 14; Yapfast also shows others it can name, by the store
-picture if they have one.
+The full profile is one column, as v0.3.0 had it: there are no tabs and no
+Board, Wishlist or recent-activity panels. Their data and requests stay in the
+core for the profile editor's Board and Wishlist tabs, but the profile card no
+longer asks for them.
 
 ## Avatar decorations and nameplates
 
@@ -738,7 +675,7 @@ is left for later.
 ### The editor's tabs
 
 Board and Wishlist show what the account has on Discord, read only, as on
-[the full profile](#the-full-profiles-tabs), the board's games named when
+[the full profile](#the-full-profile), the board's games named when
 the editor reads the profile and the wishlist asked for when its tab first
 opens, and again if that failed. Where Discord has its Add buttons, a line
 says adding more from Yapfast is coming soon. Activity shows what the
