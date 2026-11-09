@@ -525,6 +525,8 @@ pub struct AppState {
     /// Messages from people this account blocked don't show at all, rather
     /// than collapsed.
     pub hide_blocked: bool,
+    /// Whether message logger is enabled.
+    pub message_logger: bool,
     /// A call from someone's menu starts without asking first.
     pub skip_call_prompt: bool,
     /// The member list's Activity panel's feed, in Discord's order: what
@@ -676,6 +678,7 @@ pub struct AppState {
     /// to it, each while it's open.
     pub pins: Option<Pins>,
     pub search: Option<Search>,
+    pub edit_history: Option<chat::EditHistoryData>,
     /// The open Discord channel's list of its threads.
     pub threads: Option<ThreadList>,
     /// The Discord forum on screen.
@@ -1526,6 +1529,14 @@ pub enum Action {
     /// Forward it to those chosen, with this message added.
     Forward(String),
     CloseForward,
+    /// Open the edit history sidebar for a message.
+    ViewEditHistory(String),
+    /// Close the edit history sidebar.
+    CloseEditHistory,
+    /// Clear all logged messages and edit history.
+    ClearMessageLog,
+    /// Toggle message logger.
+    SetMessageLogger(bool),
     /// Open the quick switcher, or close it if it's open.
     ToggleSwitcher,
     /// Search the places it goes to.
@@ -3127,6 +3138,37 @@ impl Application {
                 self.state.forwarding = None;
                 vec![]
             }
+            Action::ViewEditHistory(item) => {
+                if let Some(room) = self.state.selected.as_ref() {
+                    vec![Effect::Backend(Command::Discord(
+                        DiscordCommand::EditHistory {
+                            room: room.clone(),
+                            item,
+                        },
+                    ))]
+                } else {
+                    vec![]
+                }
+            }
+            Action::CloseEditHistory => {
+                self.state.edit_history = None;
+                vec![]
+            }
+            Action::ClearMessageLog => {
+                self.state.edit_history = None;
+                vec![Effect::Backend(Command::Discord(
+                    DiscordCommand::ClearMessageLog,
+                ))]
+            }
+            Action::SetMessageLogger(enabled) => {
+                self.state.message_logger = enabled;
+                if !enabled {
+                    self.state.edit_history = None;
+                }
+                vec![Effect::Backend(Command::Discord(
+                    DiscordCommand::SetMessageLogger(enabled),
+                ))]
+            }
             Action::ToggleSwitcher => self.toggle_switcher(),
             Action::SearchSwitcher(query) => {
                 if let Some(switcher) = &mut self.state.switcher {
@@ -4411,6 +4453,19 @@ impl Application {
                 self.state.notice = Some(error);
             }
             Event::LoggedOut => self.reset(),
+            Event::EditHistory {
+                room,
+                item: _,
+                history,
+            } => {
+                if self.state.selected.as_ref() == Some(&room) {
+                    if history.is_some() {
+                        self.state.search = None;
+                        self.state.profile = None;
+                    }
+                    self.state.edit_history = history;
+                }
+            }
         }
         vec![]
     }

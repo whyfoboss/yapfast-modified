@@ -819,3 +819,30 @@ A day divider reads 12px semibold. With a 12-hour clock dates are month-first
 as in en-US ("November 4, 2026"); with a 24-hour clock they are day-first,
 unless Settings chooses a date format. The chat header
 puts a 4px round dot between the channel name and its topic.
+
+## Message Logger and Edit History
+
+"Message logger" in Settings → Discord keeps deleted messages and previous
+versions of edited messages in memory while enabled.
+
+When enabled:
+- Deleted messages remain in their chronological timeline position with their
+  last known text rendered in subtle theme red (`Theme.danger-text`) and a
+  `" · Deleted"` label near the timestamp. Server actions such as replying,
+  reacting, and editing are suppressed.
+- Up to five previous versions per edited message are retained in memory.
+  The message context menu offers "View Edit History" for any message with
+  recorded history.
+- The Edit History sidebar docks on the right of the conversation (420px width),
+  showing stacked version cards: latest version first (marked "Current" or
+  "Deleted"), followed by previous versions in reverse chronological order,
+  down to the earliest version marked "Original" (if known) or "Earliest recorded".
+  Each card shows author avatar, name, server role colour, timestamp (or locally
+  observed time), and content. Historical versions exceeding 2,000 characters
+  are capped and show an explicit truncation notice.
+- Memory is strictly bounded: maximum 500 global tracked messages, 100 per channel,
+  and a 16 MiB global ceiling with deterministic oldest-first FIFO eviction.
+  No logged message content is ever persisted to disk.
+- "Clear Log" in Settings → Discord purges all in-memory entries immediately and
+  removes retained deleted messages from the conversation. Toggling the feature
+  off likewise clears all logs from memory.

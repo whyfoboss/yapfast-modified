@@ -1182,6 +1182,8 @@ struct Layout {
     /// Server usernames take their highest role's colour, rather than the
     /// theme's text colour.
     role_colors_everywhere: bool,
+    /// Retain deleted messages and previous versions of edited messages in memory.
+    message_logger: bool,
     /// A call from someone's menu starts without asking first.
     skip_call_prompt: bool,
     /// The member list's Activity panel shows only its header.
@@ -1511,6 +1513,7 @@ impl Layout {
         window.set_show_idle(self.show_idle.unwrap_or(true));
         window.set_hide_blocked(self.hide_blocked);
         window.set_role_colors_everywhere(self.role_colors_everywhere);
+        window.set_message_logger(self.message_logger);
         window.set_skip_call_prompt(self.skip_call_prompt);
         window.set_activity_cards_hidden(self.activity_cards_hidden);
         window.set_flash_taskbar(self.flash_taskbar.unwrap_or(true));
@@ -1700,6 +1703,7 @@ struct Models {
     /// The answers of the poll being made.
     poll_answers: Rc<VecModel<PollAnswerDraft>>,
     search_results: Rc<VecModel<FoundRow>>,
+    history_entries: Rc<VecModel<EditHistoryRow>>,
     add_people: Rc<VecModel<PickRow>>,
     role_members: Rc<VecModel<MemberRow>>,
     bar_reactions: Rc<VecModel<EmojiCell>>,
@@ -1780,6 +1784,7 @@ impl Models {
         window.set_reactor_rows(ModelRc::from(self.reactor_rows.clone()));
         window.set_poll_answers(ModelRc::from(self.poll_answers.clone()));
         window.set_search_results(ModelRc::from(self.search_results.clone()));
+        window.set_history_entries(ModelRc::from(self.history_entries.clone()));
         window.set_add_people(ModelRc::from(self.add_people.clone()));
         window.set_role_members(ModelRc::from(self.role_members.clone()));
         window.set_bar_reactions(ModelRc::from(self.bar_reactions.clone()));
@@ -2266,6 +2271,7 @@ impl Adapter {
         ));
         app.dispatch(Action::ReplyPing(layout.reply_ping.unwrap_or(true)));
         app.dispatch(Action::HideBlocked(layout.hide_blocked));
+        app.dispatch(Action::SetMessageLogger(layout.message_logger));
         app.dispatch(Action::SkipCallPrompt(layout.skip_call_prompt));
         app.dispatch(Action::ActivityCardsHidden(layout.activity_cards_hidden));
         app.dispatch(Action::SetCosmetics(layout.cosmetics()));
@@ -2606,6 +2612,11 @@ impl Adapter {
                     self.app.remember_channels(self.layout.channels.clone());
                     let (backend, mut events) =
                         Backend::start(self.runtime.clone(), self.root.clone(), start);
+                    let _ = backend.send(Command::Discord(
+                        yapfast_core::chat::DiscordCommand::SetMessageLogger(
+                            self.layout.message_logger,
+                        ),
+                    ));
                     self.backend = Some(backend);
                     let weak = self.weak.clone();
                     // Network work stays on Tokio. Only channel delivery runs on

@@ -63,6 +63,7 @@ import { FoundRow, PickRow, ThreadRow, HeaderSearch, PinsPopover, ThreadsPopover
 import { ThreadPanel, NewThreadPanel } from "thread.slint";
 import { PostTag, PostRow, PostTagChoice, ForumPanel } from "forum.slint";
 import { BrowseRow, BrowseScreen } from "browse.slint";
+import { EditHistoryRow, EditHistoryPanel } from "history.slint";
 
 // Rust sees these, besides YapfastWindow.
 export { ClientStyle } from "yapfast/style.slint";
@@ -79,6 +80,7 @@ export { MemberRow, MemberActivityRow, ProfileRole, ProfileRoleRow, ProfileServe
 export { RequestRow, FriendRow } from "friends.slint";
 export { ContactRow, PlaceRow, ReactionPill, ReactorRow, PollAnswerDraft } from "dialogs.slint";
 export { FoundRow, PickRow } from "header.slint";
+export { EditHistoryRow } from "history.slint";
 export { GifTile, GifFavorites } from "gifs.slint";
 
 export component YapfastWindow inherits Window {
@@ -437,6 +439,10 @@ export component YapfastWindow inherits Window {
     /// Server usernames show their highest role's colour.
     in-out property <bool> role-colors-everywhere;
     callback role-colors-everywhere-toggled(bool);
+    /// Retain deleted messages and previous versions of edited messages in memory.
+    in-out property <bool> message-logger;
+    callback message-logger-toggled(bool);
+    callback clear-logger;
     /// A call from someone's menu starts without asking first; Yapfast stores it.
     in-out property <bool> skip-call-prompt;
     callback skip-call-prompt-toggled(bool);
@@ -1123,6 +1129,9 @@ export component YapfastWindow inherits Window {
     in property <string> search-note;
     in property <bool> search-more;
     in property <bool> search-loading;
+    in property <bool> history-open;
+    in property <string> history-heading;
+    in property <[EditHistoryRow]> history-entries;
     callback search(string);
     callback more-results;
     /// The friends picker under the add button: who it offers, how many
@@ -1461,6 +1470,8 @@ export component YapfastWindow inherits Window {
     callback more-reactors;
     callback remove-reactor(string);
     callback close-reactions;
+    callback view-edit-history(string);
+    callback close-edit-history;
     callback request-delete(string);
     /// Delete a message without asking, from its quick actions.
     callback delete-now(string);
@@ -1552,6 +1563,7 @@ export component YapfastWindow inherits Window {
     /// beside it, then the new thread's form; whether it did anything.
     public function escape-composing() -> bool {
         if !root.workspace || root.composer-covered { return false; }
+        if root.history-open { root.close-edit-history(); return true; }
         if root.search-open { root.search-text = ""; root.search(""); return true; }
         if root.compose-label != "" { root.cancel-compose(); return true; }
         if !root.aside-docked { return false; }
@@ -1713,18 +1725,18 @@ export component YapfastWindow inherits Window {
     changed active-item => { root.hide-badge-tips(); }
 
     // The member list is a second sidebar, on the right of the conversation.
-    property <bool> members-docked: root.members-available && root.member-list && !root.search-open && !root.aside-docked;
+    property <bool> members-docked: root.members-available && root.member-list && !root.search-open && !root.history-open && !root.aside-docked;
     // A thread opened beside the channel takes the place of the member list
     // and the profile, and search results take its place.
     // The thread beside the channel, or the form that starts one, in place
     // of its member list.
-    property <bool> aside-docked: (root.aside-open || root.new-thread-open) && !root.search-open;
+    property <bool> aside-docked: (root.aside-open || root.new-thread-open) && !root.search-open && !root.history-open;
     // Rows remade under the pointer show their tooltip again; it goes with the screen.
     changed friends-open => { Tip.text = ""; }
     changed browse-open => { Tip.text = ""; }
-    property <bool> profile-docked: root.profile-available && root.profile-panel && root.panel-profile-shown && !root.search-open && !root.aside-docked;
+    property <bool> profile-docked: root.profile-available && root.profile-panel && root.panel-profile-shown && !root.search-open && !root.history-open && !root.aside-docked;
     // Search results take the place of the member list or the profile.
-    property <length> docked-width: root.search-open ? 420px : root.aside-docked ? root.aside-shown : (root.members-docked ? ClientStyle.members-width : 0px) + (root.profile-docked ? 300px : 0px);
+    property <length> docked-width: (root.search-open || root.history-open) ? 420px : root.aside-docked ? root.aside-shown : (root.members-docked ? ClientStyle.members-width : 0px) + (root.profile-docked ? 300px : 0px);
     // The pin and add buttons open their popovers under themselves.
     property <length> popover-x;
     property <length> popover-y;
@@ -2366,6 +2378,7 @@ export component YapfastWindow inherits Window {
             copy-image(item, index) => { root.copy-attachment(item, index); message-menu.close(); }
             save-attachment(item, index) => { root.save-attachment(item, index); message-menu.close(); }
             open-link(link) => { root.open-link(link); message-menu.close(); }
+            view-edit-history(item) => { root.view-edit-history(item); message-menu.close(); }
         }
     }
 
@@ -3629,6 +3642,13 @@ export component YapfastWindow inherits Window {
                         more-results => { root.more-results(); }
                         close => { root.search-text = ""; root.search(""); }
                     }
+                    if root.history-open: EditHistoryPanel {
+                        width: 420px;
+                        entries: root.history-entries;
+                        heading: root.history-heading;
+                        open-link(link) => { root.open-link(link); }
+                        close => { root.close-edit-history(); }
+                    }
                     if root.aside-docked && root.new-thread-open: NewThreadPanel {
                         width: root.aside-shown;
                         from-message: root.new-thread-from-message; starter: root.new-thread-starter;
@@ -4041,6 +4061,9 @@ export component YapfastWindow inherits Window {
             hide-blocked-toggled(hide) => { root.hide-blocked = hide; root.hide-blocked-toggled(hide); }
             role-colors-everywhere: root.role-colors-everywhere;
             role-colors-everywhere-toggled(on) => { root.role-colors-everywhere = on; root.role-colors-everywhere-toggled(on); }
+            message-logger: root.message-logger;
+            message-logger-toggled(on) => { root.message-logger = on; root.message-logger-toggled(on); }
+            clear-logger => { root.clear-logger(); }
             blocked: root.blocked-people;
             unblock(id) => { root.unblock(id); }
             show-hidden-channels-toggled(shown) => { root.show-hidden-channels = shown; root.show-hidden-channels-toggled(shown); }

@@ -160,6 +160,8 @@ pub struct OpenChannel {
     /// Messages deleted while the channel is open. A page asked for before
     /// Discord deleted one can still carry it, and mustn't bring it back.
     deleted: HashSet<u64>,
+    /// Messages in this channel that have edit history recorded.
+    pub(super) history_messages: HashSet<u64>,
     /// This account's reactions on their way to Discord, by message and
     /// emoji: another click on one waits for it, as Discord's client does,
     /// so a burst of clicks can't race.
@@ -256,6 +258,7 @@ impl OpenChannel {
             pending: Vec::new(),
             sent: HashSet::new(),
             deleted: HashSet::new(),
+            history_messages: HashSet::new(),
             reacting: Arc::default(),
             loading_earlier: false,
             loading_later: false,
@@ -601,7 +604,19 @@ impl OpenChannel {
 
     /// Applies a gateway event; returns whether the shown messages changed.
     pub fn live(&mut self, event: &Live) -> bool {
-        if let Live::Deleted { channel, id } = event
+        self.live_with_logger(event, None)
+    }
+
+    /// Applies a gateway event with an optional message logger.
+    pub fn live_with_logger(
+        &mut self,
+        event: &Live,
+        mut logger: Option<&mut super::logger::MessageLogger>,
+    ) -> bool {
+        let now_sec = crate::clock::now_ms() / 1000;
+        let logger_enabled = logger.as_ref().is_some_and(|l| l.enabled);
+        if !logger_enabled
+            && let Live::Deleted { channel, id } = event
             && *channel == self.channel
         {
             self.deleted.insert(id.parse().unwrap_or_default());
@@ -613,15 +628,38 @@ impl OpenChannel {
             {
                 self.insert_latest(message.clone());
             } else if let Some(latest) = &mut self.latest {
-                self.dirty |= change(&mut latest.messages, &self.channel, event).is_some();
+                let mut dummy_history = HashSet::new();
+                let (ch, evicted) = change(
+                    &mut latest.messages,
+                    &self.channel,
+                    event,
+                    logger.as_deref_mut(),
+                    now_sec,
+                    &mut dummy_history,
+                );
+                self.apply_evicted(&evicted);
+                self.dirty |= ch.is_some();
             }
             if let Some(latest) = &mut self.latest {
                 latest.keep_newest(KEPT_MESSAGES);
             }
         }
-        let changed = self.apply_live(event);
+        let changed = self.apply_live(event, logger, now_sec);
         self.dirty |= changed;
         changed
+    }
+
+    pub(super) fn apply_evicted(&mut self, evicted: &[String]) {
+        for id in evicted {
+            if let Ok(order) = id.parse::<u64>() {
+                self.shown.messages.remove(&order);
+                self.rendered.remove(&order);
+                self.history_messages.remove(&order);
+                if let Some(latest) = self.latest.as_mut() {
+                    latest.messages.remove(&order);
+                }
+            }
+        }
     }
 
     /// Whether a name, avatar or role its messages show changed since they
@@ -632,7 +670,12 @@ impl OpenChannel {
         changed
     }
 
-    fn apply_live(&mut self, event: &Live) -> bool {
+    fn apply_live(
+        &mut self,
+        event: &Live,
+        logger: Option<&mut super::logger::MessageLogger>,
+        now_sec: u64,
+    ) -> bool {
         match event {
             // A window of older messages takes no new ones.
             Live::Created(message) if message.channel_id == self.channel => {
@@ -644,13 +687,24 @@ impl OpenChannel {
             }
             // Rendered with what Names has, which publishing checks.
             Live::Names => true,
-            _ => match change(&mut self.shown.messages, &self.channel, event) {
-                Some(order) => {
-                    self.rendered.remove(&order);
-                    true
+            _ => {
+                let (order, evicted) = change(
+                    &mut self.shown.messages,
+                    &self.channel,
+                    event,
+                    logger,
+                    now_sec,
+                    &mut self.history_messages,
+                );
+                self.apply_evicted(&evicted);
+                match order {
+                    Some(order) => {
+                        self.rendered.remove(&order);
+                        true
+                    }
+                    None => !evicted.is_empty(),
                 }
-                None => false,
-            },
+            }
         }
     }
 
@@ -1765,7 +1819,8 @@ impl OpenChannel {
             timestamp,
             own,
             edited: message.edited,
-            deleted: false,
+            has_edit_history: self.history_messages.contains(&message.order()),
+            deleted: message.deleted,
             blocked: snapshot.blocked.contains(&message.author_id),
             mentions_me: message.names_me(me, marks),
             replies_to_me: message.replies_to(me),
@@ -1785,13 +1840,13 @@ impl OpenChannel {
             cards,
             mentions,
             emoji: custom_emoji(message),
-            can_reply: ordinary,
-            can_edit: own && message.editable,
-            can_delete: self.rendered_with.deletes.allow(message, me),
-            can_react: ordinary,
-            can_forward: message.forwardable && self.rendered_with.may_forward,
+            can_reply: ordinary && !message.deleted,
+            can_edit: own && message.editable && !message.deleted,
+            can_delete: self.rendered_with.deletes.allow(message, me) && !message.deleted,
+            can_react: ordinary && !message.deleted,
+            can_forward: message.forwardable && self.rendered_with.may_forward && !message.deleted,
             pinned: message.pinned,
-            can_pin: ordinary && self.rendered_with.may_pin,
+            can_pin: ordinary && self.rendered_with.may_pin && !message.deleted,
             thread: self.thread_link(server, message),
             poll: message.poll.as_ref().map(|poll| chat_poll(poll, own)),
             notice: chat_notice(message),
@@ -1920,10 +1975,28 @@ const SPOILER: &str = "SPOILER_";
 
 /// Applies an edit, a deletion or a reaction in `channel` to the messages
 /// it changes; the snowflake of the one it changed, if any.
-fn change(messages: &mut BTreeMap<u64, Message>, channel: &str, event: &Live) -> Option<u64> {
+fn change(
+    messages: &mut BTreeMap<u64, Message>,
+    channel: &str,
+    event: &Live,
+    mut logger: Option<&mut super::logger::MessageLogger>,
+    now_sec: u64,
+    history_messages: &mut HashSet<u64>,
+) -> (Option<u64>, Vec<String>) {
     match event {
         Live::Updated(message) if message.channel_id == channel => {
-            let known = messages.get_mut(&message.order())?;
+            let order = message.order();
+            let Some(known) = messages.get_mut(&order) else {
+                return (None, Vec::new());
+            };
+            let mut evicted = Vec::new();
+            if let Some(logger) = logger.as_deref_mut() {
+                let (recorded, ev) = logger.record_edit(channel, known, message, now_sec);
+                if recorded {
+                    history_messages.insert(order);
+                }
+                evicted = ev;
+            }
             // Updates don't always carry reactions; keep the counted ones,
             // and a poll's votes unless it carries them, and the original a
             // reply answers unless it says what became of it.
@@ -1936,13 +2009,15 @@ fn change(messages: &mut BTreeMap<u64, Message>, channel: &str, event: &Live) ->
                 Some(poll) if !poll.counted => known.poll.take(),
                 poll => poll.clone(),
             };
+            let deleted = known.deleted;
             *known = Message {
                 reactions,
                 poll,
                 reply,
+                deleted,
                 ..message.clone()
             };
-            Some(message.order())
+            (Some(message.order()), evicted)
         }
         Live::Vote {
             channel: id,
@@ -1952,15 +2027,31 @@ fn change(messages: &mut BTreeMap<u64, Message>, channel: &str, event: &Live) ->
             added,
         } if id == channel => {
             let order = message.parse().unwrap_or_default();
-            messages.get_mut(&order)?.vote(*answer, *me, *added);
-            Some(order)
+            let res = messages.get_mut(&order).map(|m| {
+                m.vote(*answer, *me, *added);
+                order
+            });
+            (res, Vec::new())
         }
         Live::Deleted {
             channel: id,
             id: message,
         } if id == channel => {
             let order = message.parse().unwrap_or_default();
-            messages.remove(&order).map(|_| order)
+            if let Some(logger) = logger
+                && logger.enabled
+            {
+                if let Some(known) = messages.get_mut(&order) {
+                    known.deleted = true;
+                    let (_, evicted) = logger.record_delete(channel, message);
+                    (Some(order), evicted)
+                } else {
+                    let (_, evicted) = logger.record_delete(channel, message);
+                    (None, evicted)
+                }
+            } else {
+                (messages.remove(&order).map(|_| order), Vec::new())
+            }
         }
         Live::Reaction {
             channel: id,
@@ -1971,8 +2062,11 @@ fn change(messages: &mut BTreeMap<u64, Message>, channel: &str, event: &Live) ->
             added,
         } if id == channel => {
             let order = message.parse().unwrap_or_default();
-            messages.get_mut(&order)?.react(key, emoji, *me, *added);
-            Some(order)
+            let res = messages.get_mut(&order).map(|m| {
+                m.react(key, emoji, *me, *added);
+                order
+            });
+            (res, Vec::new())
         }
         Live::ReactionsCleared {
             channel: id,
@@ -1980,12 +2074,13 @@ fn change(messages: &mut BTreeMap<u64, Message>, channel: &str, event: &Live) ->
             key,
         } if id == channel => {
             let order = message.parse().unwrap_or_default();
-            messages
-                .get_mut(&order)?
-                .reactions
-                .retain(|reaction| key.as_ref().is_some_and(|key| &reaction.key != key));
-            Some(order)
+            let res = messages.get_mut(&order).map(|m| {
+                m.reactions
+                    .retain(|reaction| key.as_ref().is_some_and(|key| &reaction.key != key));
+                order
+            });
+            (res, Vec::new())
         }
-        _ => None,
+        _ => (None, Vec::new()),
     }
 }

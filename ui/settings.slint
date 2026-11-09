@@ -1454,6 +1454,8 @@ export component DiscordSettings inherits VerticalLayout {
     in property <bool> show-idle;
     in property <bool> hide-blocked;
     in property <bool> role-colors-everywhere;
+    in property <bool> message-logger;
+    private property <bool> confirm-clear-logger: false;
     /// Those the account blocked, by name.
     in property <[BlockedRow]> blocked;
     callback unlink-discord;
@@ -1466,6 +1468,8 @@ export component DiscordSettings inherits VerticalLayout {
     callback sync-discord-reads-toggled(bool);
     callback show-idle-toggled(bool);
     callback role-colors-everywhere-toggled(bool);
+    callback message-logger-toggled(bool);
+    callback clear-logger;
     spacing: 16px;
     SettingsTitle { text: "Discord"; }
     if root.matrix-build: HorizontalLayout {
@@ -1499,6 +1503,38 @@ export component DiscordSettings inherits VerticalLayout {
         description: "Use each member's highest role colour for their name in servers: messages, member lists, mentions, replies, search, voice and profiles.";
         checked: root.role-colors-everywhere;
         toggled(on) => { root.role-colors-everywhere-toggled(on); }
+    }
+    SettingsSwitch {
+        text: "Message logger";
+        description: "Retain deleted messages in subtle red and keep up to five previous versions of edited messages in memory. No message contents are ever written to disk.";
+        checked: root.message-logger;
+        toggled(on) => { root.message-logger-toggled(on); }
+    }
+    if root.message-logger: HorizontalLayout {
+        padding-left: 16px; padding-bottom: 4px; spacing: 8px; alignment: start;
+        if !root.confirm-clear-logger: ActionButton {
+            text: "Clear Log";
+            small: true;
+            clicked => { root.confirm-clear-logger = true; }
+        }
+        if root.confirm-clear-logger: HorizontalLayout {
+            spacing: 8px;
+            ActionButton {
+                text: "Confirm Clear";
+                danger: true;
+                small: true;
+                clicked => {
+                    root.confirm-clear-logger = false;
+                    root.clear-logger();
+                }
+            }
+            ActionButton {
+                text: "Cancel";
+                ghost: true;
+                small: true;
+                clicked => { root.confirm-clear-logger = false; }
+            }
+        }
     }
     SettingsSwitch {
         text: "Hide messages from people you blocked";

@@ -1893,3 +1893,104 @@ async fn a_servers_card_shows_how_many_of_its_members_are_online() {
     assert_eq!(preview.online, Some(3), "Dave is offline");
     assert!(!preview.discoverable, "the fake lists no DISCOVERABLE");
 }
+
+#[test]
+fn message_logger_retains_deleted_messages() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    open.loaded(
+        Load::Latest,
+        shown(vec![message("3", None), message("5", None)]),
+    );
+
+    let mut logger = MessageLogger::new();
+    logger.set_enabled(true);
+
+    // Delete message 5 with logger ON
+    assert!(open.live_with_logger(
+        &Live::Deleted {
+            channel: "11".into(),
+            id: "5".into(),
+        },
+        Some(&mut logger),
+    ));
+
+    // Message 5 is retained in shown.messages with deleted: true
+    assert!(open.shown.messages.contains_key(&5));
+    assert!(open.shown.messages[&5].deleted);
+    assert!(logger.is_deleted("5"));
+}
+
+#[test]
+fn message_logger_off_removes_deleted_messages() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    open.loaded(
+        Load::Latest,
+        shown(vec![message("3", None), message("5", None)]),
+    );
+
+    let mut logger = MessageLogger::new();
+    // logger disabled by default
+    assert!(!logger.enabled);
+
+    assert!(open.live_with_logger(
+        &Live::Deleted {
+            channel: "11".into(),
+            id: "5".into(),
+        },
+        Some(&mut logger),
+    ));
+
+    // Message 5 is removed
+    assert!(!open.shown.messages.contains_key(&5));
+    assert!(open.shown.messages.contains_key(&3));
+}
+
+#[test]
+fn message_logger_edit_history_and_clear_log() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    open.loaded(Load::Latest, shown(vec![message("5", None)]));
+
+    let mut logger = MessageLogger::new();
+    logger.set_enabled(true);
+
+    // Initial message content is "5"
+    let edited1 = Message {
+        content: "first edit".into(),
+        edited: true,
+        edited_timestamp: Some(1700000001000),
+        ..message("5", None)
+    };
+    assert!(open.live_with_logger(&Live::Updated(edited1.clone()), Some(&mut logger)));
+
+    let edited2 = Message {
+        content: "second edit".into(),
+        edited: true,
+        edited_timestamp: Some(1700000002000),
+        ..message("5", None)
+    };
+    assert!(open.live_with_logger(&Live::Updated(edited2), Some(&mut logger)));
+
+    assert!(logger.has_history("5"));
+    let entry = logger.get("5").unwrap();
+    // 2 previous versions recorded
+    assert_eq!(entry.versions.len(), 2);
+    assert_eq!(entry.versions[0].content, "5");
+    assert_eq!(entry.versions[1].content, "first edit");
+
+    // Also mark it deleted
+    assert!(open.live_with_logger(
+        &Live::Deleted {
+            channel: "11".into(),
+            id: "5".into(),
+        },
+        Some(&mut logger),
+    ));
+    assert!(open.shown.messages.contains_key(&5));
+    assert!(open.shown.messages[&5].deleted);
+
+    // Clearing logger wipes deleted messages
+    let purged = logger.clear();
+    assert_eq!(purged, vec!["5"]);
+    open.apply_evicted(&purged);
+    assert!(!open.shown.messages.contains_key(&5));
+}

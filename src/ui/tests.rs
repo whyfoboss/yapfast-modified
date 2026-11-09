@@ -2984,6 +2984,27 @@ fn role_colors_everywhere_is_remembered() {
 }
 
 #[test]
+fn message_logger_is_remembered_and_toggle_dispatches_action() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    assert!(!window.get_message_logger());
+    assert!(!adapter.borrow().layout.message_logger);
+    window.set_message_logger(true);
+    window.invoke_message_logger_toggled(true);
+    assert!(adapter.borrow().layout.message_logger);
+    assert!(Layout::read(directory.path()).message_logger);
+    assert!(window.get_message_logger());
+}
+
+#[test]
 fn a_nameplates_picture_is_asked_for_when_its_row_shows() {
     i_slint_backend_testing::init_no_event_loop();
     let window = classic_window();

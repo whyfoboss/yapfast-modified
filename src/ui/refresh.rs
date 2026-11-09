@@ -2005,6 +2005,28 @@ impl Adapter {
             self.layout.role_colors_everywhere,
         );
 
+        let history = state.edit_history.as_ref();
+        window.set_history_open(history.is_some());
+        window.set_history_heading(
+            history
+                .map(|hist| {
+                    let count = hist.versions.len();
+                    if count == 1 {
+                        "Edit History · 1 version".to_string()
+                    } else {
+                        format!("Edit History · {count} versions")
+                    }
+                })
+                .unwrap_or_default()
+                .into(),
+        );
+        show_edit_history(
+            &self.models.history_entries,
+            history,
+            twelve_hour,
+            self.layout.role_colors_everywhere,
+        );
+
         let picker = state
             .add_people
             .as_ref()
@@ -5223,6 +5245,67 @@ fn show_hits(
             ..found_row_with_role_colors(&hit.message, twelve_hour, role_colors)
         });
     }
+}
+
+fn show_edit_history(
+    model: &VecModel<EditHistoryRow>,
+    history: Option<&yapfast_core::chat::EditHistoryData>,
+    twelve_hour: bool,
+    role_colors: bool,
+) {
+    let Some(history) = history else {
+        model.set_vec(Vec::new());
+        return;
+    };
+    let now = yapfast_core::clock::now_ms() / 1000;
+    let rows: Vec<EditHistoryRow> = history
+        .versions
+        .iter()
+        .map(|v| {
+            let ts = v.edited_at.unwrap_or(v.timestamp);
+            let time_str = if ts == 0 {
+                String::new()
+            } else {
+                let sent = yapfast_core::clock::sent(ts, now, twelve_hour, false);
+                if v.is_observed_time {
+                    format!("{sent} (local time)")
+                } else {
+                    sent
+                }
+            };
+            let label_str = match v.label {
+                yapfast_core::chat::VersionLabel::Current => "Current",
+                yapfast_core::chat::VersionLabel::Deleted => "Deleted",
+                yapfast_core::chat::VersionLabel::Previous => "Previous",
+                yapfast_core::chat::VersionLabel::Original => "Original",
+                yapfast_core::chat::VersionLabel::EarliestRecorded => "Earliest recorded",
+            };
+            let styled = messages::plain_with_links(&v.content)
+                .unwrap_or_else(|| slint::StyledText::from_plain_text(&v.content));
+            EditHistoryRow {
+                item: history.item.as_str().into(),
+                author: history.author.as_str().into(),
+                initial: initial(&history.author),
+                tint: tint(&history.author),
+                picture_url: history.avatar.as_deref().unwrap_or_default().into(),
+                color: if role_colors {
+                    profile::role_color(history.color)
+                } else {
+                    Default::default()
+                },
+                has_color: role_colors && history.color.is_some(),
+                when: time_str.into(),
+                version_label: label_str.into(),
+                is_deleted: v.label == yapfast_core::chat::VersionLabel::Deleted,
+                truncated: v.truncated,
+                body: v.content.as_str().into(),
+                styled,
+                has_body: !v.content.trim().is_empty(),
+                blocks: ModelRc::default(),
+            }
+        })
+        .collect();
+    model.set_vec(rows);
 }
 
 /// What the bar that jumps to the "New" divider says: how many messages

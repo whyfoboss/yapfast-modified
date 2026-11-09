@@ -117,6 +117,10 @@ pub struct Message {
     #[serde(default)]
     pub notice: Option<Notice>,
     pub edited: bool,
+    #[serde(default)]
+    pub edited_timestamp: Option<u64>,
+    #[serde(default)]
+    pub deleted: bool,
     pub reply: Option<Reply>,
     /// Its files, then its embeds' pictures.
     pub attachments: Vec<Attachment>,
@@ -756,6 +760,11 @@ pub fn parse(value: &Value) -> Option<Message> {
         }),
         system,
         edited: value["edited_timestamp"].is_string(),
+        edited_timestamp: value["edited_timestamp"]
+            .as_str()
+            .and_then(iso_ms)
+            .map(|ms| ms / 1000),
+        deleted: false,
         reply,
         attachments,
         embeds: embeds.embeds,

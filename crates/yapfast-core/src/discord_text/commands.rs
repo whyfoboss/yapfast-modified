@@ -5,7 +5,7 @@ use super::{
     render::{chat_member, mention_groups, notification, publish, send_topic, sent_id},
     *,
 };
-use crate::chat::ForwardFailure;
+use crate::chat::{EditHistoryData, ForwardFailure, HistoricalVersion, VersionLabel};
 use yapfast_discord::server_settings::GuildSettings as DiscordSettings;
 
 /// Why a Discord command fails for a room that isn't Discord's.
@@ -23,6 +23,20 @@ pub fn command(
 ) {
     if matches!(command, Command::Open(_) | Command::CloseRoom) {
         channels.close();
+    }
+    if let Command::Discord(DiscordCommand::EditHistory { room, item }) = &command {
+        handle_edit_history(room, item, discord, channels, events);
+        return;
+    }
+    if let Command::Discord(DiscordCommand::ClearMessageLog) = &command {
+        let evicted = channels.logger.clear();
+        purge_deleted(channels, &evicted, discord, done, events);
+        return;
+    }
+    if let Command::Discord(DiscordCommand::SetMessageLogger(enabled)) = &command {
+        let evicted = channels.logger.set_enabled(*enabled);
+        purge_deleted(channels, &evicted, discord, done, events);
+        return;
     }
     if let Command::Aside(room) = command {
         aside(room, discord, channels, done, events);
@@ -768,8 +782,14 @@ pub fn live(
         // Behind on live events, the kept channels load again when opened.
         Err(_) => channels.missed(),
     }
+    let Channels {
+        open,
+        aside,
+        logger,
+        ..
+    } = channels;
     // The thread beside the open channel follows as it does.
-    if let Some(aside) = channels.aside.as_mut() {
+    if let Some(aside) = aside.as_mut() {
         match &event {
             Ok(Live::Members { .. }) => {
                 if aside.names_changed(discord) {
@@ -777,14 +797,14 @@ pub fn live(
                 }
             }
             Ok(event) => {
-                if aside.live(event) {
+                if aside.live_with_logger(event, Some(logger)) {
                     publish(aside, discord, done, events);
                 }
             }
             Err(_) => aside.refresh(discord, done),
         }
     }
-    let Some(channel) = channels.open.as_mut() else {
+    let Some(channel) = open.as_mut() else {
         return;
     };
     match event {
@@ -805,11 +825,157 @@ pub fn live(
             }
         }
         Ok(event) => {
-            if channel.live(&event) {
+            if channel.live_with_logger(&event, Some(logger)) {
                 publish(channel, discord, done, events);
             }
         }
         Err(_) => channel.refresh(discord, done),
+    }
+}
+
+fn handle_edit_history(
+    room: &str,
+    item: &str,
+    discord: Result<&Discord, &str>,
+    channels: &Channels,
+    events: &UnboundedSender<Event>,
+) {
+    let id = item.strip_prefix("d:").unwrap_or(item);
+    let Some(entry) = channels.logger.get(id) else {
+        let _ = events.send(Event::EditHistory {
+            room: room.to_owned(),
+            item: item.to_owned(),
+            history: None,
+        });
+        return;
+    };
+    let order: u64 = id.parse().unwrap_or_default();
+    let message = channels
+        .open
+        .as_ref()
+        .and_then(|ch| ch.message(order))
+        .or_else(|| channels.aside.as_ref().and_then(|ch| ch.message(order)))
+        .or_else(|| channels.recent.iter().find_map(|ch| ch.message(order)));
+    let Some(current_msg) = message else {
+        let _ = events.send(Event::EditHistory {
+            room: room.to_owned(),
+            item: item.to_owned(),
+            history: None,
+        });
+        return;
+    };
+    let Ok(discord) = discord else {
+        let _ = events.send(Event::EditHistory {
+            room: room.to_owned(),
+            item: item.to_owned(),
+            history: None,
+        });
+        return;
+    };
+    let guild = discord::parse_room(room).map(|(g, _)| g);
+    let snapshot = discord.snapshots().borrow().clone();
+    let author = discord
+        .name(
+            guild.unwrap_or(yapfast_discord::ready::PRIVATE),
+            &current_msg.author_id,
+        )
+        .unwrap_or_else(|| current_msg.author.clone());
+    let color = guild
+        .and_then(|g| snapshot.servers.iter().find(|s| s.id == g))
+        .and_then(|s| discord.color(&s.server, &current_msg.author_id));
+    let avatar = Some(discord.avatar(guild, &current_msg.author_id));
+
+    let mut versions = Vec::new();
+    // 1. Current / Latest version at the top
+    versions.push(HistoricalVersion {
+        content: current_msg.content.clone(),
+        timestamp: current_msg.timestamp(),
+        edited_at: current_msg.edited_timestamp,
+        is_observed_time: false,
+        truncated: false,
+        label: if current_msg.deleted {
+            VersionLabel::Deleted
+        } else {
+            VersionLabel::Current
+        },
+    });
+
+    // 2. Previous versions in reverse order (newest previous first, oldest last)
+    let prev_count = entry.versions.len();
+    for (idx, v) in entry.versions.iter().rev().enumerate() {
+        let is_earliest = idx == prev_count - 1;
+        let label = if is_earliest {
+            if entry.original_known {
+                VersionLabel::Original
+            } else {
+                VersionLabel::EarliestRecorded
+            }
+        } else {
+            VersionLabel::Previous
+        };
+        versions.push(HistoricalVersion {
+            content: v.content.clone(),
+            timestamp: v.timestamp,
+            edited_at: v.edited_at,
+            is_observed_time: v.is_observed_time,
+            truncated: v.truncated,
+            label,
+        });
+    }
+
+    let history = EditHistoryData {
+        room: room.to_owned(),
+        item: item.to_owned(),
+        author,
+        author_id: current_msg.author_id.clone(),
+        avatar,
+        color,
+        versions,
+    };
+
+    let _ = events.send(Event::EditHistory {
+        room: room.to_owned(),
+        item: item.to_owned(),
+        history: Some(history),
+    });
+}
+
+fn purge_deleted(
+    channels: &mut Channels,
+    evicted: &[String],
+    discord: Result<&Discord, &str>,
+    done: &UnboundedSender<Done>,
+    events: &UnboundedSender<Event>,
+) {
+    if evicted.is_empty() {
+        return;
+    }
+    let orders: HashSet<u64> = evicted.iter().filter_map(|id| id.parse().ok()).collect();
+    if let Some(open) = channels.open.as_mut() {
+        let mut changed = false;
+        for order in &orders {
+            if open.shown.messages.remove(order).is_some() {
+                open.rendered.remove(order);
+                open.history_messages.remove(order);
+                changed = true;
+            }
+        }
+        if changed && let Ok(discord) = discord {
+            publish(open, discord, done, events);
+        }
+    }
+    if let Some(aside) = channels.aside.as_mut() {
+        let mut changed = false;
+        for order in &orders {
+            if aside.shown.messages.remove(order).is_some() {
+                aside.rendered.remove(order);
+                aside.history_messages.remove(order);
+                changed = true;
+            }
+        }
+        if changed && let Ok(discord) = discord {
+            publish(aside, discord, done, events);
+        }
     }
 }
 

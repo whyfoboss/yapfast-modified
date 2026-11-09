@@ -7653,6 +7653,7 @@ const GENERIC_CONTROLS = new Set([
   "qr-confirm", "qr-captcha", "qr-cancel", "qr-expire", "voice-audio", "video", "stream-codec", "reactor-pages",
   "reactor-removals", "thread-searches", "thread-creates", "thread-members", "typed", "acks", "invites",
   "invite-joins", "invite-captcha", "invite-form", "event-interest", "gift-redeems", "oauth-authorizations", "mfa", "soundboard-sends", "custom-call-sounds",
+  "logger-scenario", "logger-edit", "logger-delete",
 ]);
 
 /** A status's emoji as the env gives it, Unicode or `<:name:id>`, as Discord sends it. */
@@ -8644,6 +8645,54 @@ const server = Bun.serve<SocketData>({
         moved(user, state, origin);
       }
       return new Response("everyone hung up\n");
+    }
+    if (req.method === "POST" && path === "/_control/logger-scenario") {
+      let channel = url.searchParams.get("channel");
+      let author: User | undefined;
+      if (!channel && world) {
+        for (const guild of world.guilds) {
+          const ch = guild.channels.find((c: any) => c.name === "welcome") ?? guild.channels.find((c: any) => c.name === "general");
+          if (ch) {
+            channel = ch.id;
+            for (const memberId of guild.members.keys()) {
+              if (memberId !== ALICE) {
+                author = userById.get(memberId);
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+      if (!channel) {
+        channel = messages.has(GENERAL) ? GENERAL : messages.keys().next().value;
+      }
+      if (!author) {
+        author = [...userById.values()].find((u) => u.id !== ALICE) ?? users.bob;
+      }
+      const msg = post(channel, author, "Logger test: Original message version 1", Date.now() - 60000);
+      dispatch("MESSAGE_CREATE", dispatched(msg, origin));
+      return json({ id: msg.id, channel });
+    }
+    if (req.method === "POST" && path === "/_control/logger-edit") {
+      const id = url.searchParams.get("id");
+      const text = url.searchParams.get("text") ?? "Logger test: Edited message version 2";
+      const msg = byId.get(id!);
+      if (!msg) return notFound("Unknown Message", 10008);
+      msg.content = text;
+      msg.edited = Date.now();
+      dispatch("MESSAGE_UPDATE", dispatched(msg, origin));
+      return json(wireMessage(msg, origin));
+    }
+    if (req.method === "POST" && path === "/_control/logger-delete") {
+      const id = url.searchParams.get("id");
+      const msg = byId.get(id!);
+      if (!msg) return notFound("Unknown Message", 10008);
+      const list = messages.get(msg.channel)!;
+      list.splice(list.indexOf(msg), 1);
+      byId.delete(msg.id);
+      dispatch("MESSAGE_DELETE", { id: msg.id, channel_id: msg.channel, ...guildOf(msg.channel) });
+      return empty();
     }
     if (req.method === "POST" && path === "/_control/hide-from-bots") {
       // The channel in the body is hidden from the Bots role, which gives it

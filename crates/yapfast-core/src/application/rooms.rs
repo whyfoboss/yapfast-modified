@@ -609,6 +609,7 @@ impl Application {
             return vec![];
         }
         self.state.profile = None;
+        self.state.edit_history = None;
         self.pending_message = Some(PendingMessage {
             user: user.clone(),
             text,
@@ -900,6 +901,7 @@ impl Application {
         self.state.viewer = None;
         self.state.video = None;
         self.state.profile = None;
+        self.state.edit_history = None;
         self.state.room_ready = self.state.preview || voice_room;
         self.state.loading_history = false;
         // The preview's samples are all there is.
@@ -1018,6 +1020,7 @@ impl Application {
         effects.extend(self.close_forum());
         self.remember_view();
         self.state.selected = None;
+        self.state.edit_history = None;
         self.state.confirm_delete = None;
         self.state.confirm_end_poll = None;
         self.state.poll_draft = None;

@@ -1269,6 +1269,36 @@ pub struct SearchHit {
     pub message: ChatMessage,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VersionLabel {
+    Current,
+    Deleted,
+    Previous,
+    Original,
+    EarliestRecorded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoricalVersion {
+    pub content: String,
+    pub timestamp: u64,
+    pub edited_at: Option<u64>,
+    pub is_observed_time: bool,
+    pub truncated: bool,
+    pub label: VersionLabel,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditHistoryData {
+    pub room: String,
+    pub item: String,
+    pub author: String,
+    pub author_id: String,
+    pub avatar: Option<String>,
+    pub color: Option<u32>,
+    pub versions: Vec<HistoricalVersion>,
+}
+
 /// A Discord channel's topic, as its header shows it: Markdown with
 /// mentions by name, as a message's body is.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1816,6 +1846,7 @@ pub struct ChatMessage {
     pub timestamp: u64,
     pub own: bool,
     pub edited: bool,
+    pub has_edit_history: bool,
     pub deleted: bool,
     /// From someone this account blocked: it shows collapsed until asked for.
     pub blocked: bool,
@@ -3013,6 +3044,15 @@ pub enum DiscordCommand {
         /// bigger.
         action: Box<StickerAction>,
     },
+    /// Look up a message's edit history in its channel.
+    EditHistory {
+        room: String,
+        item: String,
+    },
+    /// Clear all logged messages and edit history from memory.
+    ClearMessageLog,
+    /// Enable or disable message logger.
+    SetMessageLogger(bool),
 }
 
 /// What Emoji asks of Discord. Each is followed by the server's emoji
@@ -4317,6 +4357,12 @@ pub enum Event {
     Sync(bool),
     Error(String),
     LoggedOut,
+    /// A message's edit history, for the right-hand sidebar.
+    EditHistory {
+        room: String,
+        item: String,
+        history: Option<EditHistoryData>,
+    },
 }
 
 pub fn sort_members(members: &mut [ChatMember]) {

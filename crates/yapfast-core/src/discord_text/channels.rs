@@ -56,6 +56,7 @@ pub struct Channels {
     pub(super) typed: Option<(String, Instant)>,
     /// Counts member searches, so one typed over before it went is dropped.
     pub(super) searches: Arc<std::sync::atomic::AtomicU64>,
+    pub logger: super::logger::MessageLogger,
 }
 
 /// How long a member search waits for more typing before it goes to Discord.
@@ -107,8 +108,9 @@ impl Channels {
     /// newest messages, as on closing; a busy one would otherwise grow for
     /// the whole session.
     pub(super) fn follow(&mut self, event: &Live) {
+        let logger = &mut self.logger;
         for kept in &mut self.recent {
-            if kept.live(event) {
+            if kept.live_with_logger(event, Some(logger)) {
                 kept.trim();
             }
         }

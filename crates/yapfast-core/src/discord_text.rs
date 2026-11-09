@@ -43,6 +43,7 @@ mod channels;
 mod commands;
 mod expressions;
 mod gifs;
+pub mod logger;
 mod open_channel;
 mod overwrites;
 mod own_profile;
@@ -55,6 +56,7 @@ mod stickers;
 
 pub use channels::Channels;
 pub use commands::{command, finished, live};
+pub use logger::{MessageLogger, MessageVersion, TrackedEntry};
 pub use open_channel::{Load, OpenChannel};
 
 /// Discord's message length limit without Nitro, in characters.

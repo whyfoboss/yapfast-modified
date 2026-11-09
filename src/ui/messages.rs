@@ -757,6 +757,7 @@ pub(super) fn message_row_within_with_role_colors(
         time_styled: slint::StyledText::from_plain_text(&message.time),
         edited: message.edited,
         deleted: message.deleted,
+        has_edit_history: message.has_edit_history,
         forwarded: message.forwarded,
         has_reply: message.reply.is_some(),
         reply_author: reply_author.into(),

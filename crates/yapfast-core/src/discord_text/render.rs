@@ -113,6 +113,7 @@ pub(super) fn found(
         time: crate::clock::time(timestamp),
         timestamp,
         edited: message.edited,
+        deleted: message.deleted,
         attachments: message
             .attachments
             .iter()

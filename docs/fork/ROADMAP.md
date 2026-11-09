@@ -70,13 +70,22 @@ DM or global-friend lists are unchanged.
 Work: apply the same policy to friend and request rows if that scope is
 wanted, and parse role gradients in the service if the policy needs them.
 
-Message logger and better animations are separate sub-items; keep them in
-their own commits. A logger needs a bounded local store (the current cache is
-an in-memory snapshot with size caps; there is no database dependency in the
-workspace) and a clear privacy decision: what is logged, where, for how long,
-and how the user deletes it. Animations already have `Animate`
-(focused/always/never) and `Theme.quick`; "better" needs concrete cases and a
-frame-time check, not a global speed change.
+Message logger (done): `Layout::message_logger` (default off) and the Discord
+settings' "Message logger" switch enable an in-memory message logger. Deleted
+messages are retained in their chronological timeline position in subtle red
+(`Theme.danger-text`) with a `" · Deleted"` badge near the timestamp, and server
+actions suppressed. Up to 5 previous versions per edited message are kept in
+memory; "View Edit History" in the message context menu opens a dedicated 420px
+docked sidebar showing stacked version cards (Current/Deleted, Previous, and
+Original / Earliest recorded) with author avatar, name, role colour, timestamp,
+content, and truncation notes (>2,000 characters). Memory is strictly bounded:
+max 500 global tracked messages, 100 per channel, 16 MB global ceiling, with
+deterministic FIFO oldest-entry eviction and zero disk persistence. "Clear Log"
+in Settings → Discord purges all logged messages and edit history immediately.
+
+Better animations remains a separate sub-item in its own commit. Animations
+already have `Animate` (focused/always/never) and `Theme.quick`; "better" needs
+concrete cases and a frame-time check, not a global speed change.
 
 Risks: colours computed in several refresh paths drift; gradient support
 touches the service and the member model; a logger can grow without bound and
@@ -84,7 +93,8 @@ must never log tokens or message contents unexpectedly. Do not enable logging
 by default.
 
 Verify: fake role with a colour and a gradient; tests for the setting
-round-trip and refresh; screenshots in the Onyx and the default theme.
+round-trip and refresh; screenshots in the Onyx and the default theme; message
+logger memory, retention, eviction and UI tests.
 
 ### 3. Selectable and copyable usernames (S)
 

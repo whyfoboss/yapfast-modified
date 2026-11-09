@@ -2267,6 +2267,40 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     });
     let state = adapter.clone();
     let weak = window.as_weak();
+    window.on_message_logger_toggled(move |on| {
+        let mut adapter = state.borrow_mut();
+        adapter.layout.message_logger = on;
+        adapter.layout.write(&adapter.root);
+        if let Some(window) = weak.upgrade() {
+            window.set_message_logger(on);
+            adapter.action(&window, Action::SetMessageLogger(on));
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_clear_logger(move || {
+        if let Some(window) = weak.upgrade() {
+            state.borrow_mut().action(&window, Action::ClearMessageLog);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_view_edit_history(move |item| {
+        if let Some(window) = weak.upgrade() {
+            state
+                .borrow_mut()
+                .action(&window, Action::ViewEditHistory(item.into()));
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_close_edit_history(move || {
+        if let Some(window) = weak.upgrade() {
+            state.borrow_mut().action(&window, Action::CloseEditHistory);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
     window.on_show_idle_toggled(move |shown| {
         let mut adapter = state.borrow_mut();
         adapter.layout.show_idle = Some(shown);

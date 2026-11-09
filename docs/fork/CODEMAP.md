@@ -310,8 +310,16 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
   (`:86`), previews 192 MiB (`:88`), GIFs 200 MiB (`:92`), channels 300
   (`:96`), 100 messages per channel (`:98`), profiles 500 (`:100`), kept
   people 20000 (`crates/yapfast-discord/src/message.rs:1297`). `prune` evicts
-  by size/count. There is no persistent message log: the cache is a bounded
-  snapshot, not a logger.
+  by size/count.
+- Message Logger: `MessageLogger` (`crates/yapfast-core/src/discord_text/logger.rs`)
+  holds an in-memory log of deleted messages and previous edit versions when
+  enabled via `Layout::message_logger`. Memory is bounded: max 500 global entries,
+  100 per channel, 5 previous versions per message, 2,000 characters per version,
+  and a 16 MiB global ceiling with oldest-first eviction. No message content is
+  ever written to disk. The edit history sidebar (`ui/history.slint`, `EditHistoryPanel`)
+  docks beside the timeline at 420px width via `Action::ViewEditHistory` /
+  `Event::EditHistory` and closes on Escape or its close button. Clear Log
+  (`Action::ClearMessageLog`) purges all retained records immediately.
 
 ## 13. Tests and the fake Discord
 

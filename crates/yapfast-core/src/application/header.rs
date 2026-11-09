@@ -43,6 +43,7 @@ impl Application {
             self.state.search = None;
             return vec![];
         };
+        self.state.edit_history = None;
         self.state.search = Some(Search {
             place: place.clone(),
             query: query.clone(),
