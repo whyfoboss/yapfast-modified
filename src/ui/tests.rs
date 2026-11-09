@@ -9733,11 +9733,11 @@ fn yapfast_server_rail_keeps_home_pinned_without_a_duplicate_separator() {
             });
         i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(250));
     };
-    // Home 40px, gap 8px, one 2px separator, gap 8px: server starts at 58px.
-    click(62.);
+    // Padding 12px, Home 40px, gap 8px, one 2px separator, gap 8px: server starts at 70px.
+    click(74.);
     assert_eq!(*navigated.borrow(), ["0"]);
     scroll(-240.);
-    click(20.);
+    click(26.);
     assert_eq!(homes.get(), 1, "DM home stays pinned while servers scroll");
     model.insert(
         0,
@@ -9751,10 +9751,10 @@ fn yapfast_server_rail_keeps_home_pinned_without_a_duplicate_separator() {
     );
     scroll(10000.);
     navigated.borrow_mut().clear();
-    // Unread DM at 58px, then its 8px gap and a 10px divider row.
-    click(110.);
+    // Unread DM at 70px, then its 8px gap and a 10px divider row.
+    click(122.);
     assert!(navigated.borrow().is_empty(), "keep the unread-DM boundary");
-    click(120.);
+    click(132.);
     assert_eq!(*navigated.borrow(), ["0"]);
     window.hide().unwrap();
 }
