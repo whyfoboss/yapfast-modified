@@ -2348,7 +2348,8 @@ export component YapfastWindow inherits Window {
     // From a button, the menu opens left of it, level with its top, or right of
     // it when there isn't room.
     message-menu := PopupWindow {
-        width: 224px; height: menu-content.content-height;
+        width: min(root.width - 16px, max(root.menu-message.deleted ? 256px : 224px, menu-content.content-width));
+        height: menu-content.content-height;
         x: root.anchor-pointer ? max(8px, min(root.width - self.width - 8px, root.anchor-x))
             : root.anchor-x - self.width - 8px >= 8px ? root.anchor-x - self.width - 8px
             : max(8px, min(root.width - self.width - 8px, root.anchor-x + root.anchor-width + 8px));

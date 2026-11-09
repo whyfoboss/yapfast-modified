@@ -1306,6 +1306,7 @@ export component MessageMenu inherits Rectangle {
     in property <bool> forward-allowed;
     in property <bool> preview;
     out property <length> content-height: menu-content.preferred-height;
+    out property <length> content-width: menu-content.preferred-width;
     callback react(string, string);
     callback open-picker(string);
     callback edit(string);
