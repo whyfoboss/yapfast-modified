@@ -140,7 +140,7 @@ component PostCard inherits Rectangle {
                     if root.entry.new: Middle {
                         Rectangle {
                             width: badge.preferred-width + 10px; height: 16px; border-radius: 8px; background: Theme.accent;
-                            badge := Text { text: "NEW"; color: #ffffff; font-size: 10px; font-weight: 800; letter-spacing: 0.3px; }
+                            badge := Text { text: "NEW"; color: Theme.on-accent; font-size: 10px; font-weight: 800; letter-spacing: 0.3px; }
                         }
                     }
                     Rectangle { horizontal-stretch: 1; }

@@ -28,10 +28,13 @@ promising performance; this host is a WSL2 machine with 11 GiB of RAM.
 Goal: a monochrome built-in theme in the same family as Discord's Onyx, dark
 and neutral, selected from Appearance without custom CSS.
 
-Today: ten built-ins in `src/ui/theme.rs` (`BUILT_IN`, `BuiltIn`), the complete
-palette global in `ui/theme.slint`, picker cards in `ui/settings.slint`, and
-`docs/themes.md` with a table of every built-in. Custom themes already cover
-the persistence path.
+Today: eleven built-ins in `src/ui/theme.rs` (`BUILT_IN`, `BuiltIn`), the
+complete palette global in `ui/theme.slint`, picker cards in
+`ui/settings.slint`, and `docs/themes.md` with a table of every built-in.
+Custom themes already cover the persistence path.
+
+Done: `onyx` is a built-in with a card, a docs row and a contrast test whose
+ratios are in `docs/themes.md`.
 
 Work: add one `BuiltIn` entry with all required fields, a thumbnail/card, and
 the docs row; audit contrast for text, muted text, mention, link, danger and

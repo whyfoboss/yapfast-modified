@@ -47,6 +47,7 @@ colours and a card.
 | Theme | Id | Dark | Accent | From |
 | --- | --- | --- | --- | --- |
 | Yap | `yap` | yes | marigold | Yapfast's own, the default |
+| Onyx | `onyx` | yes | white | Yapfast's own, black and white |
 | Bonfire | `bonfire` | yes | blurple | Discord's Dark theme |
 | Catppuccin Mocha | `catppuccin-mocha` | yes | mauve | [Catppuccin](https://github.com/catppuccin/catppuccin) |
 | Dracula | `dracula` | yes | purple | [Dracula](https://draculatheme.com/contribute) |
@@ -56,6 +57,37 @@ colours and a card.
 | Catppuccin Latte | `catppuccin-latte` | no | mauve | [Catppuccin](https://github.com/catppuccin/catppuccin) |
 | Rosé Pine Dawn | `rose-pine-dawn` | no | rose | [Rosé Pine](https://rosepinetheme.com/palette/) |
 | Sakura | `sakura` | no | blossom pink | Yapfast's own |
+
+Onyx is Yapfast's own black-and-white theme: pure black grounds, raised
+surfaces at `#0a0a0a`, `#111111` and `#1a1a1a`, `#2a2a2a` lines, white text
+and a white accent. Colour is kept only where it carries meaning: presence
+dots, danger, live voice, mention and unread badges, and the role colours
+servers set. Mention rows and links are monochrome, and scrims and shadows
+over media stay literal, as in every theme.
+
+Its contrast, from `onyx_text_is_readable_on_every_surface` (WCAG 2.1):
+
+| Colour | rail | sidebar | panel | chat | raised | field | hover | active | row-hover | menu | composer |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| text | 21.00 | 19.80 | 19.80 | 21.00 | 18.88 | 19.80 | 17.40 | 17.40 | 19.80 | 18.10 | 19.56 |
+| secondary | 8.03 | 7.57 | 7.57 | 8.03 | 7.22 | 7.57 | 6.66 | 6.66 | 7.57 | 6.92 | 7.48 |
+| muted | 6.08 | 5.73 | 5.73 | 6.08 | 5.47 | 5.73 | 5.04 | 5.04 | 5.73 | 5.24 | 5.67 |
+| faint | 3.66 | 3.45 | 3.45 | 3.66 | 3.29 | 3.45 | 3.03 | 3.03 | 3.45 | 3.15 | 3.41 |
+| link | 13.48 | 12.71 | 12.71 | 13.48 | 12.12 | 12.71 | 11.17 | 11.17 | 12.71 | 11.62 | 12.56 |
+| danger | 5.61 | 5.29 | 5.29 | 5.61 | 5.04 | 5.29 | 4.65 | 4.65 | 5.29 | 4.83 | 5.22 |
+| success | 6.60 | 6.22 | 6.22 | 6.60 | 5.94 | 6.22 | 5.47 | 5.47 | 6.22 | 5.69 | 6.15 |
+| focus ring (accent) | 21.00 | 19.80 | 19.80 | 21.00 | 18.88 | 19.80 | 17.40 | 17.40 | 19.80 | 18.10 | 19.56 |
+| mention (text on row) | 18.73 | 17.22 | 17.22 | 18.73 | 15.91 | 17.22 | 14.35 | 14.35 | 17.22 | 15.13 | 16.86 |
+
+`faint` is de-emphasised text and icons, held to at least 2.5:1 like the
+other themes; the focus ring is held to 3:1. The filled states are not
+surface-dependent:
+
+| State | Against | Ratio |
+| --- | --- | --- |
+| on-accent | accent | 21.00 |
+| on-danger (also a mention badge) | danger | 5.61 |
+| on-danger | danger-hover | 6.96 |
 
 The palettes of Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night and Rosé Pine
 are published under the MIT licence; thanks to their authors. For Tokyo

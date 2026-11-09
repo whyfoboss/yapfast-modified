@@ -1082,10 +1082,10 @@ export component ProfileCard inherits Rectangle {
                                 accessible-action-default => { if root.data.friend == 4 { root.more(self.absolute-position.x, self.absolute-position.y + self.height); } else { root.befriend(); } }
                                 friend-row := HorizontalLayout {
                                     x: 12px; spacing: 6px; alignment: center;
-                                    Middle { Image { source: root.data.friend == 4 ? @image-url("icons/check.svg") : @image-url("icons/user-plus.svg"); width: 16px; height: 16px; colorize: root.data.friend == 3 ? #ffffff : Theme.text; } }
+                                    Middle { Image { source: root.data.friend == 4 ? @image-url("icons/check.svg") : @image-url("icons/user-plus.svg"); width: 16px; height: 16px; colorize: root.data.friend == 3 ? Theme.on-accent : Theme.text; } }
                                     Text {
                                         text: root.data.friend == 1 ? "Add Friend" : root.data.friend == 2 ? "Friend Request Sent" : root.data.friend == 4 ? "Friends" : "Accept Friend Request";
-                                        color: root.data.friend == 3 ? #ffffff : Theme.text; font-size: 14px; font-weight: 500; vertical-alignment: center;
+                                        color: root.data.friend == 3 ? Theme.on-accent : Theme.text; font-size: 14px; font-weight: 500; vertical-alignment: center;
                                     }
                                 }
                                 action-friend := TouchArea {

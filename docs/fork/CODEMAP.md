@@ -48,12 +48,12 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
 - `export global Theme` in `ui/theme.slint` lists every colour (rail,
   sidebar, panel, chat, raised, text, accent, and so on). Widgets read the
   global; no widget owns a palette.
-- Built-ins: `BuiltIn` (`src/ui/theme.rs:530`) and
-  `BUILT_IN: [BuiltIn; 10]` (`:538`): `yap`, `bonfire`,
+- Built-ins: `BuiltIn` (`src/ui/theme.rs:599`) and
+  `BUILT_IN: [BuiltIn; 11]` (`:607`): `yap`, `onyx`, `bonfire`,
   `catppuccin-mocha`, `dracula`, `nord`, `gruvbox-dark`, `tokyo-night`,
   `catppuccin-latte`, `rose-pine-dawn`, `sakura`. `Theme` starts at `:26`;
-  `lookup` `:596`, `chosen` `:609`, custom `:657`, `tidy` `:748`,
-  `starts` `:771`, `cards` `:833`.
+  `lookup` `:670`, `chosen` `:683`, custom `:731`, `tidy` `:822`,
+  `starts` `:845`, `cards` `:907`.
 - Custom format: `custom_themes` in `layout.json`; each has `id`, `name`,
   `base`, `dark`, `colours` (for example `{"id":"custom:1","name":"Plum",
   "base":"yap","dark":true,"colours":{"chat":"#2a1a3a"}}`). Missing colours

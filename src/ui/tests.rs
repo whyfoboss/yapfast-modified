@@ -7257,6 +7257,145 @@ fn built_in_themes_have_their_own_ids_and_say_whether_they_are_dark() {
 }
 
 #[test]
+fn onyx_text_is_readable_on_every_surface() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let onyx = theme::find("onyx").expect("Onyx is built in").theme;
+    onyx.apply(&window);
+    let tokens = window.global::<yapfast_ui::Theme>();
+    let surfaces = [
+        ("rail", tokens.get_rail()),
+        ("sidebar", tokens.get_sidebar()),
+        ("panel", tokens.get_panel()),
+        ("chat", tokens.get_chat()),
+        ("raised", tokens.get_raised()),
+        ("field", tokens.get_field()),
+        ("hover", tokens.get_hover()),
+        ("active", tokens.get_active()),
+        ("row-hover", tokens.get_row_hover()),
+        ("menu", tokens.get_menu()),
+        ("composer", tokens.get_composer()),
+    ];
+    let linear = |value: u8| {
+        let value = f64::from(value) / 255.;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = |colour: slint::Color| {
+        0.2126 * linear(colour.red())
+            + 0.7152 * linear(colour.green())
+            + 0.0722 * linear(colour.blue())
+    };
+    let contrast = |a: slint::Color, b: slint::Color| {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    };
+    let over = |front: slint::Color, back: slint::Color| {
+        let alpha = f64::from(front.alpha()) / 255.;
+        let mix = |front: u8, back: u8| {
+            (f64::from(front) * alpha + f64::from(back) * (1. - alpha)).round() as u8
+        };
+        slint::Color::from_rgb_u8(
+            mix(front.red(), back.red()),
+            mix(front.green(), back.green()),
+            mix(front.blue(), back.blue()),
+        )
+    };
+    let rows = [
+        ("text", onyx.text, 4.5),
+        ("secondary", onyx.secondary, 4.5),
+        ("muted", onyx.muted, 4.5),
+        ("faint", onyx.faint, 2.5),
+        ("link", onyx.link, 4.5),
+        ("danger", onyx.danger, 4.5),
+        ("success", onyx.live, 4.5),
+        ("focus ring (accent)", onyx.accent, 3.0),
+    ];
+    let mut header = String::from("| Colour |");
+    for (name, _) in &surfaces {
+        header.push_str(&format!(" {name} |"));
+    }
+    println!("{header}");
+    let mut rule = String::from("| --- |");
+    for _ in &surfaces {
+        rule.push_str(" --- |");
+    }
+    println!("{rule}");
+    for (name, colour, needed) in rows {
+        let mut line = format!("| {name} |");
+        for (surface_name, surface) in &surfaces {
+            let ratio = contrast(colour, *surface);
+            assert!(
+                ratio + 0.005 >= needed,
+                "{name} on {surface_name}: {ratio:.2}, needs {needed}"
+            );
+            line.push_str(&format!(" {ratio:.2} |"));
+        }
+        println!("{line}");
+    }
+    let mut line = String::from("| mention (text on row) |");
+    for (surface_name, surface) in &surfaces {
+        let row = over(onyx.mentioned, *surface);
+        let ratio = contrast(onyx.text, row);
+        assert!(
+            ratio + 0.005 >= 4.5,
+            "mention text on {surface_name}: {ratio:.2}"
+        );
+        line.push_str(&format!(" {ratio:.2} |"));
+    }
+    println!("{line}");
+    let on_accent = contrast(onyx.on_accent, onyx.accent);
+    let on_danger = contrast(onyx.on_danger, onyx.danger);
+    let on_danger_hover = contrast(onyx.on_danger, onyx.danger_hover);
+    println!("| on-accent on accent | {on_accent:.2} |");
+    println!("| on-danger on danger | {on_danger:.2} |");
+    println!("| on-danger on danger-hover | {on_danger_hover:.2} |");
+    assert!(on_accent >= 4.5);
+    assert!(on_danger >= 4.5);
+    assert!(on_danger_hover >= 4.5);
+}
+
+#[test]
+fn a_saved_custom_theme_takes_mention_colours_from_its_base() {
+    let stored = serde_json::json!({
+        "id": "custom:1",
+        "name": "Old",
+        "base": "nord",
+        "colours": { "chat": "#000000" },
+    });
+    let custom: theme::Custom = serde_json::from_value(stored).unwrap();
+    let nord = theme::find("nord").unwrap().theme;
+    assert_eq!(custom.theme.mentioned, nord.mentioned);
+    assert_eq!(custom.theme.mentioned_hover, nord.mentioned_hover);
+    let written = serde_json::to_value(&custom).unwrap();
+    assert_eq!(written["colours"]["mentioned"], theme::hex(nord.mentioned));
+    assert_eq!(
+        written["colours"]["mentioned-hover"],
+        theme::hex(nord.mentioned_hover)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("layout.json"),
+        r##"{
+            "theme": "custom:1",
+            "custom_themes": [{
+                "id": "custom:1", "name": "Old", "base": "nord",
+                "colours": { "chat": "#000000" }
+            }]
+        }"##,
+    )
+    .unwrap();
+    let layout = Layout::read(directory.path());
+    let custom = &layout.custom_themes[0];
+    assert_eq!(custom.theme.mentioned, nord.mentioned);
+    assert_eq!(custom.theme.mentioned_hover, nord.mentioned_hover);
+}
+
+#[test]
 fn a_colour_is_written_as_slint_writes_one() {
     let parse = |text| theme::parse(text).map(theme::hex);
     assert_eq!(parse("#abc").as_deref(), Some("#aabbcc"));
@@ -7363,7 +7502,11 @@ fn a_custom_theme_is_made_edited_and_deleted_in_appearance() {
     window.invoke_new_theme();
     assert!(window.get_theme_editor());
     assert_eq!(window.get_theme_name(), "Nord copy");
-    assert_eq!(window.get_theme_start(), 4);
+    let nord_start = theme::BUILT_IN
+        .iter()
+        .position(|built_in| built_in.id == "nord")
+        .unwrap();
+    assert_eq!(window.get_theme_start(), nord_start as i32);
     assert_eq!(window.get_theme_starts().row_count(), theme::BUILT_IN.len());
     let colours = window.get_theme_colours();
     assert_eq!(colours.row_count(), theme::Theme::NAMES.len());
@@ -7447,7 +7590,11 @@ fn a_custom_theme_is_made_edited_and_deleted_in_appearance() {
     // A new theme from another start takes its colours and name.
     window.invoke_new_theme();
     assert_eq!(window.get_theme_name(), "Midnight copy");
-    window.invoke_theme_start_chosen(9);
+    let sakura_start = theme::BUILT_IN
+        .iter()
+        .position(|built_in| built_in.id == "sakura")
+        .unwrap();
+    window.invoke_theme_start_chosen(sakura_start as i32);
     assert_eq!(window.get_theme_name(), "Sakura copy");
     assert_eq!(
         theme::Theme::shown(&window),
