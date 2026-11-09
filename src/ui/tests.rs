@@ -7191,7 +7191,7 @@ fn edit_profile_opens_the_main_profile_editor() {
         adapter.refresh(&window);
     }
     let prompt = window.get_profile_editor_prompt();
-    assert_eq!(prompt.title, "Edit profile");
+    assert_eq!(prompt.title, "Your profile");
     assert_eq!(prompt.detail, "Your profile");
     assert_eq!(prompt.handle, "alice");
     assert!(prompt.main && !prompt.offer && prompt.bio_enabled && prompt.avatar_enabled);
@@ -9561,7 +9561,7 @@ fn yapfast_account_popover_copies_its_id_and_opens_settings_without_changing_sta
     let status_changes = Rc::new(Cell::new(0));
     let seen = status_changes.clone();
     window.on_set_status(move |_| seen.set(seen.get() + 1));
-    for (x, y) in [(100., 722.), (160., 600.), (100., 722.), (160., 652.)] {
+    for (x, y) in [(100., 722.), (160., 632.), (100., 722.), (160., 674.)] {
         let position = slint::LogicalPosition::new(x, y);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,

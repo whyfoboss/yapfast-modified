@@ -674,7 +674,7 @@ export struct ProfileEditorPrompt {
 
 // A pencil, or a lock where Nitro is wanted, on a round dark badge: what
 // the profile editor shows over a picture that can be changed.
-component EditBadge inherits Rectangle {
+export component EditBadge inherits Rectangle {
     in property <bool> locked;
     width: 32px; height: 32px; border-radius: 16px;
     background: #000000b3;
@@ -687,7 +687,7 @@ component EditBadge inherits Rectangle {
 // A small pencil button beside a text of the profile editor's.
 // What says a text can be changed: an outline around it while pointed at, and on
 // the name a pencil at its end, as Discord's editor has it.
-component HoverEdit inherits Rectangle {
+export component HoverEdit inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> pencil;
     in property <string> label;
@@ -1511,56 +1511,27 @@ export component ProfileEditorDialog inherits Rectangle {
         root.editing = 0;
         scope.focus();
     }
-    function edit(field: int) {
-        root.editing = field;
-        root.colour-open = false;
-    }
-    function banner-clicked() {
-        if root.prompt.colour-shown {
-            root.colour-open = !root.colour-open;
-            root.editing = 0;
-        } else if root.prompt.banner-reset {
-            banner-menu.show();
-        } else {
-            root.pick(1);
-        }
-    }
-    function avatar-clicked() {
-        if root.prompt.avatar-reset {
-            avatar-menu.show();
-        } else {
-            root.pick(0);
-        }
-    }
     /// How far it's open, from 0 to 1; see PopupMotion.
     in property <float> motion: 1;
     background: rgba(0, 0, 0, 0.6 * root.motion);
     TouchArea { clicked => { root.close(); } }
-    property <length> bar-height: root.prompt.changed || root.prompt.saving ? 60px : 0px;
     card := Rectangle {
         opacity: Popup.opacity(root.motion); transform-scale: Popup.scale(root.motion);
         width: min(600px, root.width - 48px);
-        height: min(max(card-content.preferred-height, 600px), root.height - 48px);
-        y: max(24px, min((root.height - 600px) / 2, root.height - 24px - self.height));
+        height: min(max(card-content.preferred-height, 400px), root.height - 48px);
+        y: max(24px, min((root.height - self.height) / 2, root.height - 24px - self.height));
         background: root.themed ? @linear-gradient(180deg, root.card-top, root.card-bottom) : Theme.sidebar;
         border-color: Theme.edge; border-width: 1px; border-radius: 12px;
         drop-shadow-blur: 32px; drop-shadow-color: #00000066; drop-shadow-offset-y: 12px;
         accessible-role: groupbox;
         accessible-label: root.prompt.title;
-        // A click on the card, outside what's being edited, ends the editing.
-        TouchArea { clicked => { root.stop-editing(); root.colour-open = false; } }
+        // Clicks inside the card do not close it.
+        TouchArea { }
         scope := FocusScope {
             init => { self.focus(); }
             key-pressed(event) => {
                 if event.text == Key.Escape {
-                    if root.editing != 0 || root.colour-open {
-                        root.stop-editing();
-                        root.colour-open = false;
-                    } else if root.customize-open {
-                        root.customize-open = false;
-                    } else {
-                        root.close();
-                    }
+                    root.close();
                     return accept;
                 }
                 return reject;
@@ -1570,8 +1541,6 @@ export component ProfileEditorDialog inherits Rectangle {
                 card-content := VerticalLayout {
                     ScrollView {
                         vertical-stretch: 1;
-                        min-height: min(body.preferred-height, 240px);
-                        preferred-height: body.preferred-height;
                         content-height: body.preferred-height;
                         body := VerticalLayout {
                             padding-bottom: root.pad; spacing: 0px;
@@ -1585,293 +1554,47 @@ export component ProfileEditorDialog inherits Rectangle {
                                     if root.prompt.preview.banner.width > 0: Image {
                                         width: parent.width; height: parent.height; source: root.prompt.preview.banner; image-fit: cover;
                                     }
-                                    if banner-touch.has-hover && (root.banner-editable || root.banner-locked): Rectangle { background: #00000059; }
-                                    if banner-touch.has-hover && (root.banner-editable || root.banner-locked): EditBadge {
-                                        x: parent.width - self.width - 60px; y: 18px; locked: root.banner-locked;
-                                    }
-                                    if root.prompt.reading == "banner": Text {
-                                        text: "Reading..."; color: #ffffff; font-size: 14px; font-weight: 700;
-                                    }
-                                    banner-touch := TouchArea {
-                                        enabled: root.banner-editable || root.banner-locked;
-                                        mouse-cursor: root.banner-editable ? MouseCursor.pointer : MouseCursor.default;
-                                        clicked => { if root.banner-editable { root.banner-clicked(); } }
-                                    }
-                                    banner-menu := PopupWindow {
-                                        x: parent.width - 236px; y: 56px; width: 180px;
-                                        Rectangle {
-                                            background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
-                                            drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
-                                            VerticalLayout {
-                                                padding: 6px; spacing: 2px;
-                                                MenuItem { text: "Change Banner"; icon: @image-url("icons/image.svg"); clicked => { banner-menu.close(); root.pick(1); } }
-                                                MenuItem { text: root.prompt.reset-word + " Banner"; icon: @image-url("icons/x.svg"); danger: true; clicked => { banner-menu.close(); root.reset(1); } }
-                                            }
-                                        }
-                                    }
                                 }
                                 Rectangle {
                                     x: 16px; y: 16px; width: detail-text.preferred-width + 20px; height: 28px; border-radius: 14px;
                                     background: #000000b3;
                                     detail-text := Text { text: root.prompt.main ? root.prompt.title : root.prompt.detail; color: #ffffff; font-size: 13px; font-weight: 600; }
                                 }
-                                HorizontalLayout {
-                                    x: parent.width - self.preferred-width - 16px; y: 16px; spacing: 8px;
-                                    if root.prompt.main: Rectangle {
-                                        width: customize-btn.preferred-width + 20px; height: 32px; border-radius: 16px;
-                                        background: customize-touch.has-hover ? #000000d0 : #000000b3;
-                                        animate background { duration: 120ms; }
-                                        customize-btn := HorizontalLayout {
-                                            padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
-                                            Middle { Image { source: @image-url("icons/brush.svg"); width: 14px; height: 14px; colorize: #ffffff; } }
-                                            Middle { Text { text: "Customize"; color: #ffffff; font-size: 13px; font-weight: 600; } }
-                                        }
-                                        customize-touch := TouchArea {
-                                            mouse-cursor: MouseCursor.pointer;
-                                            clicked => { root.customize-open = !root.customize-open; }
-                                        }
-                                    }
-                                    IconButton {
-                                        icon: @image-url("icons/x.svg"); label: "Close"; size: 32px; glyph: 16px; radius: 16px;
-                                        fill: #000000b3; tint: #ffffff;
-                                        clicked => { root.close(); }
-                                    }
-                                }
                                 Rectangle {
                                     x: root.pad - 6px; y: root.banner-height - root.avatar-size / 2 - 6px;
                                     width: root.avatar-size + 12px; height: self.width; border-radius: self.width / 2;
                                     background: root.plate;
                                     Avatar { size: root.avatar-size; initial: root.prompt.preview.initial; tint: root.prompt.preview.tint; picture: root.prompt.preview.picture; }
-                                    if root.prompt.main && root.presence != "": StatusDot {
-                                        x: root.avatar-size * 0.85 - self.width / 2 + 6px; y: root.avatar-size * 0.85 - self.height / 2 + 6px;
-                                        width: root.avatar-size * 0.325; height: self.width; presence: root.presence; ring: root.plate;
-                                    }
-                                    // What you're up to, a thought beside the picture.
-                                    if root.prompt.main: Rectangle {
-                                        x: root.avatar-size + 14px; y: 38px; width: 10px; height: 10px; border-radius: 5px;
-                                        background: Theme.raised; border-color: Theme.edge; border-width: 1px;
-                                    }
-                                    if root.prompt.main: Rectangle {
-                                        x: root.avatar-size + 28px; y: 45px; width: 20px; height: 20px; border-radius: 10px;
-                                        background: Theme.raised; border-color: Theme.edge; border-width: 1px;
-                                    }
-                                    if root.prompt.main: Rectangle {
-                                        x: root.avatar-size + 18px; y: 53px;
-                                        width: min(180px, thought.preferred-width + 26px);
-                                        height: thought.preferred-width > 154px ? 54px : 36px;
-                                        border-radius: 16px; background: Theme.raised; border-color: Theme.edge; border-width: 1px;
-                                        accessible-role: button;
-                                        accessible-label: root.has-status ? "Change custom status" : "Set a custom status";
-                                        // The bump joins the bubble with no line between them.
-                                        Rectangle { x: 11px; y: 0px; width: 18px; height: 2px; background: Theme.raised; }
-                                        VerticalLayout {
-                                            alignment: center;
-                                            padding-left: 13px; padding-right: 13px;
-                                            thought := StatusText {
-                                                text: root.has-status ? root.status-text : "Set a custom status";
-                                                emoji-url: root.has-status ? root.status-emoji : "";
-                                                color: root.has-status ? Theme.text : Theme.secondary; font-size: 14px; wrap: word-wrap; max-height: 40px;
-                                            }
-                                        }
-                                        TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.edit-status(); } }
-                                    }
-                                    if avatar-touch.has-hover && root.ready && root.prompt.reading != "avatar": Rectangle {
-                                        width: root.avatar-size; height: root.avatar-size; border-radius: root.avatar-size / 2;
-                                        background: #00000073;
-                                        EditBadge { locked: !root.prompt.avatar-enabled; }
-                                    }
-                                    if root.prompt.reading == "avatar": Rectangle {
-                                        width: root.avatar-size; height: root.avatar-size; border-radius: root.avatar-size / 2;
-                                        background: #00000099;
-                                        Text { text: "Reading..."; color: #ffffff; font-size: 13px; font-weight: 700; }
-                                    }
-                                    avatar-touch := TouchArea {
-                                        enabled: root.ready;
-                                        mouse-cursor: root.avatar-editable ? MouseCursor.pointer : MouseCursor.default;
-                                        clicked => { if root.avatar-editable { root.avatar-clicked(); } }
-                                    }
-                                    avatar-menu := PopupWindow {
-                                        x: 12px; y: parent.height - 4px; width: 180px;
-                                        Rectangle {
-                                            background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
-                                            drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
-                                            VerticalLayout {
-                                                padding: 6px; spacing: 2px;
-                                                MenuItem { text: "Change Avatar"; icon: @image-url("icons/image.svg"); clicked => { avatar-menu.close(); root.pick(0); } }
-                                                MenuItem { text: root.prompt.reset-word + " Avatar"; icon: @image-url("icons/x.svg"); danger: true; clicked => { avatar-menu.close(); root.reset(0); } }
-                                            }
-                                        }
-                                    }
                                 }
                             }
                             VerticalLayout {
                                 padding-left: root.pad; padding-right: root.pad; spacing: 16px;
-                                // The banner colour, opened by clicking the banner.
-                                if root.colour-open: Rectangle {
-                                    border-radius: 8px; background: Theme.sunken;
-                                    height: colour-box.preferred-height;
-                                    colour-box := VerticalLayout {
-                                    padding: 10px; spacing: 10px;
-                                    HorizontalLayout {
-                                        spacing: 10px;
-                                        Middle { Text { text: "Banner color"; color: Theme.text; font-size: 14px; font-weight: 600; } }
-                                        Middle {
-                                            Rectangle {
-                                                width: 28px; height: 28px; border-radius: 6px;
-                                                background: root.prompt.has-colour ? root.prompt.colour : Theme.raised;
-                                                border-width: 1px; border-color: Theme.line;
-                                            }
-                                        }
-                                        Middle {
-                                            TextField {
-                                                init => { self.focus-input(); }
-                                                width: 116px; min-height: 32px; text-size: 14px; pad: 8px;
-                                                fill: root.prompt.colour-wrong ? Theme.danger.with-alpha(0.16) : Theme.raised;
-                                                placeholder: "Default"; label: "Banner color";
-                                                text <=> root.colour;
-                                                edited(text) => { root.write(3, text); }
-                                                accepted => { root.colour-open = false; scope.focus(); }
-                                            }
-                                        }
-                                        if root.prompt.colour-wrong: Middle { Text { text: "Not a colour"; color: Theme.danger; font-size: 13px; } }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        if root.colour != "": Middle {
-                                            ActionButton {
-                                                small: true; ghost: true; text: "Default";
-                                                clicked => { root.colour = ""; root.write(3, ""); }
-                                            }
-                                        }
-                                    }
-                                    // A few to pick from, without typing.
-                                    HorizontalLayout {
-                                        spacing: 6px; alignment: start;
-                                        for swatch in [
-                                            { hex: "#5865f2", colour: #5865f2 }, { hex: "#3ba55d", colour: #3ba55d },
-                                            { hex: "#faa61a", colour: #faa61a }, { hex: "#ed4245", colour: #ed4245 },
-                                            { hex: "#eb459e", colour: #eb459e }, { hex: "#1abc9c", colour: #1abc9c },
-                                            { hex: "#9b59b6", colour: #9b59b6 }, { hex: "#607d8b", colour: #607d8b },
-                                            { hex: "#2c2f33", colour: #2c2f33 },
-                                        ]: Rectangle {
-                                            width: 26px; height: 26px; border-radius: 6px; background: swatch.colour;
-                                            border-width: root.colour == swatch.hex ? 2px : swatch-touch.has-hover ? 1px : 0px;
-                                            border-color: Theme.text;
-                                            accessible-role: button;
-                                            accessible-label: "Banner color " + swatch.hex;
-                                            accessible-action-default => { root.colour = swatch.hex; root.write(3, swatch.hex); }
-                                            swatch-touch := TouchArea {
-                                                mouse-cursor: MouseCursor.pointer;
-                                                clicked => { root.colour = swatch.hex; root.write(3, swatch.hex); }
-                                            }
-                                        }
-                                    }
-                                    }
-                                }
                                 VerticalLayout {
-                                    spacing: 2px;
-                                    // The name, or its field.
-                                    if root.editing != 1: HorizontalLayout {
+                                    spacing: 4px;
+                                    // The display name.
+                                    HorizontalLayout {
                                         spacing: 6px; alignment: start;
                                         StyledName {
                                             text: root.prompt.loading ? "Loading..." : root.prompt.preview.name;
                                             styles: root.prompt.preview.name-style; ink: Theme.text; font-weight: 700;
                                             font-size: root.prompt.main ? 24px : 26px;
-                                            HoverEdit {
-                                                x: -7px; y: (parent.height - self.height) / 2; width: max(136px, parent.width + 14px + 28px); height: 40px;
-                                                enabled: root.ready && root.prompt.name-enabled; pencil: true;
-                                                label: root.prompt.main ? "Edit display name" : "Edit server nickname";
-                                                clicked => { root.edit(1); }
-                                            }
                                         }
                                     }
-                                    if root.editing == 1: TextField {
-                                        init => { self.focus-input(); }
-                                        min-height: 40px; text-size: 22px; pad: 8px;
-                                        placeholder: root.prompt.name-placeholder;
-                                        label: root.prompt.main ? "Display name" : "Server nickname";
-                                        text <=> root.name;
-                                        edited(text) => { root.write(0, text); }
-                                        accepted => { root.stop-editing(); }
-                                    }
-                                    // The username, then the pronouns or their field.
+                                    // The username, then the pronouns.
                                     HorizontalLayout {
                                         spacing: 6px; alignment: start;
-                                        Middle { Text { text: root.prompt.handle + " ·"; color: Theme.secondary; font-size: 14px; font-weight: 500; } }
-                                        if root.editing != 2: Middle {
+                                        Middle { Text { text: root.prompt.handle + (root.pronouns != "" || root.prompt.pronouns-fallback != "" ? " ·" : ""); color: Theme.secondary; font-size: 14px; font-weight: 500; } }
+                                        if root.pronouns != "" || root.prompt.pronouns-fallback != "": Middle {
                                             Text {
-                                                text: root.pronouns != "" ? root.pronouns : root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add pronouns";
-                                                color: root.pronouns != "" || root.prompt.pronouns-fallback != "" ? Theme.secondary : Theme.muted;
-                                                font-size: 14px; font-weight: 500; overflow: elide;
-                                                HoverEdit {
-                                                    x: -5px; y: (parent.height - self.height) / 2; width: parent.width + 10px; height: 32px;
-                                                    enabled: root.ready; label: "Edit pronouns";
-                                                    clicked => { root.edit(2); }
-                                                }
+                                                text: root.pronouns != "" ? root.pronouns : root.prompt.pronouns-fallback;
+                                                color: Theme.secondary; font-size: 14px; font-weight: 500; overflow: elide;
                                             }
                                         }
-                                        if root.editing == 2: TextField {
-                                            init => { self.focus-input(); }
-                                            width: 220px; min-height: 30px; text-size: 14px; pad: 8px;
-                                            placeholder: root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add your pronouns";
-                                            label: "Pronouns";
-                                            text <=> root.pronouns;
-                                            edited(text) => { root.write(1, text); }
-                                            accepted => { root.stop-editing(); }
+                                        if root.prompt.main && root.prompt.tag-text != "": Middle {
+                                            ServerTagChip { text: root.prompt.tag-text; badge: root.prompt.tag-icon; }
                                         }
-                                        // The server tag worn, and where another's chosen.
-                                        if root.prompt.main && root.editing != 2: Middle {
-                                            tag-chip := Rectangle {
-                                                height: 24px; width: tag-row.preferred-width; border-radius: 7px;
-                                                background: tag-touch.has-hover ? Theme.text.with-alpha(0.12) : Theme.text.with-alpha(0.07);
-                                                animate background { duration: 120ms; }
-                                                accessible-role: button; accessible-label: "Change server tag";
-                                                tag-row := HorizontalLayout {
-                                                    padding-left: 7px; padding-right: 5px; spacing: 4px;
-                                                    if root.prompt.tag-text == "": Text { text: "Server Tag"; color: Theme.secondary; font-size: 12px; font-italic: true; vertical-alignment: center; }
-                                                    if root.prompt.tag-text != "": Middle { ServerTagChip { text: root.prompt.tag-text; badge: root.prompt.tag-icon; } }
-                                                    Image { source: @image-url("icons/chevron-down.svg"); width: 14px; image-fit: contain; colorize: Theme.secondary; }
-                                                }
-                                                tag-touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { tag-menu.show(); } }
-                                                tag-menu := PopupWindow {
-                                                    x: 0px; y: 28px; width: 270px; height: min(290px, 56px + 36px * (root.prompt.server-tags.length + 1));
-                                                    close-policy: PopupClosePolicy.close-on-click-outside;
-                                                    Rectangle {
-                                                        background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 10px; clip: true;
-                                                        VerticalLayout {
-                                                            padding: 8px; spacing: 6px;
-                                                            tag-search := TextField { placeholder: "Search"; label: "Search server tags"; text-size: 13px; min-height: 32px; border-radius: 8px; }
-                                                            ScrollView {
-                                                                vertical-stretch: 1;
-                                                                content-height: tag-list.preferred-height;
-                                                                tag-list := VerticalLayout {
-                                                                    alignment: start;
-                                                                    Rectangle {
-                                                                        height: 36px; border-radius: 6px;
-                                                                        background: none-touch.has-hover ? Theme.hover : transparent;
-                                                                        Text { x: 8px; height: 100%; text: "No Server Tag"; color: Theme.muted; font-size: 13px; font-italic: true; vertical-alignment: center; }
-                                                                        none-touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.choose-tag(""); tag-menu.close(); } }
-                                                                    }
-                                                                    for row in root.prompt.server-tags: Rectangle {
-                                                                        property <bool> found: NameStyles.contains(row.name, tag-search.text) || NameStyles.contains(row.tag, tag-search.text);
-                                                                        height: self.found ? 36px : 0px; visible: self.found; border-radius: 6px;
-                                                                        background: row-touch.has-hover ? Theme.hover : row.id == root.prompt.tag-chosen-id ? Theme.active : transparent;
-                                                                        accessible-role: button; accessible-label: row.name + ", " + row.tag;
-                                                                        HorizontalLayout {
-                                                                            padding-left: 8px; padding-right: 8px; spacing: 8px;
-                                                                            Middle { Avatar { size: 20px; initial: row.name; picture-url: row.icon; } }
-                                                                            Text { text: row.name; color: Theme.text; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                                                                            Middle { ServerTagChip { text: row.tag; badge: row.badge; } }
-                                                                        }
-                                                                        row-touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.choose-tag(row.id); tag-menu.close(); } }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // Their badges, in a pill after the tag.
-                                        if root.prompt.main && root.editing != 2 && root.prompt.preview.badges.length > 0: Middle {
+                                        // Badges
+                                        if root.prompt.main && root.prompt.preview.badges.length > 0: Middle {
                                             Rectangle {
                                                 height: 26px; border-radius: 8px; background: #00000059;
                                                 HorizontalLayout {
@@ -1884,92 +1607,16 @@ export component ProfileEditorDialog inherits Rectangle {
                                             }
                                         }
                                     }
-                                    if root.prompt.too-long != "": Text { text: root.prompt.too-long; color: Theme.danger; font-size: 13px; wrap: word-wrap; }
                                 }
                                 for activity in root.prompt.preview.activities: ActivityCard {
                                     activity: activity;
                                     open-link(url) => { root.open-link(url); }
                                 }
-                                // Discord's offer, over what Nitro unlocks in a server.
-                                if root.prompt.offer: Rectangle {
-                                    border-radius: 8px; background: Theme.sunken;
-                                    height: offer.preferred-height;
-                                    offer := HorizontalLayout {
-                                        padding: 12px; spacing: 12px;
-                                        Middle { Image { source: @image-url("icons/lock.svg"); width: 20px; height: 20px; colorize: Theme.accent; } }
-                                        VerticalLayout {
-                                            horizontal-stretch: 1; spacing: 2px; alignment: center;
-                                            Text { text: "Make unique profiles for each server"; color: Theme.text; font-size: 14px; font-weight: 700; wrap: word-wrap; }
-                                            Label { text: "Customize your profile for every server, from avatar decorations to bios. Only with Nitro."; }
-                                        }
-                                        Middle {
-                                            ActionButton {
-                                                small: true; primary: true;
-                                                text: root.prompt.upgrade ? "Upgrade Nitro" : "Unlock with Nitro";
-                                                clicked => { root.unlock-nitro(); }
-                                            }
-                                        }
-                                    }
-                                }
-                                // The bio: Markdown as it shows, or its field.
-                                VerticalLayout {
+                                if root.prompt.preview.has-bio: VerticalLayout {
                                     spacing: 6px;
-                                    HorizontalLayout {
-                                        spacing: 6px; alignment: start;
-                                        Middle { ProfileHeading { text: root.prompt.main ? "Bio" : "ABOUT ME"; color: root.prompt.main ? Theme.text : Theme.muted; font-size: root.prompt.main ? 13px : 12px; font-weight: root.prompt.main ? 500 : 700; letter-spacing: root.prompt.main ? 0px : 0.6px; } }
-                                        if !root.prompt.bio-enabled && !root.prompt.loading: Middle {
-                                            Image { source: @image-url("icons/lock.svg"); width: 13px; height: 13px; colorize: Theme.muted; }
-                                        }
-                                    }
-                                    if root.editing != 3: Rectangle {
-                                        height: bio-shown.preferred-height;
-                                        bio-shown := VerticalLayout {
-                                            if root.prompt.preview.has-bio: StyledText {
-                                                text: root.prompt.preview.bio; default-color: Theme.text; link-color: Theme.link;
-                                            }
-                                            if !root.prompt.preview.has-bio: Text {
-                                                text: root.prompt.bio-placeholder; color: Theme.muted; font-size: 14px; wrap: word-wrap;
-                                            }
-                                        }
-                                        HoverEdit {
-                                            x: -7px; y: round((parent.height - self.height) / 2px) * 1px; width: parent.width + 14px; height: max(28px, parent.height + 7px);
-                                            enabled: root.ready && root.prompt.bio-enabled; label: "Edit bio"; cursor: MouseCursor.text;
-                                            clicked => { root.edit(3); }
-                                        }
-                                    }
-                                    if root.editing == 3: VerticalLayout {
-                                        spacing: 4px;
-                                        Rectangle {
-                                            height: 110px; border-radius: 6px; background: Theme.sunken;
-                                            border-width: 1px; border-color: Theme.accent.with-alpha(0.8);
-                                            Text {
-                                                x: 10px; y: 8px; width: parent.width - 20px;
-                                                visible: root.bio == "";
-                                                text: root.prompt.bio-placeholder; color: Theme.muted; font-size: 14px;
-                                                wrap: word-wrap; overflow: elide;
-                                            }
-                                            TextInput {
-                                                init => { self.focus(); }
-                                                x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px;
-                                                text <=> root.bio;
-                                                single-line: false; wrap: word-wrap;
-                                                font-size: 14px; color: Theme.text;
-                                                selection-background-color: Theme.accent.with-alpha(0.35);
-                                                selection-foreground-color: Theme.text;
-                                                accessible-label: "Bio";
-                                                edited => { root.write(2, self.text); }
-                                            }
-                                        }
-                                        HorizontalLayout {
-                                            Label { text: "You can use markdown and links if you'd like."; horizontal-stretch: 1; }
-                                            Text {
-                                                text: root.prompt.bio-left < 0 ? "Too long by " + (-root.prompt.bio-left) : root.prompt.bio-left + " left";
-                                                color: root.prompt.bio-left < 0 ? Theme.danger : Theme.muted; font-size: 12px;
-                                            }
-                                        }
-                                    }
-                                    if root.editing != 3 && root.prompt.bio-left < 0: Text {
-                                        text: "Too long by " + (-root.prompt.bio-left); color: Theme.danger; font-size: 12px;
+                                    ProfileHeading { text: root.prompt.main ? "Bio" : "ABOUT ME"; color: root.prompt.main ? Theme.text : Theme.muted; font-size: root.prompt.main ? 13px : 12px; font-weight: root.prompt.main ? 500 : 700; letter-spacing: root.prompt.main ? 0px : 0.6px; }
+                                    StyledText {
+                                        text: root.prompt.preview.bio; default-color: Theme.text; link-color: Theme.link;
                                     }
                                 }
                                 if root.prompt.preview.created != "" || root.prompt.preview.joined != "": VerticalLayout {
@@ -1987,37 +1634,9 @@ export component ProfileEditorDialog inherits Rectangle {
                                         }
                                     }
                                 }
-                                if root.prompt.main: VerticalLayout {
-                                    spacing: 6px;
-                                    ProfileHeading { text: "Connections"; color: root.prompt.main ? Theme.text : Theme.muted; font-size: root.prompt.main ? 13px : 12px; font-weight: root.prompt.main ? 500 : 700; letter-spacing: root.prompt.main ? 0px : 0.6px; }
-                                    Text {
-                                        text: "+  Add Connection"; color: Theme.secondary; font-size: 14px; font-weight: 500;
-                                        TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.open-link("https://discord.com/settings/connections"); } }
-                                    }
-                                }
-                                if root.prompt.main: VerticalLayout {
-                                    spacing: 6px;
-                                    ProfileHeading { text: "Note (only visible to you)"; color: root.prompt.main ? Theme.text : Theme.muted; font-size: root.prompt.main ? 13px : 12px; font-weight: root.prompt.main ? 500 : 700; letter-spacing: root.prompt.main ? 0px : 0.6px; }
-                                    Text {
-                                        text: "Click to add a note"; color: Theme.muted; font-size: 15px; font-italic: true;
-                                        HoverEdit {
-                                            x: -7px; y: (parent.height - self.height) / 2; width: parent.width + 14px; height: 28px;
-                                            label: "Add a note"; cursor: MouseCursor.text;
-                                            clicked => { root.edit-note(); }
-                                        }
-                                    }
-                                }
                                 if root.prompt.error != "": Text { text: root.prompt.error; color: Theme.danger; font-size: 14px; wrap: word-wrap; }
                             }
                         }
-                    }
-                    // Discord's bar, once there's something to save.
-                    if root.prompt.changed || root.prompt.saving: UnsavedBar {
-                        height: root.bar-height; pad: root.pad; saving: root.prompt.saving;
-                        may-reset: root.ready;
-                        may-save: root.ready && root.prompt.reading == "" && root.prompt.too-long == "" && root.prompt.bio-left >= 0 && !root.prompt.colour-wrong;
-                        undo => { root.stop-editing(); root.colour-open = false; root.undo(); }
-                        save => { root.stop-editing(); root.save(); }
                     }
                 }
             }

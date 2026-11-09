@@ -2905,7 +2905,7 @@ impl Adapter {
         let handle = fallback_text(fallback.map(|fallback| &fallback.handle));
         let (title, detail, bio_placeholder) = if main {
             (
-                "Edit profile",
+                "Your profile",
                 "Your profile".to_owned(),
                 "Tell everyone a bit about yourself",
             )
