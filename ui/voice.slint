@@ -1134,7 +1134,10 @@ export component SwitchDialog inherits Rectangle {
     public function release-keys() { switch-keys.clear-focus(); }
     // How far it's open, from 0 to 1; see Popup.
     property <float> motion: root.switching ? 1 : 0;
-    animate motion { duration: Popup.duration; easing: ease-out-quad; }
+    animate motion {
+        duration: root.switching ? Popup.duration-enter : Popup.duration-exit;
+        easing: ease-out;
+    }
     visible: root.motion > 0;
     background: rgba(0, 0, 0, 0.6 * root.motion);
     TouchArea { enabled: root.switching; clicked => { root.cancel-switch(); } }

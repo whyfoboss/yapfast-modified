@@ -2032,6 +2032,11 @@ export component YapfastWindow inherits Window {
         y: max(8px, root.menu-y - self.height - 8px);
         close-policy: PopupClosePolicy.close-on-click-outside;
         Rectangle {
+            property <float> enter-amount: 0;
+            init => { self.enter-amount = 1; }
+            animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
+            opacity: 0.2 + 0.8 * self.enter-amount;
+            transform-scale: Popup.popover-scale(self.enter-amount);
             background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
             drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
             plus-content := VerticalLayout {
@@ -4767,20 +4772,17 @@ export component YapfastWindow inherits Window {
     if Tip.text != "": tip-card := Rectangle {
         property <length> w: tip-text.preferred-width + 20px;
         property <length> h: 32px;
-        x: Tip.side == 1 ? Tip.x + 10px : max(8px, min(root.width - self.w - 8px, Tip.x - self.w / 2));
-        y: Tip.side == 1 ? Tip.y - self.h / 2 : Tip.side == 0 ? max(4px, Tip.y - self.h - 6px) : Tip.y + 6px;
+        property <float> enter: 0;
+        init => { self.enter = 1; }
+        animate enter { duration: Popup.tooltip-enter; easing: ease-out; }
+        property <length> base-x: Tip.side == 1 ? Tip.x + 10px : max(8px, min(root.width - self.w - 8px, Tip.x - self.w / 2));
+        property <length> base-y: Tip.side == 1 ? Tip.y - self.h / 2 : Tip.side == 0 ? max(4px, Tip.y - self.h - 6px) : Tip.y + 6px;
+        x: self.base-x + (Tip.side == 1 ? (self.enter - 1.0) * 3px : 0px);
+        y: self.base-y + (Tip.side == 0 ? (1.0 - self.enter) * 3px : Tip.side == 2 ? (self.enter - 1.0) * 3px : 0px);
         width: self.w; height: self.h;
-        property <bool> shown: !Tip.pop;
-        opacity: self.shown ? 1 : 0;
-        animate opacity { duration: 120ms; easing: ease-out; }
-        transform-scale: self.shown ? 1 : 0.95;
+        opacity: self.enter;
+        transform-scale: 0.97 + 0.03 * self.enter;
         transform-origin: { x: self.w / 2, y: self.h };
-        animate transform-scale { duration: 120ms; easing: ease-out; }
-        Timer {
-            interval: 16ms;
-            running: Tip.pop && !tip-card.shown;
-            triggered => { tip-card.shown = true; }
-        }
         border-radius: 6px; background: Theme.tooltip;
         drop-shadow-blur: 12px; drop-shadow-color: #00000080; drop-shadow-offset-y: 3px;
         tip-text := Text { text: Tip.text; color: Theme.text; font-size: 14px; font-weight: 700; }

@@ -579,6 +579,11 @@ export component StatusMenu inherits Rectangle {
     callback choose(string);
     callback custom-status;
     callback edit-profile;
+    property <float> enter-amount: 0;
+    init => { self.enter-amount = 1; }
+    animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
+    opacity: 0.2 + 0.8 * self.enter-amount;
+    transform-scale: Popup.popover-scale(self.enter-amount);
     background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
     drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
     accessible-role: groupbox;

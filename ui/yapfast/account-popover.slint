@@ -1,5 +1,5 @@
 import { ScrollView } from "../scrollview.slint";
-import { Theme, Middle } from "../theme.slint";
+import { Theme, Middle, Popup } from "../theme.slint";
 import { MenuItem } from "../controls.slint";
 import { ProfileData } from "../people.slint";
 import { StatusDot } from "../rail.slint";
@@ -24,7 +24,7 @@ export component AccountPopover inherits Rectangle {
     /// Opened, so the profile can be asked for.
     callback opened;
     callback open-link(string);
-    init => { root.opened(); }
+    init => { root.opened(); self.enter-amount = 1; }
     in-out property <bool> expanded;
     in property <length> available-height: 100000px;
     callback choose(string);
@@ -33,6 +33,10 @@ export component AccountPopover inherits Rectangle {
     callback settings;
     callback copy-id;
     callback game-duration-due;
+    property <float> enter-amount: 0;
+    animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
+    opacity: 0.2 + 0.8 * self.enter-amount;
+    transform-scale: Popup.popover-scale(self.enter-amount);
     property <string> presence-label: root.status == "idle" ? "Idle" : root.status == "dnd" ? "Do Not Disturb" : root.status == "invisible" ? "Invisible" : "Online";
     background: root.themed
         ? @linear-gradient(180deg, root.profile.theme-primary.mix(#000000, 0.4) 0%, root.profile.theme-secondary.mix(#000000, 0.4) 100%)
@@ -45,6 +49,7 @@ export component AccountPopover inherits Rectangle {
     ScrollView {
         content-height: content.preferred-height;
         content := VerticalLayout {
+            y: (1.0 - root.enter-amount) * 6px;
             padding: 8px; spacing: 8px;
             Rectangle {
                 background: Theme.raised; border-radius: 8px;

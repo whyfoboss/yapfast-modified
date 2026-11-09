@@ -9987,3 +9987,27 @@ fn a_long_message_folds_until_show_more_only_with_the_switch_on() {
     window.invoke_preferences_changed();
     assert!(adapter.borrow().layout.collapse_long);
 }
+
+#[test]
+fn better_animations_phase_a_core_motion_and_overlays() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = YapfastWindow::new().unwrap();
+    let popup = window.global::<Popup>();
+    // Verify subtle 0.95 -> 1.0 modal scale (replacing 0.80 -> 1.0).
+    assert!((popup.invoke_scale(0.0) - 0.95).abs() < 1e-4);
+    assert!((popup.invoke_scale(1.0) - 1.0).abs() < 1e-4);
+    assert!((popup.invoke_scale(0.5) - 0.975).abs() < 1e-4);
+
+    // Verify modal entry (145ms) and exit (105ms) durations.
+    assert_eq!(popup.get_duration_enter(), 145);
+    assert_eq!(popup.get_duration_exit(), 105);
+
+    // Verify context menu, tooltip, and popover durations and scale ranges.
+    assert_eq!(popup.get_menu_enter(), 85);
+    assert_eq!(popup.get_tooltip_enter(), 80);
+    assert_eq!(popup.get_popover_enter(), 110);
+    assert!((popup.invoke_menu_scale(0.0) - 0.97).abs() < 1e-4);
+    assert!((popup.invoke_menu_scale(1.0) - 1.0).abs() < 1e-4);
+    assert!((popup.invoke_popover_scale(0.0) - 0.97).abs() < 1e-4);
+    assert!((popup.invoke_popover_scale(1.0) - 1.0).abs() < 1e-4);
+}

@@ -150,17 +150,23 @@ export global Badges {
     in property <bool> discord: true;
 }
 
-// How popups open, as Discord's modals do but quicker: the card grows
-// from 80% as it fades in, and shrinks away as it fades out when it
-// closes. A popup's dimmed backdrop only fades.
+// How popups and overlays open, as Discord's modals do: the card grows subtly
+// from 95% as it fades in, and returns as it fades out when it closes.
 export global Popup {
     /// The card fades as it grows, on the GPU. Skia Software draws a
     /// fading card into a layer as large as what changed, which is the
     /// whole window under a dimmed backdrop, so there the card only grows.
     in property <bool> fade: true;
-    out property <duration> duration: 100ms;
+    out property <duration> duration-enter: 145ms;
+    out property <duration> duration-exit: 105ms;
+    out property <duration> duration: 145ms;
+    out property <duration> menu-enter: 85ms;
+    out property <duration> tooltip-enter: 80ms;
+    out property <duration> popover-enter: 110ms;
     /// The card's size and opacity for how far it's open, from 0 to 1.
-    public pure function scale(amount: float) -> float { 0.8 + 0.2 * amount }
+    public pure function scale(amount: float) -> float { 0.95 + 0.05 * amount }
+    public pure function menu-scale(amount: float) -> float { 0.97 + 0.03 * amount }
+    public pure function popover-scale(amount: float) -> float { 0.97 + 0.03 * amount }
     public pure function opacity(amount: float) -> float { root.fade ? amount : (amount > 0 ? 1 : 0) }
 }
 
@@ -173,5 +179,8 @@ export component PopupMotion {
     out property <bool> shown: self.open || self.amount > 0;
     init => { if self.open { self.amount = 1; } }
     changed open => { self.amount = self.open ? 1 : 0; }
-    animate amount { duration: Popup.duration; easing: ease-out-quad; }
+    animate amount {
+        duration: self.open ? Popup.duration-enter : Popup.duration-exit;
+        easing: ease-out;
+    }
 }
