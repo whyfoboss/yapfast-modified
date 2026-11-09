@@ -245,7 +245,8 @@ on one's own, the activities, About Me, the roles, any connections, Member
 since, then the mutual servers and friends. Badges sit as small icons beside
 the name. The note box has left the profile card; notes are still written
 from a DM's "Add note" dialog. A one-to-one DM shows the same card in a 300px
-panel on the right; its avatar and banner open the full profile, and the
+panel on the right, on the theme's sidebar surface; its avatar and banner
+open the full profile, and the
 person icon in the DM's header hides or shows the panel, which Yapfast
 remembers in `layout.json`. Mutual servers show their icon and the person's
 nickname there; clicking one opens a card beside it with the server's banner,

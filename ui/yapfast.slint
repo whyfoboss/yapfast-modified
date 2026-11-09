@@ -3739,7 +3739,7 @@ export component YapfastWindow inherits Window {
                         open-member-menu(id, x, y) => { root.open-context-menu(id, true, x, y); }
                     }
                     if root.profile-docked: Rectangle {
-                        width: 300px;
+                        width: 300px; background: Theme.sidebar;
                         ProfileCard {
                             docked: true; width: parent.width; height: parent.height;
                             data: root.panel-profile;
