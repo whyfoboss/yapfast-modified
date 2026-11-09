@@ -1325,12 +1325,22 @@ export component MessageMenu inherits Rectangle {
     callback save-attachment(string, int);
     callback open-link(string);
     callback view-edit-history(string);
+    callback hide-deleted-message(string);
+    callback hide-all-deleted-messages();
     background: Theme.menu; border-color: Theme.menu-line; border-width: 1px; border-radius: 8px;
     drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
     menu-content := VerticalLayout {
         padding: 6px; spacing: 2px;
+        if root.menu-message.deleted: MenuItem {
+            text: "Hide this deleted message"; icon: @image-url("icons/eye-off.svg");
+            clicked => { root.hide-deleted-message(root.menu-message.item); }
+        }
+        if root.menu-message.deleted: MenuItem {
+            text: "Hide all deleted messages"; icon: @image-url("icons/eye-off.svg");
+            clicked => { root.hide-all-deleted-messages(); }
+        }
         // Discord's quick reactions: 44px tiles, spread across the menu.
-        if root.menu-can-react: HorizontalLayout {
+        if !root.menu-message.deleted && root.menu-can-react: HorizontalLayout {
             spacing: 4px; padding-bottom: 4px; padding-left: 2px; padding-right: 2px;
             alignment: space-between;
             for cell in root.menu-reactions: EmojiButton {
@@ -1339,77 +1349,77 @@ export component MessageMenu inherits Rectangle {
                 clicked => { root.react(root.menu-message.item, cell.key); }
             }
         }
-        if root.menu-can-react: MenuItem {
+        if !root.menu-message.deleted && root.menu-can-react: MenuItem {
             text: "Add reaction"; icon: @image-url("icons/smile-plus.svg");
             clicked => { root.open-picker(root.menu-message.item); }
         }
-        if root.menu-message.reactions.length > 0: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.reactions.length > 0: MenuItem {
             text: "View Reactions"; icon: @image-url("icons/smile.svg");
             clicked => { root.view-reactions(root.menu-message.item); }
         }
-        if root.menu-message.has-edit-history: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.has-edit-history: MenuItem {
             text: "View Edit History"; icon: @image-url("icons/history.svg");
             clicked => { root.view-edit-history(root.menu-message.item); }
         }
-        if root.menu-message.can-edit && root.composer-enabled: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.can-edit && root.composer-enabled: MenuItem {
             text: "Edit message"; icon: @image-url("icons/pencil.svg");
             clicked => { root.edit(root.menu-message.item); }
         }
-        if root.menu-message.can-reply && root.composer-enabled: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.can-reply && root.composer-enabled: MenuItem {
             text: "Reply"; icon: @image-url("icons/reply.svg");
             clicked => { root.reply(root.menu-message.item); }
         }
-        if root.menu-message.can-forward && root.forward-allowed: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.can-forward && root.forward-allowed: MenuItem {
             text: "Forward"; icon: @image-url("icons/forward.svg");
             clicked => { root.start-forward(root.menu-message.item); }
         }
         // A message someone wrote starts a thread, or leads to its own.
-        if root.can-start-thread && root.menu-message.can-reply && root.menu-message.delivery == ""
+        if !root.menu-message.deleted && root.can-start-thread && root.menu-message.can-reply && root.menu-message.delivery == ""
             && root.menu-message.thread-room == "": MenuItem {
             text: "Create Thread"; icon: @image-url("icons/thread.svg");
             clicked => { root.start-thread(root.menu-message.item); }
         }
-        if root.menu-message.can-reply && root.menu-message.thread-room != "": MenuItem {
+        if !root.menu-message.deleted && root.menu-message.can-reply && root.menu-message.thread-room != "": MenuItem {
             text: "View Thread"; icon: @image-url("icons/thread.svg");
             clicked => { root.view-thread(root.menu-message.thread-room); }
         }
-        if root.menu-message.body != "": MenuItem {
+        if !root.menu-message.deleted && root.menu-message.body != "": MenuItem {
             text: "Copy text"; icon: @image-url("icons/copy.svg");
             clicked => { root.copy-text(root.menu-message.body); }
         }
-        if root.selection != "": MenuItem {
+        if !root.menu-message.deleted && root.selection != "": MenuItem {
             text: "Copy selection"; icon: @image-url("icons/text-select.svg");
             clicked => { root.copy-text(root.selection); }
         }
-        if root.menu-message.has-poll && root.menu-message.poll.can-end: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.has-poll && root.menu-message.poll.can-end: MenuItem {
             text: "End Poll Now"; icon: @image-url("icons/circle-stop.svg");
             clicked => { root.end-poll(root.menu-message.item); }
         }
-        if root.menu-message.can-pin && root.menu-message.delivery == "": MenuItem {
+        if !root.menu-message.deleted && root.menu-message.can-pin && root.menu-message.delivery == "": MenuItem {
             text: root.menu-message.pinned ? "Unpin message" : "Pin message";
             icon: root.menu-message.pinned ? @image-url("icons/pin-off.svg") : @image-url("icons/pin.svg");
             clicked => { root.pin-message(root.menu-message.item); }
         }
-        if root.link != "" || (root.media-index >= 0 && !root.preview): Rectangle { height: 1px; background: Theme.line; }
-        if root.media-index >= 0 && root.link != "" && !root.media-video && !root.preview: MenuItem {
+        if !root.menu-message.deleted && (root.link != "" || (root.media-index >= 0 && !root.preview)): Rectangle { height: 1px; background: Theme.line; }
+        if !root.menu-message.deleted && root.media-index >= 0 && root.link != "" && !root.media-video && !root.preview: MenuItem {
             text: "Copy Image"; icon: @image-url("icons/image.svg");
             clicked => { root.copy-image(root.menu-message.item, root.media-index); }
         }
-        if root.media-index >= 0 && !root.preview: MenuItem {
+        if !root.menu-message.deleted && root.media-index >= 0 && !root.preview: MenuItem {
             text: root.media-video ? "Save Video" : "Save Image"; icon: @image-url("icons/download.svg");
             clicked => { root.save-attachment(root.menu-message.item, root.media-index); }
         }
-        if root.link != "": MenuItem {
+        if !root.menu-message.deleted && root.link != "": MenuItem {
             text: "Copy Link"; icon: @image-url("icons/link.svg");
             clicked => { root.copy-text(root.link); }
         }
         // A link in the text opens with a click.
-        if root.media-index >= 0 && root.link != "": MenuItem {
+        if !root.menu-message.deleted && root.media-index >= 0 && root.link != "": MenuItem {
             text: "Open Link"; icon: @image-url("icons/external-link.svg");
             clicked => { root.open-link(root.link); }
         }
-        if root.menu-message.can-delete && root.composer-enabled: Rectangle { height: 1px; background: Theme.line; }
-        if root.menu-message.can-delete && root.composer-enabled: MenuItem {
+        if !root.menu-message.deleted && root.menu-message.can-delete && root.composer-enabled: Rectangle { height: 1px; background: Theme.line; }
+        if !root.menu-message.deleted && root.menu-message.can-delete && root.composer-enabled: MenuItem {
             text: "Delete message"; icon: @image-url("icons/trash-2.svg"); danger: true;
             clicked => { root.request-delete(root.menu-message.item); }
         }
@@ -2488,13 +2498,6 @@ export component MessageContent inherits VerticalLayout {
                 if message.tag != "": Middle { ServerTagChip { text: message.tag; badge: message.tag-badge; font-size: root.message-font-size * 0.72; } }
                 if message.bot: Middle { BotTag { } }
                 StyledText { text: message.time-styled; link-color: Theme.link; default-color: Theme.muted; default-font-size: root.message-font-size - (ClientStyle.enabled ? 4px : 3px); max-lines: 1; vertical-alignment: center; }
-                if message.deleted: Text {
-                    text: " · Deleted";
-                    color: Theme.danger-text;
-                    font-size: root.message-font-size - (ClientStyle.enabled ? 4px : 3px);
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
                 Rectangle { horizontal-stretch: 1; }
             }
             // As Discord's client marks a forward, above what it carries.
@@ -2557,7 +2560,6 @@ export component MessageContent inherits VerticalLayout {
                 }
             }
             if message.edited: Text { text: "(edited)"; color: Theme.muted; font-size: 12px; }
-            if message.deleted && !message.first: Text { text: "(deleted)"; color: Theme.danger-text; font-size: 12px; }
             // Fixed-size children sit beside a spacer, so they do not cap the column's width.
             if message.images.length > 0: MessageGallery {
                 images: message.images; gallery-width: message.gallery-width; gallery-height: message.gallery-height;

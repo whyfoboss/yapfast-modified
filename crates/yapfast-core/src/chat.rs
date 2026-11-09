@@ -3051,6 +3051,10 @@ pub enum DiscordCommand {
     },
     /// Clear all logged messages and edit history from memory.
     ClearMessageLog,
+    /// Hide a specific retained deleted message from view and logger.
+    HideDeletedMessage(String),
+    /// Hide all currently retained deleted messages from view and logger.
+    HideAllDeletedMessages,
     /// Enable or disable message logger.
     SetMessageLogger(bool),
 }

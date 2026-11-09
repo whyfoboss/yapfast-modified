@@ -3005,6 +3005,23 @@ fn message_logger_is_remembered_and_toggle_dispatches_action() {
 }
 
 #[test]
+fn hide_deleted_messages_dispatches_actions() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    window.invoke_hide_deleted_message("d:123".into());
+    window.invoke_hide_all_deleted_messages();
+}
+
+#[test]
 fn a_nameplates_picture_is_asked_for_when_its_row_shows() {
     i_slint_backend_testing::init_no_event_loop();
     let window = classic_window();

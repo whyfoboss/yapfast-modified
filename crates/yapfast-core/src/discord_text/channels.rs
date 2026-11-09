@@ -149,12 +149,22 @@ impl Channels {
         Some(self.recent.remove(index))
     }
 
+    #[cfg(test)]
     pub(super) fn get_mut(&mut self, room: &str) -> Option<&mut OpenChannel> {
-        self.open
+        self.get_mut_with_logger(room).0
+    }
+
+    pub(super) fn get_mut_with_logger(
+        &mut self,
+        room: &str,
+    ) -> (Option<&mut OpenChannel>, &mut super::logger::MessageLogger) {
+        let channel = self
+            .open
             .iter_mut()
             .chain(&mut self.aside)
             .chain(&mut self.recent)
-            .find(|channel| channel.room == room)
+            .find(|channel| channel.room == room);
+        (channel, &mut self.logger)
     }
 
     /// The open channel, or the thread beside it, if it's `room`.

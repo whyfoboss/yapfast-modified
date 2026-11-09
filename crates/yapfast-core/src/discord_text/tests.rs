@@ -92,7 +92,7 @@ fn live_events_echoes_and_failed_sends() {
         edited: true,
         ..message("7", None)
     };
-    open.edited(edited);
+    open.edited(edited, None);
     let seven = &open.shown.messages[&7];
     assert_eq!(
         (seven.content.as_str(), seven.reactions.len()),
@@ -323,10 +323,13 @@ fn changes_render_again_only_the_messages_they_change() {
     });
     assert_eq!(kept(&open), [3, 7, 9]);
     show(&mut open);
-    open.edited(Message {
-        content: "changed".into(),
-        ..message("7", None)
-    });
+    open.edited(
+        Message {
+            content: "changed".into(),
+            ..message("7", None)
+        },
+        None,
+    );
     open.live(&Live::Created(message("11", None)));
     assert_eq!(kept(&open), [3, 5, 9], "an edit, and a new message");
     show(&mut open);
@@ -559,7 +562,7 @@ fn channels_go_to_disk_once_they_change() {
         id: "9".into()
     }));
     assert!(open.take_changes().is_none(), "a message it didn't have");
-    open.deleted("2");
+    open.deleted("2", None);
     let (_, saved) = open.take_changes().unwrap();
     assert_eq!(
         saved
@@ -580,7 +583,7 @@ fn a_page_asked_for_before_a_delete_doesnt_bring_the_message_back() {
         channel: "11".into(),
         id: "2".into(),
     });
-    open.deleted("3");
+    open.deleted("3", None);
     open.loaded(Load::Latest, shown(page(1..=4)));
     assert!(open.shown.messages.keys().eq(&[1, 4]));
 }
@@ -1993,4 +1996,69 @@ fn message_logger_edit_history_and_clear_log() {
     assert_eq!(purged, vec!["5"]);
     open.apply_evicted(&purged);
     assert!(!open.shown.messages.contains_key(&5));
+}
+
+#[test]
+fn own_message_edit_and_delete_with_logger() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    open.loaded(Load::Latest, shown(page(1..=3)));
+
+    let mut logger = MessageLogger::new();
+    logger.set_enabled(true);
+
+    // Own message edited
+    let edited = Message {
+        content: "own edit".into(),
+        edited: true,
+        edited_timestamp: Some(1700000001000),
+        ..message("2", None)
+    };
+    open.edited(edited, Some(&mut logger));
+    assert_eq!(open.shown.messages[&2].content, "own edit");
+    assert!(logger.has_history("2"));
+    assert_eq!(logger.get("2").unwrap().versions.len(), 1);
+    assert_eq!(logger.get("2").unwrap().versions[0].content, "2");
+
+    // Own message deleted
+    open.deleted("2", Some(&mut logger));
+    assert!(open.shown.messages.contains_key(&2));
+    assert!(open.shown.messages[&2].deleted);
+    assert!(logger.is_deleted("2"));
+
+    // Hide this deleted message
+    let hidden = logger.hide_deleted("2");
+    assert_eq!(hidden, Some("2".to_string()));
+    assert!(!logger.is_deleted("2"));
+    open.apply_evicted(&["2".to_string()]);
+    assert!(!open.shown.messages.contains_key(&2));
+}
+
+#[test]
+fn hide_all_deleted_messages() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    open.loaded(Load::Latest, shown(page(1..=5)));
+
+    let mut logger = MessageLogger::new();
+    logger.set_enabled(true);
+
+    // Delete messages 2 and 4
+    open.deleted("2", Some(&mut logger));
+    open.deleted("4", Some(&mut logger));
+
+    assert!(open.shown.messages[&2].deleted);
+    assert!(open.shown.messages[&4].deleted);
+    assert!(!open.shown.messages[&1].deleted);
+    assert!(!open.shown.messages[&3].deleted);
+
+    let all_hidden = logger.hide_all_deleted();
+    assert_eq!(all_hidden.len(), 2);
+    assert!(all_hidden.contains(&"2".to_string()));
+    assert!(all_hidden.contains(&"4".to_string()));
+
+    open.apply_evicted(&all_hidden);
+    assert!(!open.shown.messages.contains_key(&2));
+    assert!(!open.shown.messages.contains_key(&4));
+    assert!(open.shown.messages.contains_key(&1));
+    assert!(open.shown.messages.contains_key(&3));
+    assert!(open.shown.messages.contains_key(&5));
 }

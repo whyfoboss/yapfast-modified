@@ -38,6 +38,40 @@ pub fn command(
         purge_deleted(channels, &evicted, discord, done, events);
         return;
     }
+    if let Command::Discord(DiscordCommand::HideDeletedMessage(item)) = &command {
+        let id = item.strip_prefix("d:").unwrap_or(item);
+        channels.logger.hide_deleted(id);
+        purge_deleted(channels, &[id.to_string()], discord, done, events);
+        return;
+    }
+    if let Command::Discord(DiscordCommand::HideAllDeletedMessages) = &command {
+        let mut evicted = channels.logger.hide_all_deleted();
+        if let Some(open) = channels.open.as_ref() {
+            for msg in open.shown.messages.values() {
+                if msg.deleted {
+                    evicted.push(msg.id.clone());
+                }
+            }
+        }
+        if let Some(aside) = channels.aside.as_ref() {
+            for msg in aside.shown.messages.values() {
+                if msg.deleted {
+                    evicted.push(msg.id.clone());
+                }
+            }
+        }
+        for ch in &channels.recent {
+            for msg in ch.shown.messages.values() {
+                if msg.deleted {
+                    evicted.push(msg.id.clone());
+                }
+            }
+        }
+        evicted.sort();
+        evicted.dedup();
+        purge_deleted(channels, &evicted, discord, done, events);
+        return;
+    }
     if let Command::Aside(room) = command {
         aside(room, discord, channels, done, events);
         return;
@@ -472,7 +506,7 @@ pub fn finished(
     // The channel on screen it's for: the open one or the thread beside it.
     let shown = channels.is_open(&room).then(|| room.clone());
     // Closed channels kept lately take what finished too.
-    let channel = channels.get_mut(&room);
+    let (channel, logger) = channels.get_mut_with_logger(&room);
     let mut changed = false;
     let mut history_loaded = None;
     match (finished, channel) {
@@ -480,7 +514,7 @@ pub fn finished(
             let result = match result {
                 Ok(message) => {
                     if let Some(channel) = channel {
-                        channel.edited(message);
+                        channel.edited(message, Some(logger));
                         changed = true;
                     }
                     Ok(())
@@ -577,7 +611,7 @@ pub fn finished(
         }
         (Done::Deleted { id, result, .. }, Some(channel)) => match result {
             Ok(()) => {
-                channel.deleted(&id);
+                channel.deleted(&id, Some(logger));
                 changed = true;
             }
             Err(error) => {
@@ -975,6 +1009,14 @@ fn purge_deleted(
         }
         if changed && let Ok(discord) = discord {
             publish(aside, discord, done, events);
+        }
+    }
+    for channel in &mut channels.recent {
+        for order in &orders {
+            if channel.shown.messages.remove(order).is_some() {
+                channel.rendered.remove(order);
+                channel.history_messages.remove(order);
+            }
         }
     }
 }

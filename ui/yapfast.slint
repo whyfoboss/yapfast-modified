@@ -1472,6 +1472,8 @@ export component YapfastWindow inherits Window {
     callback close-reactions;
     callback view-edit-history(string);
     callback close-edit-history;
+    callback hide-deleted-message(string);
+    callback hide-all-deleted-messages;
     callback request-delete(string);
     /// Delete a message without asking, from its quick actions.
     callback delete-now(string);
@@ -2379,6 +2381,8 @@ export component YapfastWindow inherits Window {
             save-attachment(item, index) => { root.save-attachment(item, index); message-menu.close(); }
             open-link(link) => { root.open-link(link); message-menu.close(); }
             view-edit-history(item) => { root.view-edit-history(item); message-menu.close(); }
+            hide-deleted-message(item) => { root.hide-deleted-message(item); message-menu.close(); }
+            hide-all-deleted-messages => { root.hide-all-deleted-messages(); message-menu.close(); }
         }
     }
 

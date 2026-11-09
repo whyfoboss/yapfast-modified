@@ -112,6 +112,35 @@ impl MessageLogger {
         deleted
     }
 
+    /// Hides a deleted message from the logger and returns its ID if it was retained.
+    pub fn hide_deleted(&mut self, message_id: &str) -> Option<String> {
+        if let Some(entry) = self.entries.get(message_id)
+            && entry.deleted
+        {
+            let res = self.evict_message(message_id);
+            self.recalculate_total_bytes();
+            return res;
+        }
+        None
+    }
+
+    /// Removes all currently retained deleted messages from the logger and
+    /// returns their IDs so they can be removed from open channels.
+    /// Preserves entries that are only edited and not deleted.
+    pub fn hide_all_deleted(&mut self) -> Vec<String> {
+        let deleted_ids: Vec<String> = self
+            .entries
+            .values()
+            .filter(|entry| entry.deleted)
+            .map(|entry| entry.message_id.clone())
+            .collect();
+        for id in &deleted_ids {
+            self.evict_message(id);
+        }
+        self.recalculate_total_bytes();
+        deleted_ids
+    }
+
     pub fn is_deleted(&self, message_id: &str) -> bool {
         self.enabled
             && self

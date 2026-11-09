@@ -1535,6 +1535,10 @@ pub enum Action {
     CloseEditHistory,
     /// Clear all logged messages and edit history.
     ClearMessageLog,
+    /// Hide a specific retained deleted message from view and logger.
+    HideDeletedMessage(String),
+    /// Hide all currently retained deleted messages from view and logger.
+    HideAllDeletedMessages,
     /// Toggle message logger.
     SetMessageLogger(bool),
     /// Open the quick switcher, or close it if it's open.
@@ -3158,6 +3162,25 @@ impl Application {
                 self.state.edit_history = None;
                 vec![Effect::Backend(Command::Discord(
                     DiscordCommand::ClearMessageLog,
+                ))]
+            }
+            Action::HideDeletedMessage(item) => {
+                if self
+                    .state
+                    .edit_history
+                    .as_ref()
+                    .is_some_and(|h| h.item == item)
+                {
+                    self.state.edit_history = None;
+                }
+                vec![Effect::Backend(Command::Discord(
+                    DiscordCommand::HideDeletedMessage(item),
+                ))]
+            }
+            Action::HideAllDeletedMessages => {
+                self.state.edit_history = None;
+                vec![Effect::Backend(Command::Discord(
+                    DiscordCommand::HideAllDeletedMessages,
                 ))]
             }
             Action::SetMessageLogger(enabled) => {

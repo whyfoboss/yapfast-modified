@@ -913,8 +913,8 @@ impl OpenChannel {
         Ok(())
     }
 
-    pub fn edited(&mut self, message: Message) {
-        self.live(&Live::Updated(message));
+    pub fn edited(&mut self, message: Message, logger: Option<&mut super::logger::MessageLogger>) {
+        self.live_with_logger(&Live::Updated(message), logger);
     }
 
     pub fn delete(&mut self, discord: &Discord, done: &UnboundedSender<Done>, item: &str) {
@@ -976,14 +976,30 @@ impl OpenChannel {
         self.rendered.remove(&order);
     }
 
-    pub fn deleted(&mut self, id: &str) {
+    pub fn deleted(&mut self, id: &str, logger: Option<&mut super::logger::MessageLogger>) {
         let order = id.parse().unwrap_or_default();
-        self.deleted.insert(order);
-        let latest = self
-            .latest
-            .as_mut()
-            .is_some_and(|latest| latest.messages.remove(&order).is_some());
-        self.dirty |= self.shown.messages.remove(&order).is_some() || latest;
+        if let Some(logger) = logger
+            && logger.enabled
+        {
+            if let Some(known) = self.shown.messages.get_mut(&order) {
+                known.deleted = true;
+                let (_, evicted) = logger.record_delete(&self.channel, id);
+                self.apply_evicted(&evicted);
+                self.rendered.remove(&order);
+                self.dirty = true;
+            } else {
+                let (_, evicted) = logger.record_delete(&self.channel, id);
+                self.apply_evicted(&evicted);
+            }
+        } else {
+            self.deleted.insert(order);
+            let latest = self
+                .latest
+                .as_mut()
+                .is_some_and(|latest| latest.messages.remove(&order).is_some());
+            self.dirty |= self.shown.messages.remove(&order).is_some() || latest;
+            self.rendered.remove(&order);
+        }
     }
 
     /// Adds this account's reaction, or removes it if it is there. The

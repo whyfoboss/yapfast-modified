@@ -2301,6 +2301,24 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     });
     let state = adapter.clone();
     let weak = window.as_weak();
+    window.on_hide_deleted_message(move |item| {
+        if let Some(window) = weak.upgrade() {
+            state
+                .borrow_mut()
+                .action(&window, Action::HideDeletedMessage(item.into()));
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_hide_all_deleted_messages(move || {
+        if let Some(window) = weak.upgrade() {
+            state
+                .borrow_mut()
+                .action(&window, Action::HideAllDeletedMessages);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
     window.on_show_idle_toggled(move |shown| {
         let mut adapter = state.borrow_mut();
         adapter.layout.show_idle = Some(shown);

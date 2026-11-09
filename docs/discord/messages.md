@@ -827,12 +827,21 @@ versions of edited messages in memory while enabled.
 
 When enabled:
 - Deleted messages remain in their chronological timeline position with their
-  last known text rendered in subtle theme red (`Theme.danger-text`) and a
-  `" · Deleted"` label near the timestamp. Server actions such as replying,
-  reacting, and editing are suppressed.
+  last known text rendered in subtle theme red (`Theme.danger-text`). No extra
+  `(deleted)` or `· Deleted` labels, badges or outlines are rendered; the red
+  text body is the sole visual indicator. Author names, avatars, timestamps and
+  message grouping remain intact.
+- Right-clicking a retained deleted message exposes exactly two actions in its
+  context menu: "Hide this deleted message" (removes only that deleted message
+  from view and logger memory) and "Hide all deleted messages" (removes all
+  currently retained deleted messages across all channels from view and logger).
+  Standard message actions (reply, react, edit, view history) are suppressed.
+- User's own edits and deletions are supported identically to other users' messages:
+  editing preserves previous versions and displays latest text; deleting retains
+  the message in place with red body text.
 - Up to five previous versions per edited message are retained in memory.
-  The message context menu offers "View Edit History" for any message with
-  recorded history.
+  The message context menu offers "View Edit History" for any non-deleted message
+  with recorded history.
 - The Edit History sidebar docks on the right of the conversation (420px width),
   showing stacked version cards: latest version first (marked "Current" or
   "Deleted"), followed by previous versions in reverse chronological order,
