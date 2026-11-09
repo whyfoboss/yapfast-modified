@@ -450,6 +450,17 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                     }
                     _ => {}
                 }
+                if let Some(window) = weak.upgrade() {
+                    match event {
+                        WindowEvent::KeyboardInput { .. } => {
+                            window.global::<FocusRing>().set_keyboard(true);
+                        }
+                        WindowEvent::MouseInput { .. } => {
+                            window.global::<FocusRing>().set_keyboard(false);
+                        }
+                        _ => {}
+                    }
+                }
                 if away::is_use(event)
                     && let (Some(adapter), Some(window)) = (adapter.upgrade(), weak.upgrade())
                     && let Ok(mut adapter) = adapter.try_borrow_mut()

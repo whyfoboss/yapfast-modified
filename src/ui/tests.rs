@@ -9101,7 +9101,7 @@ fn yapfast_caption_buttons_keep_the_existing_window_actions() {
 }
 
 #[test]
-fn yapfast_inset_account_card_keeps_settings_and_audio_actions_reachable() {
+fn yapfast_account_panel_keeps_settings_and_audio_actions_reachable() {
     use slint::platform::{PointerEventButton, WindowEvent};
     let window = one_message("Synthetic message");
     window.global::<ClientStyle>().set_enabled(true);
@@ -9113,7 +9113,7 @@ fn yapfast_inset_account_card_keeps_settings_and_audio_actions_reachable() {
     let deafened = Rc::new(Cell::new(false));
     let seen = deafened.clone();
     window.on_toggle_deafen(move || seen.set(true));
-    for (x, y) in [(236., 722.), (290., 722.), (344., 722.)] {
+    for (x, y) in [(254., 732.), (308., 732.), (352., 732.)] {
         let position = slint::LogicalPosition::new(x, y);
         window.window().dispatch_event(WindowEvent::PointerPressed {
             position,
@@ -9128,11 +9128,11 @@ fn yapfast_inset_account_card_keeps_settings_and_audio_actions_reachable() {
     }
     assert!(
         muted.get(),
-        "the microphone remains operable inside the inset card"
+        "the microphone remains operable in the account panel"
     );
     assert!(
         deafened.get(),
-        "the headphone toggle remains operable inside the inset card"
+        "the headphone toggle remains operable in the account panel"
     );
     assert!(window.get_settings_open(), "settings remain reachable");
     window.hide().unwrap();
@@ -9167,7 +9167,7 @@ fn yapfast_docked_profile_opens_the_existing_full_profile() {
         });
     assert!(
         opened.get(),
-        "the docked profile footer opens the full profile through its adapter callback"
+        "the docked profile banner opens the full profile through its adapter callback"
     );
     window.hide().unwrap();
 }

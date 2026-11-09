@@ -67,7 +67,7 @@ import { BrowseRow, BrowseScreen } from "browse.slint";
 // Rust sees these, besides YapfastWindow.
 export { ClientStyle } from "yapfast/style.slint";
 export { InboxRow } from "yapfast/inbox.slint";
-export { Theme, Badges, Popup, Twemoji, Looks } from "theme.slint";
+export { Theme, FocusRing, Badges, Popup, Twemoji, Looks } from "theme.slint";
 export { Autoscroll } from "scrollview.slint";
 export { PersonRow, CallLink, ShareScreen } from "voice.slint";
 export { ServerRow, RoomRow, FolderServer } from "rail.slint";
@@ -2532,53 +2532,47 @@ export component YapfastWindow inherits Window {
                         }
                     }
                 }
-                // The dock spans the rail and the sidebar. Its avatar and voice icon sit on the
-                // rail's axis, 36px from the left; names and status start at 64px.
-                if root.voice-visible: VoiceDock {
-                    voice-status: root.voice-status; voice-time: root.voice-time; voice-detail: root.voice-detail; voice-name: root.voice-name;
-                    voice-color: root.voice-color;
-                    voice-active: root.voice-active; voice-ready: root.voice-ready; voice-leaving: root.voice-leaving;
-                    voice-warning: root.voice-warning; voice-error: root.voice-error;
-                    can-share: root.can-share; sharing: root.sharing; share-live: root.share-live; share-status: root.share-status;
-                    share-watchers: root.share-viewers.length;
-                    can-film: root.can-film; camera-on: root.camera-on; camera-starting: root.camera-starting;
-                    can-soundboard: root.can-soundboard;
-                    noise-on: root.noise-suppression != 2; can-noise: root.voice-discord;
-                    toggle-noise => { root.toggle-noise(); }
-                    leave-voice => { root.leave-voice(); }
-                    dismiss-voice-error => { root.dismiss-voice-error(); }
-                    toggle-camera => { root.toggle-camera(); }
-                    toggle-share => { root.toggle-share(); }
-                    open-share-menu(x, y) => { root.open-share-menu(x, y); }
-                    open-soundboard(x, y) => { root.open-soundboard(x, y); }
-                    open-call-link(x, y, width, height) => { root.open-call-link(x, y, width, height); }
-                    open-call => { root.open-call(); }
-                }
-                // Inset the account card while preserving the inherited controls.
+                // One flat block across the rail and the channel list: the
+                // voice panel and the account panel share a surface, with one
+                // line on top and no card.
                 VerticalLayout {
-                    padding: ClientStyle.account-inset; padding-top: 0px;
+                    vertical-stretch: 0; spacing: 0px;
+                    Rectangle { height: 1px; background: Theme.line; }
+                    if root.voice-visible: VoiceDock {
+                        vertical-stretch: 0;
+                        voice-status: root.voice-status; voice-time: root.voice-time; voice-detail: root.voice-detail; voice-name: root.voice-name;
+                        voice-color: root.voice-color;
+                        voice-active: root.voice-active; voice-ready: root.voice-ready; voice-leaving: root.voice-leaving;
+                        voice-warning: root.voice-warning; voice-error: root.voice-error;
+                        can-share: root.can-share; sharing: root.sharing; share-live: root.share-live; share-status: root.share-status;
+                        share-watchers: root.share-viewers.length;
+                        can-film: root.can-film; camera-on: root.camera-on; camera-starting: root.camera-starting;
+                        can-soundboard: root.can-soundboard;
+                        noise-on: root.noise-suppression != 2; can-noise: root.voice-discord;
+                        toggle-noise => { root.toggle-noise(); }
+                        leave-voice => { root.leave-voice(); }
+                        dismiss-voice-error => { root.dismiss-voice-error(); }
+                        toggle-camera => { root.toggle-camera(); }
+                        toggle-share => { root.toggle-share(); }
+                        open-share-menu(x, y) => { root.open-share-menu(x, y); }
+                        open-soundboard(x, y) => { root.open-soundboard(x, y); }
+                        open-call-link(x, y, width, height) => { root.open-call-link(x, y, width, height); }
+                        open-call => { root.open-call(); }
+                    }
                     account-panel := Rectangle {
-                        // Anywhere on the card brightens its nameplate; each part lights only itself.
+                        // Anywhere on the panel brightens its name; each part lights only itself.
                         property <bool> hot: account-touch.has-hover || avatar-touch.has-hover || mic.hovered || ear.hovered || cog.hovered;
-                        height: ClientStyle.account-height; background: Theme.panel;
-                        border-radius: ClientStyle.enabled ? 8px : 0px;
-                        // The nameplate fills the card, a pixel beyond it above and below.
-                        if AccountLook.nameplate-url != "": Nameplate {
-                            x: 0px; y: -1px; width: parent.width + 1px; height: parent.height + 2px;
-                            radius: ClientStyle.enabled ? 8px : 0px; account: true; hovered: account-panel.hot; animate: account-panel.hot; picture-url: AccountLook.nameplate-url; palette: Theme.dark ? AccountLook.nameplate-color : AccountLook.nameplate-light;
-                        }
-                        if root.voice-visible: Rectangle { x: 12px; y: 0px; width: parent.width - 24px; height: 1px; background: Theme.line; }
+                        height: 56px; background: Theme.panel;
                         HorizontalLayout {
-                            // Discord's controls sit 3px further apart and 6px further from the edge.
-                            padding-right: ClientStyle.enabled ? 14px : 8px; spacing: ClientStyle.enabled ? 5px : 2px;
+                            padding-right: 8px; spacing: 2px;
                             Rectangle {
-                                width: ClientStyle.enabled ? 50px : 58px;
-                                Avatar { x: ClientStyle.enabled ? 8px : 19px; y: (parent.height - self.height) / 2; size: ClientStyle.enabled ? 40px : 34px; initial: root.account-initial; tint: root.account-tint; picture: root.account-picture; speaking: root.account-speaking; decoration-url: AccountLook.decoration-url; animate: account-panel.hot; }
+                                width: 58px;
+                                Avatar { x: 19px; y: (parent.height - self.height) / 2; size: 34px; initial: root.account-initial; tint: root.account-tint; picture: root.account-picture; speaking: root.account-speaking; decoration-url: AccountLook.decoration-url; animate: account-panel.hot; }
                                 if root.account-presence != "": StatusDot {
-                                    x: ClientStyle.enabled ? 34px : 40px; y: parent.height / 2 + 3px; presence: root.account-presence; ring: Theme.panel;
+                                    x: 40px; y: parent.height / 2 + 3px; presence: root.account-presence; ring: Theme.panel;
                                 }
                                 if root.account-presence == "": Rectangle {
-                                    x: ClientStyle.enabled ? 35px : 41px; y: parent.height / 2 + 4px; width: 14px; height: 14px; border-radius: 7px; background: Theme.panel;
+                                    x: 41px; y: parent.height / 2 + 4px; width: 14px; height: 14px; border-radius: 7px; background: Theme.panel;
                                     Rectangle {
                                         width: 8px; height: 8px; border-radius: 4px;
                                         background: root.preview ? Theme.accent : root.online ? Theme.live : Theme.faint;
@@ -2592,7 +2586,6 @@ export component YapfastWindow inherits Window {
                             // With Discord linked, the avatar and name open the status menu.
                             Rectangle {
                                 horizontal-stretch: 1; y: 6px; height: parent.height - 12px; border-radius: 6px;
-                                // Discord's light, see-through fill, so the nameplate shows through.
                                 background: account-touch.has-hover || avatar-touch.has-hover ? Theme.overlay.with-alpha(account-touch.pressed || avatar-touch.pressed ? 0.12 : 0.08) : transparent;
                                 animate background { duration: Theme.quick; }
                                 accessible-role: button;
@@ -2617,8 +2610,6 @@ export component YapfastWindow inherits Window {
                                 icon: root.shown-muted ? @image-url("icons/mic-off.svg") : @image-url("icons/mic.svg");
                                 label: root.voice-active ? (root.muted ? "Unmute" : "Mute") : root.shown-muted ? "Join calls unmuted" : "Join calls muted";
                                 alert: root.shown-muted;
-                                // Discord's glyphs are white and a little larger than the default.
-                                tint: ClientStyle.enabled ? Theme.text : Theme.secondary;
                                 menu-label: "Input options"; open: root.input-open;
                                 enabled: root.voice-ready || !root.voice-active;
                                 clicked => { root.toggle-mute(); }
@@ -2631,8 +2622,6 @@ export component YapfastWindow inherits Window {
                                 icon: root.shown-deafened ? @image-url("icons/headphone-off.svg") : @image-url("icons/headphones.svg");
                                 label: root.voice-active ? (root.deafened ? "Undeafen" : "Deafen") : root.deafen-on-join ? "Join calls undeafened" : "Join calls deafened";
                                 alert: root.shown-deafened;
-                                glyph: ClientStyle.enabled ? 21px : 20px;
-                                tint: ClientStyle.enabled ? Theme.text : Theme.secondary;
                                 menu-label: "Output options"; open: root.output-open;
                                 enabled: root.voice-ready || !root.voice-active;
                                 clicked => { root.toggle-deafen(); }
@@ -2646,16 +2635,9 @@ export component YapfastWindow inherits Window {
                                 clicked => { root.retry-sync(); }
                             }
                             cog := IconButton {
-                                icon: @image-url("icons/settings.svg"); label: "Settings"; radius: 4px;
-                                glyph: ClientStyle.enabled ? 24px : 20px;
-                                tint: ClientStyle.enabled ? Theme.text : Theme.secondary;
+                                icon: @image-url("icons/settings.svg"); label: "Settings";
                                 clicked => { root.settings-open = true; root.refresh-devices(); }
                             }
-                        }
-                        // Discord's thin outline around the card.
-                        if ClientStyle.enabled: Rectangle {
-                            width: parent.width; height: parent.height; border-radius: 8px;
-                            border-width: 1px; border-color: Theme.overlay.with-alpha(0.02); background: transparent;
                         }
                     }
                 }

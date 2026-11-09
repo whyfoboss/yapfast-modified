@@ -1,5 +1,5 @@
 import { ScrollView } from "scrollview.slint";
-import { Theme, Tip, Middle, Label } from "theme.slint";
+import { Theme, Tip, Middle, Label, FocusRing } from "theme.slint";
 import { ClientStyle } from "yapfast/style.slint";
 
 // A labelled action. Primary is marigold, danger red, ghost transparent until hovered.
@@ -27,7 +27,7 @@ export component ActionButton inherits Rectangle {
         : root.ghost ? (pointer.has-hover ? Theme.overlay.with-alpha(0.08) : transparent)
         : (pointer.has-hover ? Theme.button-default-hover : Theme.button-default);
     animate background { duration: Theme.quick; }
-    border-width: focus.has-focus ? 2px : 0px;
+    border-width: FocusRing.keyboard && focus.has-focus ? 2px : 0px;
     border-color: Theme.accent;
     accessible-role: button;
     accessible-label: root.label;
@@ -117,7 +117,7 @@ export component IconButton inherits Rectangle {
             : root.danger && pointer.has-hover ? Theme.danger.with-alpha(0.16)
             : pointer.has-hover ? root.fill.mix(Theme.overlay, 0.9) : root.fill;
         animate background { duration: Theme.quick; }
-        border-width: focus.has-focus ? 2px : 0px;
+        border-width: FocusRing.keyboard && focus.has-focus ? 2px : 0px;
         border-color: Theme.accent;
         Image {
             source: root.icon; width: root.glyph; height: root.glyph;
@@ -190,7 +190,7 @@ export component DeviceToggle inherits Rectangle {
                 y: (parent.height - self.height) / 2; width: 20px; height: 32px; border-radius: 4px;
                 background: caret.has-hover ? Theme.overlay.with-alpha(0.1) : transparent;
                 animate background { duration: Theme.quick; }
-                border-width: caret-focus.has-focus ? 2px : 0px;
+                border-width: FocusRing.keyboard && caret-focus.has-focus ? 2px : 0px;
                 border-color: Theme.accent;
                 Image {
                     source: @image-url("icons/chevron-down.svg"); width: 16px; height: 16px;

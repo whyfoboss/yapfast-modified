@@ -71,6 +71,13 @@ export global Theme {
     out property <duration> quick: 120ms;
 }
 
+// Whether the keyboard, rather than the pointer, moved the focus. A focus
+// ring shows only then, so a button that happens to hold the initial focus
+// has no ring at rest.
+export global FocusRing {
+    in-out property <bool> keyboard: false;
+}
+
 // One tooltip for the whole window, drawn above everything else.
 export global Tip {
     in-out property <string> text;

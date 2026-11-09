@@ -590,18 +590,20 @@ The window follows Discord's arrangement:
   submenu taller than the window scrolls, and the keys keep their row in
   sight. `src/ui/menus.rs` builds a menu's rows with each row's submenu, and
   ticks a box when it's chosen.
-- A dock across the rail and sidebar: the voice panel, whose signal icon
-  and status show a Discord call's ping on hover and its connection details
-  on a click (see [Connection details](discord/voice.md#connection-details)),
-  and whose channel line under them opens the call, as Discord's does (see
-  [The call's channel line](discord/voice.md#the-calls-channel-line)); then
-  the account panel with avatar, status, mute and deafen during a call, and settings (account,
-  theme, audio devices, message text size, clock, link previews and folding long messages, notifications,
-  sounds, reconnect, sign out). A caret beside mute and deafen opens a
-  device menu (see [Persistent voice channels](voice.md)); the input menu
-  shows a local level meter. While you speak in
-  a call, unmuted, the panel's avatar has the same green ring as your row in
-  the call.
+- A flat dock across the rail and sidebar, as v0.3.0 has it: one solid
+  `Theme.panel` surface with a single 1px line on top, no outer margin,
+  rounded card, gradient or shadow. The voice panel's signal icon and status
+  show a Discord call's ping on hover and its connection details on a click
+  (see [Connection details](discord/voice.md#connection-details)); its
+  channel line under them opens the call, as Discord's does (see [The call's
+  channel line](discord/voice.md#the-calls-channel-line)). Under it the
+  account panel has the avatar, status, mute and deafen during a call, and
+  settings (account, theme, audio devices, message text size, clock, link
+  previews and folding long messages, notifications, sounds, reconnect, sign
+  out). A caret beside mute and deafen opens a device menu (see [Persistent
+  voice channels](voice.md)); the input menu shows a local level meter. While
+  you speak in a call, unmuted, the panel's avatar has the same green ring as
+  your row in the call.
 - A conversation with a 48px header: the conversation's icon and name, and
   for a Discord server channel its topic on one line after a rule, which a
   click shows in full. Its buttons sit on the right, as in Discord: a DM's
