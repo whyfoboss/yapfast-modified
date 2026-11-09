@@ -319,7 +319,17 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
   ever written to disk. The edit history sidebar (`ui/history.slint`, `EditHistoryPanel`)
   docks beside the timeline at 420px width via `Action::ViewEditHistory` /
   `Event::EditHistory` and closes on Escape or its close button. Clear Log
-  (`Action::ClearMessageLog`) purges all retained records immediately.
+  (`Action::ClearMessageLog`) purges all retained records immediately. Deleted
+  messages display body text in `Theme.danger-text` without extra deletion badges,
+  and right-clicking offers "Hide this deleted message" (`Action::HideDeletedMessage`)
+  and "Hide all deleted messages" (`Action::HideAllDeletedMessages`).
+- Profile Editor: `ProfileEditorDialog` (`ui/server.slint`) provides a classic
+  centered single-column modal (~600px wide) with banner, avatar overlay,
+  display name and pronouns editing with pencil icons, compact Rich Presence /
+  game activities directly beneath the username/pronouns, bio editing, member since,
+  and a compact "Customize" dialog (`ProfileCustomize`) for advanced customization
+  (nameplates, decorations, name styles, profile themes). Ordinary profile viewers
+  (`ProfileCard`) remain unchanged.
 
 ## 13. Tests and the fake Discord
 

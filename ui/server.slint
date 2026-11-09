@@ -953,7 +953,7 @@ component ColourPopover inherits Rectangle {
 
 // What a profile shows beside it. Discord's Board and Wishlist can't be set up
 // in Yapfast yet, and say so rather than offer buttons that do nothing.
-component ProfileTabs inherits Rectangle {
+export component ProfileTabs inherits Rectangle {
     in property <ProfileData> data;
     callback open-link(string);
     callback open-wishlist;
@@ -1482,14 +1482,8 @@ export component ProfileEditorDialog inherits Rectangle {
     property <bool> avatar-editable: root.ready && root.prompt.avatar-enabled && root.prompt.reading == "";
     property <length> banner-height: root.prompt.main ? 193px : 210px;
     property <length> avatar-size: 120px;
-    // The main profile's text sits in the middle of its half of the card, as
-    // Discord's does, so no gap opens between it and the tabs.
-    property <length> pad: root.prompt.main ? clamp((card.width - 241px * root.side-out) / 2 / 2 - 160px, 32px, 80px) : 24px;
-    /// Hide Styles and Show Styles: the left panel gives the card its room.
-    property <bool> side-open: true;
-    /// How far the left panel is out, from 0 to 1, as Discord's slides.
-    property <float> side-out: root.side-open ? 1 : 0;
-    animate side-out { duration: 280ms; easing: ease-in-out; }
+    property <length> pad: 24px;
+    property <bool> customize-open: false;
     /// Which theme colour's picker is open: 1 the top, 2 the bottom.
     property <int> theme-handle;
     property <bool> themed: root.prompt.main && root.prompt.preview.has-theme;
@@ -1504,8 +1498,6 @@ export component ProfileEditorDialog inherits Rectangle {
     in property <bool> has-status;
     in property <string> status-text;
     in property <string> status-emoji;
-    /// The tabs show where there's room for them beside the profile.
-    property <bool> tabs-shown: root.prompt.main && root.width >= 880px;
     callback open-link(string);
     callback choose-name-style(int, int, string);
     pure callback parse-hex(string) -> color;
@@ -1545,28 +1537,11 @@ export component ProfileEditorDialog inherits Rectangle {
     background: rgba(0, 0, 0, 0.6 * root.motion);
     TouchArea { clicked => { root.close(); } }
     property <length> bar-height: root.prompt.changed || root.prompt.saving ? 60px : 0px;
-    // Show Styles: a tab on the card's left edge, once the panel has gone.
-    if root.prompt.main && !root.side-open: Rectangle {
-        x: card.x - 30px; y: card.y + 40px; width: 42px; height: 36px;
-        opacity: 1 - root.side-out;
-        border-radius: 10px; background: #000000; border-color: Theme.edge; border-width: 1px;
-        accessible-role: button; accessible-label: "Show Styles";
-        accessible-action-default => { root.side-open = true; }
-        Image { x: 7px; y: 9px; width: 18px; height: 18px; source: @image-url("icons/brush.svg"); colorize: #ffffff; }
-        show-styles := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.side-open = true; } }
-        if show-styles.has-hover: Rectangle {
-            x: -8px; y: -40px; width: tip-text.preferred-width + 20px; height: 32px;
-            border-radius: 8px; background: Theme.raised;
-            tip-text := Text { text: "Show Styles"; color: Theme.text; font-size: 14px; font-weight: 600; }
-        }
-    }
-    // Its top stays where a card of a usual height starts, so what's under
-    // the pointer stays put as the bar or the banner colour opens; it rises
-    // only to keep its end in the window.
     card := Rectangle {
         opacity: Popup.opacity(root.motion); transform-scale: Popup.scale(root.motion);
-        width: root.prompt.main ? min(958px, root.width - 96px) + (min(1199px, root.width - 8px) - min(958px, root.width - 96px)) * root.side-out : min(600px, root.width - 48px); height: min(max(card-content.preferred-height, root.prompt.main ? 798px : 620px), root.height - 48px);
-        y: max(24px, min((root.height - (root.prompt.main ? 798px : 600px)) / 2, root.height - 24px - self.height));
+        width: min(600px, root.width - 48px);
+        height: min(max(card-content.preferred-height, 600px), root.height - 48px);
+        y: max(24px, min((root.height - 600px) / 2, root.height - 24px - self.height));
         background: root.themed ? @linear-gradient(180deg, root.card-top, root.card-bottom) : Theme.sidebar;
         border-color: Theme.edge; border-width: 1px; border-radius: 12px;
         drop-shadow-blur: 32px; drop-shadow-color: #00000066; drop-shadow-offset-y: 12px;
@@ -1581,6 +1556,8 @@ export component ProfileEditorDialog inherits Rectangle {
                     if root.editing != 0 || root.colour-open {
                         root.stop-editing();
                         root.colour-open = false;
+                    } else if root.customize-open {
+                        root.customize-open = false;
                     } else {
                         root.close();
                     }
@@ -1590,28 +1567,6 @@ export component ProfileEditorDialog inherits Rectangle {
             }
             Rectangle {
                 border-radius: 12px; clip: true;
-                HorizontalLayout {
-                    if root.prompt.main: Rectangle {
-                        width: 241px * root.side-out; clip: true;
-                    ProfileCustomize {
-                        x: parent.width - 241px; height: parent.height;
-                        collapse => { root.side-open = false; }
-                        data: root.prompt.preview;
-                        avatar-enabled: root.avatar-editable; banner-enabled: root.banner-editable;
-                        look-enabled: root.prompt.look-enabled; open-handle: root.theme-handle;
-                        decoration-set: root.prompt.decoration-set; effect-set: root.prompt.effect-set; frame-set: root.prompt.frame-set;
-                        open-style => { root.stop-editing(); root.style-open = true; }
-                        open-handle-at(which) => { root.stop-editing(); root.theme-handle = root.theme-handle == which ? 0 : which; }
-                        pick(which) => { root.stop-editing(); root.pick(which); }
-                        open-link(url) => { root.open-link(url); }
-                    }
-                    }
-                    if root.prompt.main && root.side-out > 0: Rectangle { width: 1px; background: Theme.line; }
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        // Shares the card evenly with the tabs, whatever each shows.
-                        preferred-width: 0px;
-                        min-width: root.prompt.main ? 360px : 0px;
                 card-content := VerticalLayout {
                     ScrollView {
                         vertical-stretch: 1;
@@ -1655,16 +1610,29 @@ export component ProfileEditorDialog inherits Rectangle {
                                         }
                                     }
                                 }
-                                // What it edits, over the banner's corner; the main profile's column says.
-                                if !root.prompt.main: Rectangle {
+                                Rectangle {
                                     x: 16px; y: 16px; width: detail-text.preferred-width + 20px; height: 28px; border-radius: 14px;
                                     background: #000000b3;
-                                    detail-text := Text { text: root.prompt.detail; color: #ffffff; font-size: 13px; font-weight: 600; }
+                                    detail-text := Text { text: root.prompt.main ? root.prompt.title : root.prompt.detail; color: #ffffff; font-size: 13px; font-weight: 600; }
                                 }
-                                if !root.prompt.main: Rectangle {
-                                    x: parent.width - self.width - 16px; y: 16px; width: 36px; height: 36px;
+                                HorizontalLayout {
+                                    x: parent.width - self.preferred-width - 16px; y: 16px; spacing: 8px;
+                                    if root.prompt.main: Rectangle {
+                                        width: customize-btn.preferred-width + 20px; height: 32px; border-radius: 16px;
+                                        background: customize-touch.has-hover ? #000000d0 : #000000b3;
+                                        animate background { duration: 120ms; }
+                                        customize-btn := HorizontalLayout {
+                                            padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
+                                            Middle { Image { source: @image-url("icons/brush.svg"); width: 14px; height: 14px; colorize: #ffffff; } }
+                                            Middle { Text { text: "Customize"; color: #ffffff; font-size: 13px; font-weight: 600; } }
+                                        }
+                                        customize-touch := TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => { root.customize-open = !root.customize-open; }
+                                        }
+                                    }
                                     IconButton {
-                                        icon: @image-url("icons/x.svg"); label: "Close"; size: 36px; glyph: 18px; radius: 18px;
+                                        icon: @image-url("icons/x.svg"); label: "Close"; size: 32px; glyph: 16px; radius: 16px;
                                         fill: #000000b3; tint: #ffffff;
                                         clicked => { root.close(); }
                                     }
@@ -1737,7 +1705,7 @@ export component ProfileEditorDialog inherits Rectangle {
                                 }
                             }
                             VerticalLayout {
-                                padding-left: root.pad; padding-right: root.prompt.main ? 8px : root.pad; spacing: root.prompt.main ? 28px : 16px;
+                                padding-left: root.pad; padding-right: root.pad; spacing: 16px;
                                 // The banner colour, opened by clicking the banner.
                                 if root.colour-open: Rectangle {
                                     border-radius: 8px; background: Theme.sunken;
@@ -1918,28 +1886,9 @@ export component ProfileEditorDialog inherits Rectangle {
                                     }
                                     if root.prompt.too-long != "": Text { text: root.prompt.too-long; color: Theme.danger; font-size: 13px; wrap: word-wrap; }
                                 }
-                                // What others would see to press: Message can't be sent to oneself.
-                                if root.prompt.main: HorizontalLayout {
-                                    spacing: 8px; alignment: start;
-                                    ActionButton { text: "Message"; enabled: false; }
-                                    IconButton {
-                                        icon: @image-url("icons/shop.svg"); label: "Shop"; size: 34px; glyph: 18px; radius: 8px; fill: Theme.raised;
-                                        clicked => { root.open-link("https://discord.com/shop"); }
-                                    }
-                                    more-button := IconButton {
-                                        icon: @image-url("icons/ellipsis.svg"); label: "More"; size: 34px; glyph: 18px; radius: 8px; fill: Theme.raised;
-                                        clicked => { more-menu.show(); }
-                                    }
-                                    more-menu := PopupWindow {
-                                        x: more-button.x; y: 38px; width: 170px;
-                                        Rectangle {
-                                            background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
-                                            VerticalLayout {
-                                                padding: 6px;
-                                                MenuItem { text: "Copy User ID"; icon: @image-url("icons/copy.svg"); clicked => { root.copy-id(); more-menu.close(); } }
-                                            }
-                                        }
-                                    }
+                                for activity in root.prompt.preview.activities: ActivityCard {
+                                    activity: activity;
+                                    open-link(url) => { root.open-link(url); }
                                 }
                                 // Discord's offer, over what Nitro unlocks in a server.
                                 if root.prompt.offer: Rectangle {
@@ -1983,7 +1932,7 @@ export component ProfileEditorDialog inherits Rectangle {
                                             }
                                         }
                                         HoverEdit {
-                                            x: -7px; y: round((parent.height - self.height) / 2px) * 1px; width: root.prompt.main ? 281px : parent.width + 14px; height: max(28px, parent.height + 7px);
+                                            x: -7px; y: round((parent.height - self.height) / 2px) * 1px; width: parent.width + 14px; height: max(28px, parent.height + 7px);
                                             enabled: root.ready && root.prompt.bio-enabled; label: "Edit bio"; cursor: MouseCursor.text;
                                             clicked => { root.edit(3); }
                                         }
@@ -2052,7 +2001,7 @@ export component ProfileEditorDialog inherits Rectangle {
                                     Text {
                                         text: "Click to add a note"; color: Theme.muted; font-size: 15px; font-italic: true;
                                         HoverEdit {
-                                            x: -7px; y: (parent.height - self.height) / 2; width: 281px; height: 28px;
+                                            x: -7px; y: (parent.height - self.height) / 2; width: parent.width + 14px; height: 28px;
                                             label: "Add a note"; cursor: MouseCursor.text;
                                             clicked => { root.edit-note(); }
                                         }
@@ -2071,30 +2020,41 @@ export component ProfileEditorDialog inherits Rectangle {
                         save => { root.stop-editing(); root.save(); }
                     }
                 }
-                    }
-                    if root.tabs-shown: ProfileTabs {
-                        data: root.prompt.preview;
-                        open-link(url) => { root.open-link(url); }
-                        open-wishlist => { root.open-wishlist(); }
-                    }
-                }
             }
         }
-    }
-    // The main profile's column runs the whole card, so it closes from the corner.
-    if root.prompt.main: IconButton {
-        x: card.x + card.width - self.width - 12px; y: card.y + 12px; height: self.width;
-        icon: @image-url("icons/x.svg"); label: "Close"; size: 36px; glyph: 18px;
-        clicked => { root.close(); }
     }
     // A theme colour's picker, beside its tile.
     if root.theme-handle > 0: TouchArea { clicked => { root.theme-handle = 0; } }
     if root.theme-handle > 0: ColourPopover {
-        x: card.x + 248px; y: min(card.y + 300px, root.height - self.height - 8px);
+        x: max(16px, (root.width - self.width) / 2); y: min(card.y + 200px, root.height - self.height - 8px);
         start: root.theme-handle == 1 ? root.prompt.theme-top-text : root.prompt.theme-bottom-text;
         parse-hex(text) => { return root.parse-hex(text); }
         format-hex(colour) => { return root.format-hex(colour); }
         chosen(hex) => { root.write(root.theme-handle == 1 ? 4 : 5, hex); }
+    }
+    if root.customize-open: Rectangle {
+        background: #00000080;
+        TouchArea { clicked => { root.customize-open = false; } }
+        Rectangle {
+            width: min(280px, root.width - 32px); height: min(560px, root.height - 48px);
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            border-radius: 12px; background: Theme.sidebar;
+            border-color: Theme.edge; border-width: 1px;
+            drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
+            clip: true;
+            ProfileCustomize {
+                width: parent.width; height: parent.height;
+                data: root.prompt.preview;
+                avatar-enabled: root.avatar-editable; banner-enabled: root.banner-editable;
+                look-enabled: root.prompt.look-enabled; open-handle: root.theme-handle;
+                decoration-set: root.prompt.decoration-set; effect-set: root.prompt.effect-set; frame-set: root.prompt.frame-set;
+                open-style => { root.stop-editing(); root.style-open = true; }
+                open-handle-at(which) => { root.stop-editing(); root.theme-handle = root.theme-handle == which ? 0 : which; }
+                pick(which) => { root.stop-editing(); root.pick(which); }
+                open-link(url) => { root.open-link(url); }
+                collapse => { root.customize-open = false; }
+            }
+        }
     }
     if root.style-open: Rectangle {
         background: #00000080;
