@@ -459,18 +459,24 @@ impl Adapter {
             window.set_settings_open(false);
         }
         self.show_workspace(window);
-        self.show_sidebar(window);
+        let exiting = self.nav_transition.is_exiting();
+        let workspace_exiting = self.nav_transition.is_workspace_exiting();
+        if !workspace_exiting {
+            self.show_sidebar(window);
+        }
         self.show_account(window);
         // A server's search stays, with its words, in the server's channels.
-        if changes.selection && self.app.state.search_shown().is_none() {
+        if !exiting && changes.selection && self.app.state.search_shown().is_none() {
             window.set_search_text(SharedString::default());
         }
-        self.show_header(window);
-        self.show_dm_tools(window);
-        self.show_threads(window);
-        self.show_forum(window);
-        self.show_new_post(window);
-        self.show_new_thread(window);
+        if !exiting {
+            self.show_header(window);
+            self.show_dm_tools(window);
+            self.show_threads(window);
+            self.show_forum(window);
+            self.show_new_post(window);
+            self.show_new_thread(window);
+        }
         self.show_members(window);
         self.show_invite(window);
         self.show_join(window);
@@ -491,27 +497,31 @@ impl Adapter {
         self.show_sticker_card(window);
         self.show_emoji_animations(window);
         self.show_stickers(window);
-        self.show_composer(window);
-        self.show_messages(window, &changes);
-        self.show_aside(window);
+        if !exiting {
+            self.show_composer(window);
+            self.show_messages(window, &changes);
+            self.show_aside(window);
+        }
         self.show_voice(window);
         self.show_video(window);
         let state = &self.app.state;
-        if changes.selection {
-            self.focus_when_ready = state.shows_text() && !state.room_ready;
-        }
-        if changes.selection && state.shows_text() {
-            window.invoke_focus_composer();
-        } else if self.focus_when_ready && state.room_ready {
-            self.focus_when_ready = false;
-            window.invoke_focus_composer();
-        } else if changes.reset && !state.preview && state.account.is_none() {
-            window.invoke_focus_sign_in();
+        if !exiting {
+            if changes.selection {
+                self.focus_when_ready = state.shows_text() && !state.room_ready;
+            }
+            if changes.selection && state.shows_text() {
+                window.invoke_focus_composer();
+            } else if self.focus_when_ready && state.room_ready {
+                self.focus_when_ready = false;
+                window.invoke_focus_composer();
+            } else if changes.reset && !state.preview && state.account.is_none() {
+                window.invoke_focus_sign_in();
+            }
+            self.selection_version = state.selection_version;
+            self.messages = state.messages.clone();
         }
         self.navigation = state.navigation.clone();
-        self.selection_version = state.selection_version;
         self.reset_version = state.reset_version;
-        self.messages = state.messages.clone();
         self.forwarding = state.forwarding.is_some();
         self.show_tray();
         self.show_title(window);

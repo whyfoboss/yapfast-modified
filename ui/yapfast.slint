@@ -125,6 +125,59 @@ export component YapfastWindow inherits Window {
     in property <bool> dms-selected;
     in property <bool> dms-unread;
     in property <string> dms-badge;
+    // Channel / DM and Workspace switch transition (BetterAnimations-style)
+    in-out property <int> nav-motion-phase: 0; // 0 = idle/visible, 1 = exiting, 2 = entering-prep
+    in-out property <int> nav-motion-direction: 0; // 0 = vertical (chat), 1 = horizontal (workspace)
+    out property <float> nav-transition-opacity: 1.0;
+    out property <length> nav-transition-x: 0px;
+    out property <length> nav-transition-y: 0px;
+
+    // Aliases for chat transitions backwards compatibility:
+    in-out property <int> chat-motion-phase <=> root.nav-motion-phase;
+    out property <float> chat-transition-opacity <=> root.nav-transition-opacity;
+    out property <length> chat-transition-y <=> root.nav-transition-y;
+    out property <length> chat-transition-x <=> root.nav-transition-x;
+
+    states [
+        visible when root.nav-motion-phase == 0: {
+            nav-transition-opacity: 1.0;
+            nav-transition-x: 0px;
+            nav-transition-y: 0px;
+            in {
+                animate nav-transition-opacity { duration: Popup.switch-enter; easing: ease-out; }
+                animate nav-transition-x { duration: Popup.switch-enter; easing: ease-out; }
+                animate nav-transition-y { duration: Popup.switch-enter; easing: ease-out; }
+            }
+        }
+        exiting-vertical when root.nav-motion-phase == 1 && root.nav-motion-direction == 0: {
+            nav-transition-opacity: 0.0;
+            nav-transition-x: 0px;
+            nav-transition-y: Popup.switch-drift;
+            in {
+                animate nav-transition-opacity { duration: Popup.switch-exit; easing: ease-in; }
+                animate nav-transition-y { duration: Popup.switch-exit; easing: ease-in; }
+            }
+        }
+        exiting-horizontal when root.nav-motion-phase == 1 && root.nav-motion-direction == 1: {
+            nav-transition-opacity: 0.0;
+            nav-transition-x: Popup.switch-drift-x;
+            nav-transition-y: 0px;
+            in {
+                animate nav-transition-opacity { duration: Popup.switch-exit; easing: ease-in; }
+                animate nav-transition-x { duration: Popup.switch-exit; easing: ease-in; }
+            }
+        }
+        entering-prep-vertical when root.nav-motion-phase == 2 && root.nav-motion-direction == 0: {
+            nav-transition-opacity: 0.0;
+            nav-transition-x: 0px;
+            nav-transition-y: Popup.switch-offset;
+        }
+        entering-prep-horizontal when root.nav-motion-phase == 2 && root.nav-motion-direction == 1: {
+            nav-transition-opacity: 0.0;
+            nav-transition-x: Popup.switch-offset-x;
+            nav-transition-y: 0px;
+        }
+    ]
     // The dialog for starting a DM: who it found, and whether one is starting.
     // Adding a Discord friend by username: whether the request went, and what to say.
     in property <bool> add-friend-open;
@@ -2447,7 +2500,11 @@ export component YapfastWindow inherits Window {
                         width: root.sidebar-shown; background: Theme.sidebar;
                         border-top-left-radius: ClientStyle.enabled ? 12px : 10px; border-bottom-left-radius: ClientStyle.enabled ? 0px : 10px;
                         clip: true;
-                        VerticalLayout {
+                        sidebar-canvas := VerticalLayout {
+                            x: root.nav-motion-direction == 1 ? root.nav-transition-x : 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            opacity: root.nav-motion-direction == 1 ? root.nav-transition-opacity : 1.0;
                             spacing: 0px;
                             header-box := Rectangle {
                                 property <bool> banner: ClientStyle.enabled && root.header-server != "" && root.header-banner != "";
@@ -2558,6 +2615,10 @@ export component YapfastWindow inherits Window {
                                     if root.category-of(id) != "" { root.open-context-menu(root.category-of(id), false, x, y); }
                                 }
                             }
+                        }
+                        if root.nav-motion-phase == 1 && root.nav-motion-direction == 1: TouchArea {
+                            width: parent.width;
+                            height: parent.height;
                         }
                         // Discord's outline: the top and left edges meet in a 12px rounded corner,
                         // and the left line runs down to the account panel. There is no line
@@ -2682,7 +2743,13 @@ export component YapfastWindow inherits Window {
         // Conversation.
         Rectangle {
             background: Theme.chat;
-            VerticalLayout {
+            horizontal-stretch: 1;
+            clip: true;
+            workspace-canvas := VerticalLayout {
+                x: root.nav-motion-direction == 1 ? root.nav-transition-x : 0px;
+                width: parent.width;
+                height: parent.height;
+                opacity: root.nav-motion-direction == 1 ? root.nav-transition-opacity : 1.0;
                 spacing: 0px;
                 Rectangle {
                     height: ClientStyle.header-height;
@@ -2691,6 +2758,7 @@ export component YapfastWindow inherits Window {
                         if root.room-direct: Middle {
                             Rectangle {
                                 width: 26px; height: 26px;
+                                opacity: root.chat-transition-opacity;
                                 Avatar { size: 26px; initial: root.room-initial; tint: root.room-tint; picture: root.room-picture; }
                                 if root.room-presence != "": StatusDot {
                                     x: 14px; y: 14px; width: 14px; height: 14px; presence: root.room-presence; ring: Theme.chat;
@@ -2701,10 +2769,12 @@ export component YapfastWindow inherits Window {
                         if root.room-parent != "" && root.room-selected: Image {
                             source: root.room-parent-forum ? @image-url("icons/message-square-text.svg") : @image-url("icons/hash.svg");
                             width: 22px; image-fit: contain; colorize: Theme.muted;
+                            opacity: root.chat-transition-opacity;
                         }
                         if root.room-parent != "" && root.room-selected: parent-name := Text {
                             text: root.room-parent; font-size: 16px; font-weight: 700; vertical-alignment: center;
                             color: parent-touch.has-hover ? Theme.text : Theme.secondary;
+                            opacity: root.chat-transition-opacity;
                             accessible-role: button; accessible-label: "Back to " + root.room-parent;
                             accessible-action-default => { root.select-room(root.room-parent-id); }
                             parent-touch := TouchArea {
@@ -2712,8 +2782,8 @@ export component YapfastWindow inherits Window {
                                 clicked => { root.select-room(root.room-parent-id); }
                             }
                         }
-                        if root.room-parent != "" && root.room-selected: Image { source: @image-url("icons/chevron-right.svg"); width: 16px; image-fit: contain; colorize: Theme.faint; }
-                        if !root.room-direct && root.room-selected: Image { source: root.room-icon; width: 22px; image-fit: contain; colorize: Theme.muted; }
+                        if root.room-parent != "" && root.room-selected: Image { source: @image-url("icons/chevron-right.svg"); width: 16px; image-fit: contain; colorize: Theme.faint; opacity: root.chat-transition-opacity; }
+                        if !root.room-direct && root.room-selected: Image { source: root.room-icon; width: 22px; image-fit: contain; colorize: Theme.muted; opacity: root.chat-transition-opacity; }
                         if root.requests-open: Image { source: @image-url("icons/inbox.svg"); width: 22px; image-fit: contain; colorize: Theme.muted; }
                         if root.friends-open: Image { source: @image-url("icons/users.svg"); width: 22px; image-fit: contain; colorize: Theme.muted; }
                         if root.browse-open: Image { source: @image-url("icons/hash.svg"); width: 22px; image-fit: contain; colorize: Theme.muted; }
@@ -2721,6 +2791,7 @@ export component YapfastWindow inherits Window {
                             text: root.room-selected ? root.room-name : root.requests-open ? "Requests" : root.friends-open ? "Friends" : root.browse-open ? "Browse Channels" : root.sidebar-title;
                             color: root.room-selected || root.requests-open || root.friends-open || root.browse-open ? Theme.text : Theme.secondary;
                             font-size: 16px; font-weight: 700; overflow: elide; vertical-alignment: center;
+                            opacity: root.chat-transition-opacity;
                             // The name gives way to what follows it, and fills the bar when nothing does.
                             horizontal-stretch: (root.room-has-activity && root.room-direct) || root.friends-open || root.has-topic ? 0 : 1;
                         }
@@ -2731,6 +2802,7 @@ export component YapfastWindow inherits Window {
                         if root.has-topic && ClientStyle.enabled: Middle { Rectangle { width: 9px; height: 3px; Rectangle { width: 3px; height: 3px; x: 2px; border-radius: 1.5px; background: Theme.faint.with-alpha(0.75); } } }
                         if root.has-topic: topic-area := Rectangle {
                             horizontal-stretch: 1; min-width: 40px;
+                            opacity: root.chat-transition-opacity;
                             accessible-role: button;
                             accessible-label: "Channel topic";
                             accessible-action-default => { root.topic-open = true; }
@@ -2934,8 +3006,16 @@ export component YapfastWindow inherits Window {
                 }
                 HorizontalLayout {
                     spacing: 0px;
-                    VerticalLayout {
-                        spacing: 0px; horizontal-stretch: 1;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        clip: true;
+                        chat-canvas := VerticalLayout {
+                            x: 0px;
+                            y: root.nav-motion-direction == 0 ? root.nav-transition-y : 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            opacity: root.nav-motion-direction == 0 ? root.nav-transition-opacity : 1.0;
+                            spacing: 0px;
                         if root.preview: Rectangle {
                             min-height: preview-content.preferred-height; background: Theme.raised; vertical-stretch: 0;
                             preview-content := HorizontalLayout {
@@ -3057,6 +3137,7 @@ export component YapfastWindow inherits Window {
                                 accessible-role: list;
                                 accessible-label: "Messages";
                                 key-pressed(event) => {
+                                    if root.chat-motion-phase == 1 { return reject; }
                                     if root.messages.length == 0 { return reject; }
                                     if root.confirm-delete != "" && root.confirm-delete == root.active-item {
                                         if event.text == Key.Return { root.confirm-delete-message(); return accept; }
@@ -3554,7 +3635,7 @@ export component YapfastWindow inherits Window {
                                         }
                                         composer := Composer {
                                             pad: ClientStyle.composer-padding; min-height: ClientStyle.composer-height;
-                                            text <=> root.draft; enabled: root.composer-enabled; label: "Message";
+                                            text <=> root.draft; enabled: root.composer-enabled && root.chat-motion-phase != 1; label: "Message";
                                             placeholder: root.is-editing ? "Edit your message" : root.compose-label != "" ? "Write a reply" : root.room-selected ? root.composer-placeholder : "Write a message";
                                             edited(text) => { root.draft-edited(text); }
                                             accepted => { root.send(); }
@@ -3653,6 +3734,11 @@ export component YapfastWindow inherits Window {
                             if root.composer-hint == "": Rectangle { height: ClientStyle.composer-gutter; }
                         }
                     }
+                    if root.nav-motion-phase == 1 && root.nav-motion-direction == 0: TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
                     if root.search-open: SearchPanel {
                         width: 420px;
                         results: root.search-results; heading: root.search-heading; note: root.search-note;
@@ -3801,6 +3887,10 @@ export component YapfastWindow inherits Window {
                         }
                     }
                 }
+            }
+            if root.nav-motion-phase == 1 && root.nav-motion-direction == 1: TouchArea {
+                width: parent.width;
+                height: parent.height;
             }
             // The window's top outline carries on over the conversation to its right edge.
             if ClientStyle.enabled: Rectangle { y: 0px; height: 1px; background: Theme.outline; }

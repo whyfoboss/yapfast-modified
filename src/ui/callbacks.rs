@@ -770,10 +770,17 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     bind!(on_logout, Action::Logout);
     bind!(on_refresh_trust, Action::RefreshTrust);
     bind!(on_retry_sync, Action::RetrySync);
-    bind!(
-        on_navigate_dms,
-        Action::Navigate(Navigation::DirectMessages)
-    );
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_navigate_dms(move || {
+            if let Some(window) = weak.upgrade() {
+                state
+                    .borrow_mut()
+                    .navigate_transition(&window, Navigation::DirectMessages);
+            }
+        });
+    }
     {
         let adapter = adapter.clone();
         let weak = window.as_weak();
@@ -2515,7 +2522,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         if let Some(window) = weak.upgrade() {
             state
                 .borrow_mut()
-                .action(&window, Action::Navigate(Navigation::Server(id.into())));
+                .navigate_transition(&window, Navigation::Server(id.into()));
         }
     });
     let state = adapter.clone();
@@ -2544,7 +2551,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     let weak = window.as_weak();
     window.on_open_conversation(move |id| {
         if let Some(window) = weak.upgrade() {
-            state.borrow_mut().action(&window, Action::Open(id.into()));
+            state.borrow_mut().open_transition(&window, id.into());
         }
     });
     let state = adapter.clone();
@@ -2578,7 +2585,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         if let Some(window) = weak.upgrade() {
             state
                 .borrow_mut()
-                .action(&window, Action::SelectRoom(id.into()));
+                .select_room_transition(&window, id.into());
         }
     });
     for aside in [false, true] {

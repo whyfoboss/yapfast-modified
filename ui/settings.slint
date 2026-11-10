@@ -1014,6 +1014,16 @@ export component AppearanceSettings inherits VerticalLayout {
             toggled => { root.preferences-changed(); }
         }
     }
+    if !root.editor: VerticalLayout {
+        spacing: 12px;
+        SettingsHeading { text: "ANIMATIONS"; }
+        SettingsSwitch {
+            text: "Better Animations";
+            description: "Smooth transitions between chats, servers, and direct messages.";
+            checked <=> Looks.better-animations;
+            toggled => { root.preferences-changed(); }
+        }
+    }
     if root.editor: form := VerticalLayout {
         property <bool> confirming;
         spacing: 16px;

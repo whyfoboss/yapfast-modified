@@ -10112,3 +10112,384 @@ fn better_animations_account_status_popup_geometry_stability() {
         }
     }
 }
+
+#[test]
+fn better_animations_phase_b1_switch_transition_constants() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = YapfastWindow::new().unwrap();
+    let popup = window.global::<Popup>();
+    // Verify BetterAnimations switch transition timings and directional offsets
+    assert_eq!(popup.get_switch_enter(), 195);
+    assert_eq!(popup.get_switch_exit(), 75);
+    assert!((popup.get_switch_offset() - 24.0).abs() < 1e-4);
+    assert!((popup.get_switch_drift() - (-6.0)).abs() < 1e-4);
+    assert!((popup.get_switch_offset_x() - 24.0).abs() < 1e-4);
+    assert!((popup.get_switch_drift_x() - (-8.0)).abs() < 1e-4);
+}
+
+#[test]
+fn better_animations_phase_b1_chat_motion_phase_properties() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = YapfastWindow::new().unwrap();
+    assert_eq!(window.get_nav_motion_phase(), 0);
+    assert_eq!(window.get_nav_motion_direction(), 0);
+    assert!((window.get_nav_transition_opacity() - 1.0).abs() < 1e-4);
+    assert!((window.get_nav_transition_y() - 0.0).abs() < 1e-4);
+    assert!((window.get_nav_transition_x() - 0.0).abs() < 1e-4);
+
+    // Test Exiting vertical state (phase 1, direction 0)
+    window.set_nav_motion_direction(0);
+    window.set_nav_motion_phase(1);
+    assert_eq!(window.get_nav_motion_phase(), 1);
+
+    // Test EnteringPrep vertical state (phase 2, direction 0)
+    window.set_nav_motion_phase(2);
+    assert_eq!(window.get_nav_motion_phase(), 2);
+    assert!((window.get_nav_transition_opacity() - 0.0).abs() < 1e-4);
+    assert!((window.get_nav_transition_y() - 24.0).abs() < 1e-4);
+    assert!((window.get_nav_transition_x() - 0.0).abs() < 1e-4);
+
+    // Test Exiting horizontal state (phase 1, direction 1)
+    window.set_nav_motion_direction(1);
+    window.set_nav_motion_phase(1);
+    assert_eq!(window.get_nav_motion_phase(), 1);
+    assert_eq!(window.get_nav_motion_direction(), 1);
+
+    // Test EnteringPrep horizontal state (phase 2, direction 1)
+    window.set_nav_motion_phase(2);
+    assert_eq!(window.get_nav_motion_phase(), 2);
+    assert!((window.get_nav_transition_opacity() - 0.0).abs() < 1e-4);
+    assert!((window.get_nav_transition_y() - 0.0).abs() < 1e-4);
+    assert!((window.get_nav_transition_x() - 24.0).abs() < 1e-4);
+
+    // Test return to Visible (phase 0)
+    window.set_nav_motion_phase(0);
+    assert_eq!(window.get_nav_motion_phase(), 0);
+}
+
+#[test]
+fn better_animations_phase_b1_presentation_hold_and_rapid_switching() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.global::<ClientStyle>().set_enabled(true);
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().layout.better_animations = true;
+    window.invoke_explore_preview();
+
+    // 1. Initial selection: "general"
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "general".into());
+    // Since outgoing was empty, it entered directly into Entering
+    let epoch1 = adapter.borrow().nav_transition.epoch;
+    adapter.borrow_mut().on_nav_enter_start(&window, epoch1);
+    adapter.borrow_mut().on_nav_enter_complete(&window, epoch1);
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("general")
+    );
+    assert_eq!(window.get_room_name(), "general");
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+
+    // 2. Select "games": immediate core dispatch at T=0, but presentation hold on "general"
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "games".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("games"),
+        "Core state must update immediately at T=0"
+    );
+    assert_eq!(
+        window.get_nav_motion_phase(),
+        1,
+        "UI must enter Exiting motion phase (1)"
+    );
+    assert_eq!(
+        window.get_nav_motion_direction(),
+        0,
+        "Direction must be Vertical (0)"
+    );
+    assert_eq!(
+        window.get_room_name(),
+        "general",
+        "Visible header must hold outgoing channel during exit"
+    );
+    assert!(adapter.borrow().nav_transition.is_exiting());
+    let epoch2 = adapter.borrow().nav_transition.epoch;
+
+    // 3. Rapid click to "weekend" during Exiting phase (A -> B -> C scenario)
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "weekend".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("weekend"),
+        "Core state must immediately update to latest channel 'weekend'"
+    );
+    assert_eq!(
+        adapter.borrow().nav_transition.target.as_deref(),
+        Some("weekend")
+    );
+    assert_eq!(window.get_nav_motion_phase(), 1, "Still in Exiting phase");
+    assert_eq!(
+        window.get_room_name(),
+        "general",
+        "Still holding 'general' presentation until exit completes"
+    );
+
+    // 4. Exit timer completes:
+    adapter.borrow_mut().on_nav_exit_complete(&window, epoch2);
+    assert_eq!(
+        window.get_nav_motion_phase(),
+        2,
+        "Must snap to EnteringPrep (phase 2, opacity 0.0, y 24px)"
+    );
+    assert_eq!(
+        window.get_room_name(),
+        "weekend plans",
+        "Channel content must be updated to target while hidden"
+    );
+
+    // 5. Entering starts:
+    adapter.borrow_mut().on_nav_enter_start(&window, epoch2);
+    assert_eq!(
+        window.get_nav_motion_phase(),
+        0,
+        "Must be in Visible state (phase 0) animating in"
+    );
+
+    // 6. Entering completes:
+    adapter.borrow_mut().on_nav_enter_complete(&window, epoch2);
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(window.get_room_name(), "weekend plans");
+}
+
+#[test]
+fn better_animations_settings_toggle_and_defaults() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+
+    // Verify default is OFF
+    assert!(!adapter.borrow().layout.better_animations);
+    let looks = window.global::<Looks>();
+    assert!(!looks.get_better_animations());
+
+    // Toggle ON in Looks and read_cosmetics
+    looks.set_better_animations(true);
+    adapter.borrow_mut().layout.read_cosmetics(&window);
+    assert!(adapter.borrow().layout.better_animations);
+
+    // Show cosmetics back to window
+    adapter.borrow().layout.show_cosmetics(&window);
+    assert!(looks.get_better_animations());
+
+    // Toggle OFF
+    looks.set_better_animations(false);
+    adapter.borrow_mut().layout.read_cosmetics(&window);
+    assert!(!adapter.borrow().layout.better_animations);
+}
+
+#[test]
+fn better_animations_workspace_horizontal_transition() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.global::<ClientStyle>().set_enabled(true);
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().layout.better_animations = true;
+    window.invoke_explore_preview();
+
+    // Verify initial navigation is Server("friends")
+    assert_eq!(
+        adapter.borrow().app.state.navigation,
+        Navigation::Server("friends".into())
+    );
+
+    // Navigate to DirectMessages
+    adapter
+        .borrow_mut()
+        .navigate_transition(&window, Navigation::DirectMessages);
+    assert_eq!(
+        adapter.borrow().app.state.navigation,
+        Navigation::DirectMessages,
+        "Core state must update immediately at T=0"
+    );
+    assert_eq!(window.get_nav_motion_phase(), 1, "Must be in Exiting phase");
+    assert_eq!(
+        window.get_nav_motion_direction(),
+        1,
+        "Must be Horizontal direction (1)"
+    );
+    assert!(adapter.borrow().nav_transition.is_workspace_exiting());
+    let epoch = adapter.borrow().nav_transition.epoch;
+
+    // Exit completes
+    adapter.borrow_mut().on_nav_exit_complete(&window, epoch);
+    assert_eq!(window.get_nav_motion_phase(), 2);
+    assert_eq!(window.get_nav_motion_direction(), 1);
+
+    // Enter starts
+    adapter.borrow_mut().on_nav_enter_start(&window, epoch);
+    assert_eq!(window.get_nav_motion_phase(), 0);
+
+    // Enter completes
+    adapter.borrow_mut().on_nav_enter_complete(&window, epoch);
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(
+        adapter.borrow().app.state.navigation,
+        Navigation::DirectMessages
+    );
+}
+
+#[test]
+fn better_animations_voice_channel_join_does_not_trigger_animation() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.global::<ClientStyle>().set_enabled(true);
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().layout.better_animations = true;
+    window.invoke_explore_preview();
+
+    // Select "general"
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "general".into());
+    let epoch = adapter.borrow().nav_transition.epoch;
+    adapter.borrow_mut().on_nav_enter_start(&window, epoch);
+    adapter.borrow_mut().on_nav_enter_complete(&window, epoch);
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(window.get_nav_motion_phase(), 0);
+
+    // In preview mode, preview channels are loaded.
+    let voice_room = adapter
+        .borrow()
+        .app
+        .state
+        .rooms
+        .iter()
+        .find(|r| r.voice && !r.direct)
+        .map(|r| r.id.clone());
+
+    if let Some(voice_id) = voice_room {
+        adapter
+            .borrow_mut()
+            .select_room_transition(&window, voice_id);
+        // Voice join should NOT initiate a chat transition:
+        assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+        assert_eq!(window.get_nav_motion_phase(), 0);
+    }
+}
+
+#[test]
+fn better_animations_disabled_by_default_bypasses_transitions() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.global::<ClientStyle>().set_enabled(true);
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    window.invoke_explore_preview();
+
+    // Better animations is false by default
+    assert!(!adapter.borrow().layout.better_animations);
+
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "general".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("general")
+    );
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(window.get_nav_motion_phase(), 0);
+
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "games".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("games")
+    );
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(window.get_room_name(), "games");
+    assert_eq!(window.get_nav_motion_phase(), 0);
+}
+
+#[test]
+fn better_animations_phase_b1_classic_mode_bypasses_transitions() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window(); // ClientStyle.enabled == false
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().layout.better_animations = true;
+    window.invoke_explore_preview();
+
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "general".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("general")
+    );
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(window.get_nav_motion_phase(), 0);
+
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "games".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("games")
+    );
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(window.get_room_name(), "games");
+    assert_eq!(window.get_nav_motion_phase(), 0);
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn better_animations_profile_card_name_read_only_and_no_caret() {
+    let (window, adapter, _directory) = discord_server_window();
+    adapter.borrow_mut().refresh(&window);
+    window.invoke_open_link("https://discord.com/users/4242".into());
+    assert!(window.get_profile_open());
+}

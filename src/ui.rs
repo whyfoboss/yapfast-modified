@@ -1217,6 +1217,9 @@ struct Layout {
     collapse_long: bool,
     /// When animations play.
     animate: Animate,
+    /// BetterAnimations navigation transitions (chat, DM, and server switches).
+    #[serde(default)]
+    better_animations: bool,
     /// The profile switches, each as [`Cosmetics`] starts it unless changed.
     profile_effects: Option<bool>,
     decorations: Option<bool>,
@@ -1447,6 +1450,7 @@ impl Layout {
         looks.set_moving(cosmetics.moving);
         looks.set_name_styles(cosmetics.name_styles);
         looks.set_server_tags(cosmetics.server_tags);
+        looks.set_better_animations(self.better_animations);
         pictures::set_moving_collectibles(cosmetics.moving);
     }
 
@@ -1458,6 +1462,7 @@ impl Layout {
         self.moving_cosmetics = Some(looks.get_moving());
         self.name_styles = Some(looks.get_name_styles());
         self.server_tags = Some(looks.get_server_tags());
+        self.better_animations = looks.get_better_animations();
         pictures::set_moving_collectibles(self.cosmetics().moving);
     }
 
@@ -1902,6 +1907,55 @@ struct Icons {
     disconnect: slint::Image,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NavKind {
+    Channel,
+    Workspace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NavPhase {
+    Idle,
+    Exiting { kind: NavKind, target: String },
+    Entering { kind: NavKind, target: String },
+}
+
+struct NavTransition {
+    phase: NavPhase,
+    kind: NavKind,
+    target: Option<String>,
+    epoch: u64,
+    timer: slint::Timer,
+}
+
+impl Default for NavTransition {
+    fn default() -> Self {
+        Self {
+            phase: NavPhase::Idle,
+            kind: NavKind::Channel,
+            target: None,
+            epoch: 0,
+            timer: slint::Timer::default(),
+        }
+    }
+}
+
+impl NavTransition {
+    pub(super) fn is_exiting(&self) -> bool {
+        matches!(self.phase, NavPhase::Exiting { .. })
+    }
+
+    pub(super) fn is_workspace_exiting(&self) -> bool {
+        matches!(
+            self.phase,
+            NavPhase::Exiting {
+                kind: NavKind::Workspace,
+                ..
+            }
+        )
+    }
+}
+
 struct Adapter {
     // Cancel the UI event receiver before releasing the actor and runtime.
     events: Option<slint::JoinHandle<()>>,
@@ -1951,6 +2005,7 @@ struct Adapter {
     account_profile_shown: Option<AccountCardShown>,
     /// What the quick switcher listed last, while it's open.
     switcher: Option<SwitcherShown>,
+    nav_transition: NavTransition,
     /// The room ids of the rows a Discord server's channel list drags and
     /// drops, by their places; see RoomRow.
     places: Vec<String>,
@@ -2306,6 +2361,7 @@ impl Adapter {
                 sidebar: None,
                 account_profile_shown: None,
                 switcher: None,
+                nav_transition: NavTransition::default(),
                 places: Vec::new(),
                 arranging: None,
                 rail_call: None,
@@ -2859,6 +2915,338 @@ impl Adapter {
                 window.invoke_open_link(link.into());
             }
         });
+    }
+
+    pub(super) fn select_room_transition(&mut self, window: &YapfastWindow, id: String) {
+        if self.nav_transition.phase == NavPhase::Idle
+            && self.app.state.selected.as_deref() == Some(&id)
+        {
+            return;
+        }
+
+        if self.nav_transition.target.as_deref() == Some(&id) {
+            return;
+        }
+
+        let outgoing = self.app.state.selected.clone().unwrap_or_default();
+
+        // 1. Immediate Core/Network navigation at T=0
+        let effects = self.app.dispatch(Action::SelectRoom(id.clone()));
+        self.execute(effects);
+
+        if self.app.state.selected.as_deref() != Some(&id) {
+            // Voice channel join/leave without text chat navigation
+            self.refresh(window);
+            return;
+        }
+
+        self.start_channel_transition(window, id, outgoing);
+    }
+
+    fn start_channel_transition(&mut self, window: &YapfastWindow, id: String, outgoing: String) {
+        let animated = self.layout.better_animations
+            && self.layout.animate != Animate::Never
+            && window.global::<ClientStyle>().get_enabled();
+
+        if !animated {
+            self.nav_transition.phase = NavPhase::Idle;
+            self.nav_transition.target = None;
+            self.nav_transition.timer.stop();
+            window.set_nav_motion_phase(0);
+            self.refresh(window);
+            return;
+        }
+
+        if outgoing.is_empty() {
+            // No outgoing channel was visible; enter immediately with the rising animation
+            self.nav_transition.timer.stop();
+            self.nav_transition.epoch += 1;
+            let epoch = self.nav_transition.epoch;
+            self.nav_transition.kind = NavKind::Channel;
+            self.nav_transition.phase = NavPhase::Entering {
+                kind: NavKind::Channel,
+                target: id,
+            };
+            window.set_nav_motion_direction(0);
+            window.set_nav_motion_phase(2);
+            self.refresh(window);
+            let weak = self.weak.clone();
+            let window_weak = window.as_weak();
+            self.nav_transition.timer.start(
+                slint::TimerMode::SingleShot,
+                Duration::ZERO,
+                move || {
+                    let Some(adapter) = weak.upgrade() else {
+                        return;
+                    };
+                    let Some(window) = window_weak.upgrade() else {
+                        return;
+                    };
+                    adapter.borrow_mut().on_nav_enter_start(&window, epoch);
+                },
+            );
+            return;
+        }
+
+        self.nav_transition.target = Some(id.clone());
+
+        if matches!(
+            self.nav_transition.phase,
+            NavPhase::Exiting {
+                kind: NavKind::Channel,
+                ..
+            }
+        ) {
+            // Already exiting towards a previous target (e.g. rapid click A -> B -> C):
+            // Update target to C, let the running exit timer complete smoothly to opacity 0.
+            return;
+        }
+
+        self.nav_transition.timer.stop();
+        self.nav_transition.epoch += 1;
+        let epoch = self.nav_transition.epoch;
+        self.nav_transition.kind = NavKind::Channel;
+        self.nav_transition.phase = NavPhase::Exiting {
+            kind: NavKind::Channel,
+            target: id,
+        };
+
+        window.set_nav_motion_direction(0); // 0 = Vertical
+        window.set_nav_motion_phase(1); // 1 = Exiting
+        self.refresh(window);
+
+        let weak = self.weak.clone();
+        let window_weak = window.as_weak();
+        self.nav_transition.timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(75),
+            move || {
+                let Some(adapter) = weak.upgrade() else {
+                    return;
+                };
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                adapter.borrow_mut().on_nav_exit_complete(&window, epoch);
+            },
+        );
+    }
+
+    pub(super) fn navigate_transition(&mut self, window: &YapfastWindow, navigation: Navigation) {
+        if self.app.state.navigation == navigation {
+            return;
+        }
+
+        let target_str = match &navigation {
+            Navigation::DirectMessages => "dms".to_string(),
+            Navigation::Server(id) => id.clone(),
+        };
+
+        if self.nav_transition.phase == NavPhase::Idle
+            && self.nav_transition.target.as_deref() == Some(&target_str)
+        {
+            return;
+        }
+
+        // 1. Immediate Core/Network navigation at T=0
+        let effects = self.app.dispatch(Action::Navigate(navigation));
+        self.execute(effects);
+
+        self.start_workspace_transition(window, target_str);
+    }
+
+    fn start_workspace_transition(&mut self, window: &YapfastWindow, target_str: String) {
+        let animated = self.layout.better_animations
+            && self.layout.animate != Animate::Never
+            && window.global::<ClientStyle>().get_enabled();
+
+        if !animated {
+            self.nav_transition.phase = NavPhase::Idle;
+            self.nav_transition.target = None;
+            self.nav_transition.timer.stop();
+            window.set_nav_motion_phase(0);
+            self.refresh(window);
+            return;
+        }
+
+        self.nav_transition.target = Some(target_str.clone());
+
+        if matches!(
+            self.nav_transition.phase,
+            NavPhase::Exiting {
+                kind: NavKind::Workspace,
+                ..
+            }
+        ) {
+            // Already exiting towards a previous workspace: update target to latest
+            return;
+        }
+
+        self.nav_transition.timer.stop();
+        self.nav_transition.epoch += 1;
+        let epoch = self.nav_transition.epoch;
+        self.nav_transition.kind = NavKind::Workspace;
+        self.nav_transition.phase = NavPhase::Exiting {
+            kind: NavKind::Workspace,
+            target: target_str,
+        };
+
+        window.set_nav_motion_direction(1); // 1 = Horizontal
+        window.set_nav_motion_phase(1); // 1 = Exiting
+        self.refresh(window);
+
+        let weak = self.weak.clone();
+        let window_weak = window.as_weak();
+        self.nav_transition.timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(75),
+            move || {
+                let Some(adapter) = weak.upgrade() else {
+                    return;
+                };
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                adapter.borrow_mut().on_nav_exit_complete(&window, epoch);
+            },
+        );
+    }
+
+    pub(super) fn open_transition(&mut self, window: &YapfastWindow, id: String) {
+        let Some(room) = self
+            .app
+            .state
+            .rooms
+            .iter()
+            .find(|room| room.id == id)
+            .cloned()
+        else {
+            self.action(window, Action::Open(id));
+            return;
+        };
+        let target_nav = if room.direct {
+            Navigation::DirectMessages
+        } else if let Some(server) = self
+            .app
+            .state
+            .servers
+            .iter()
+            .find(|s| s.channels.contains(&id))
+        {
+            Navigation::Server(server.id.clone())
+        } else {
+            self.app.state.navigation.clone()
+        };
+
+        if self.app.state.navigation != target_nav {
+            let target_str = match &target_nav {
+                Navigation::DirectMessages => "dms".to_string(),
+                Navigation::Server(server_id) => server_id.clone(),
+            };
+
+            // 1. Immediate Core/Network navigation at T=0
+            let effects = self.app.dispatch(Action::Open(id));
+            self.execute(effects);
+
+            self.start_workspace_transition(window, target_str);
+        } else {
+            if self.nav_transition.phase == NavPhase::Idle
+                && self.app.state.selected.as_deref() == Some(&id)
+            {
+                return;
+            }
+
+            if self.nav_transition.target.as_deref() == Some(&id) {
+                return;
+            }
+
+            let outgoing = self.app.state.selected.clone().unwrap_or_default();
+
+            // 1. Immediate Core/Network navigation at T=0
+            let effects = self.app.dispatch(Action::Open(id.clone()));
+            self.execute(effects);
+
+            if self.app.state.selected.as_deref() != Some(&id) {
+                self.refresh(window);
+                return;
+            }
+
+            self.start_channel_transition(window, id, outgoing);
+        }
+    }
+
+    fn on_nav_exit_complete(&mut self, window: &YapfastWindow, epoch: u64) {
+        if self.nav_transition.epoch != epoch || !self.nav_transition.is_exiting() {
+            return;
+        }
+
+        let kind = self.nav_transition.kind;
+        let target = self.nav_transition.target.clone().unwrap_or_default();
+        self.nav_transition.phase = NavPhase::Entering { kind, target };
+
+        // Force Slint into EnteringPrep state (opacity: 0, offset position, no animation)
+        window.set_nav_motion_phase(2);
+
+        // Apply new content while completely hidden
+        self.refresh(window);
+
+        // On the next event loop turn (Duration::ZERO), start ease-out animation
+        let weak = self.weak.clone();
+        let window_weak = window.as_weak();
+        self.nav_transition
+            .timer
+            .start(slint::TimerMode::SingleShot, Duration::ZERO, move || {
+                let Some(adapter) = weak.upgrade() else {
+                    return;
+                };
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                adapter.borrow_mut().on_nav_enter_start(&window, epoch);
+            });
+    }
+
+    fn on_nav_enter_start(&mut self, window: &YapfastWindow, epoch: u64) {
+        if self.nav_transition.epoch != epoch
+            || !matches!(self.nav_transition.phase, NavPhase::Entering { .. })
+        {
+            return;
+        }
+
+        // Set nav_motion_phase to 0 (Visible / Enter ease-out animation starts!)
+        window.set_nav_motion_phase(0);
+
+        // Focus composer for the new channel
+        if self.app.state.shows_text() {
+            window.invoke_focus_composer();
+        }
+
+        // Schedule enter completion after 195ms
+        let weak = self.weak.clone();
+        let window_weak = window.as_weak();
+        self.nav_transition.timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(195),
+            move || {
+                let Some(adapter) = weak.upgrade() else {
+                    return;
+                };
+                let Some(window) = window_weak.upgrade() else {
+                    return;
+                };
+                adapter.borrow_mut().on_nav_enter_complete(&window, epoch);
+            },
+        );
+    }
+
+    fn on_nav_enter_complete(&mut self, window: &YapfastWindow, epoch: u64) {
+        if self.nav_transition.epoch != epoch {
+            return;
+        }
+
+        self.nav_transition.phase = NavPhase::Idle;
+        self.nav_transition.target = None;
+        window.set_nav_motion_phase(0);
     }
 
     fn action(&mut self, window: &YapfastWindow, action: Action) {

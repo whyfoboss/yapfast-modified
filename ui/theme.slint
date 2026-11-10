@@ -144,6 +144,7 @@ export global Looks {
     in-out property <bool> moving: true;
     in-out property <bool> name-styles: true;
     in-out property <bool> server-tags: true;
+    in-out property <bool> better-animations: false;
 }
 
 export global Badges {
@@ -165,6 +166,15 @@ export global Popup {
     out property <duration> popover-enter: 160ms;
     out property <duration> hover-enter: 160ms;
     out property <duration> hover-exit: 130ms;
+    // Navigation / Channel & Workspace switch transitions (BetterAnimations-style)
+    out property <duration> switch-enter: 195ms;
+    out property <duration> switch-exit: 75ms;
+    // Channel / DM vertical offsets
+    out property <length> switch-offset: 24px;
+    out property <length> switch-drift: -6px;
+    // Server / DM workspace horizontal offsets
+    out property <length> switch-offset-x: 24px;
+    out property <length> switch-drift-x: -8px;
     /// The card's size and opacity for how far it's open, from 0 to 1.
     public pure function scale(amount: float) -> float { 0.92 + 0.08 * amount }
     public pure function lift(amount: float) -> length { (1.0 - amount) * 10px }
