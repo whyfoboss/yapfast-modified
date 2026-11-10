@@ -83,11 +83,12 @@ their menus, profile cards and DM headers offer none.
 
 Friend requests show on the requests screen, from READY's
 relationships (type 3 sent to this account, 4 sent by it) and kept current by
-RELATIONSHIP_ADD and RELATIONSHIP_REMOVE. One sent to this account is
-accepted with the check or ignored with the cross; one it sent is cancelled
-with the cross. A profile card offers "Send friend request" to someone who
-isn't a friend, or "Accept friend request" when they asked first, and the
-header of a DM with them offers the same. Sending is
+RELATIONSHIP_ADD and RELATIONSHIP_REMOVE. Clicking a request row opens their
+profile card beside it. One sent to this account is accepted with the check
+or ignored with the cross; one it sent is cancelled with the cross. A profile
+card offers "Send friend request" to someone who isn't a friend, or "Accept
+friend request" when they asked first, and the header of a DM with them offers
+the same. Sending is
 `PUT /users/@me/relationships/{id}` with an empty body, and accepting is the
 same with `{"confirm_stranger_request": true}`: Discord calls a request a
 stranger's, `stranger_request` in the relationship, when it comes from

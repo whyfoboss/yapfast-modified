@@ -88,19 +88,27 @@ impl Application {
                     .iter()
                     .find(|room| room.network == Network::Discord)
                     .map(|room| room.id.clone())
-            });
-        let Some(room) = room else {
-            return vec![];
-        };
+            })
+            .unwrap_or_else(|| format!("discord:@me:{user}"));
         let server_context = self.state.selected_room().is_some_and(|room| !room.direct);
         let role_color = server_context
             .then(|| self.state.person(&user).and_then(|member| member.color))
             .flatten();
+        let request = self
+            .state
+            .friend_requests
+            .iter()
+            .find(|request| request.id == user);
+        let name = request
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| user.clone());
+        let avatar = request.and_then(|r| r.avatar.clone());
         self.open_profile(
             room,
             Profile {
                 id: user.clone(),
-                name: user,
+                name,
+                avatar,
                 ..Default::default()
             },
             large,
@@ -132,9 +140,15 @@ impl Application {
             .flat_map(|view| &view.profile.friends)
             .find(|friend| friend.id == user);
         let friend = self.state.friends.iter().find(|friend| friend.id == user);
+        let request = self
+            .state
+            .friend_requests
+            .iter()
+            .find(|request| request.id == user);
         let Some(name) = friend
             .map(|friend| &friend.name)
             .or(listed.map(|listed| &listed.name))
+            .or(request.map(|request| &request.name))
         else {
             return vec![];
         };
@@ -143,7 +157,8 @@ impl Application {
             name: name.clone(),
             avatar: friend
                 .and_then(|friend| friend.avatar.clone())
-                .or_else(|| listed.and_then(|listed| listed.avatar.clone())),
+                .or_else(|| listed.and_then(|listed| listed.avatar.clone()))
+                .or_else(|| request.and_then(|request| request.avatar.clone())),
             presence: friend.and_then(|friend| friend.presence),
             activity: friend.and_then(|friend| friend.activity.clone()),
             activities: friend
@@ -159,10 +174,22 @@ impl Application {
             .iter()
             .find(|room| room.direct && room.person.as_ref() == Some(&user))
             .map(|room| room.id.clone())
-            .or_else(|| self.state.selected.clone());
-        let Some(room) = room else {
-            return vec![];
-        };
+            .or_else(|| self.state.selected.clone())
+            .or_else(|| {
+                self.state
+                    .rooms
+                    .iter()
+                    .find(|room| room.network == Network::Discord && room.direct)
+                    .map(|room| room.id.clone())
+            })
+            .or_else(|| {
+                self.state
+                    .rooms
+                    .iter()
+                    .find(|room| room.network == Network::Discord)
+                    .map(|room| room.id.clone())
+            })
+            .unwrap_or_else(|| format!("discord:@me:{user}"));
         // A friend's profile opened from the friends list or mutual friends
         // is outside any server context, so it never takes a server role colour.
         self.open_profile(room, profile, large, None, false)
