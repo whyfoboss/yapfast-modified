@@ -1,5 +1,5 @@
 import { ScrollView, ListView } from "scrollview.slint";
-import { Theme, Middle, Label, Tip, Popup } from "theme.slint";
+import { Theme, Middle, Label, Tip, Popup, Looks } from "theme.slint";
 import { ActionButton, IconButton, Avatar, CallButton, VolumeSlider, MenuItem } from "controls.slint";
 import { EmojiCell, EmojiFace } from "messages.slint";
 
@@ -1138,8 +1138,8 @@ export component SwitchDialog inherits Rectangle {
         duration: root.switching ? Popup.duration-enter : Popup.duration-exit;
         easing: ease-out;
     }
-    visible: root.motion > 0;
-    background: rgba(0, 0, 0, 0.6 * root.motion);
+    visible: Looks.better-animations ? (root.motion > 0) : root.switching;
+    background: rgba(0, 0, 0, Looks.better-animations ? (0.6 * root.motion) : (root.switching ? 0.6 : 0.0));
     TouchArea { enabled: root.switching; clicked => { root.cancel-switch(); } }
     Rectangle {
         width: min(420px, root.width - 48px); height: switch-content.preferred-height;

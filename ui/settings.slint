@@ -1019,7 +1019,7 @@ export component AppearanceSettings inherits VerticalLayout {
         SettingsHeading { text: "ANIMATIONS"; }
         SettingsSwitch {
             text: "Better Animations";
-            description: "Smooth transitions between chats, servers, and direct messages.";
+            description: "Smooth transitions, animated menus, popups, tooltips, and hover motion.";
             checked <=> Looks.better-animations;
             toggled => { root.preferences-changed(); }
         }

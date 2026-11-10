@@ -1,7 +1,7 @@
 import { DmHeading } from "yapfast/dm-heading.slint";
 import { ClientStyle } from "yapfast/style.slint";
 import { ListView } from "scrollview.slint";
-import { Theme, Tip, Middle, Label, Popup } from "theme.slint";
+import { Theme, Tip, Middle, Label, Popup, Looks } from "theme.slint";
 import { Avatar, Nameplate, PictureStore, StatusText, StyledName, NameStyleRow, VoiceSpot, ServerTagChip } from "controls.slint";
 import { DiscordBadge } from "discord.slint";
 import { PersonRow, LivePill } from "voice.slint";
@@ -458,7 +458,7 @@ export component ChannelRow inherits Rectangle {
     property <bool> in-voice: root.voice-channel != "";
     property <bool> has-detail: root.detail != "" || root.detail-emoji != "";
     property <bool> offers-wave: root.wave != "" && (pointer.has-hover || root.selected);
-    property <length> hover-shift: pointer.has-hover ? 6px : 0px;
+    property <length> hover-shift: (Looks.better-animations && pointer.has-hover) ? 6px : 0px;
     animate hover-shift { duration: pointer.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
     height: root.person ? ClientStyle.dm-row-height : ClientStyle.channel-row-height;
     border-radius: 6px;
@@ -1243,7 +1243,7 @@ export component RoomList inherits Rectangle {
                 if room.voice && room.id != root.voice-channel && room.people.length > 0: VerticalLayout {
                     padding-left: 32px; padding-bottom: 4px; spacing: 0px;
                     for person in room.people: remote-participant-row := Rectangle {
-                        property <length> hover-shift: person-touch.has-hover ? 6px : 0px;
+                        property <length> hover-shift: (Looks.better-animations && person-touch.has-hover) ? 6px : 0px;
                         animate hover-shift { duration: person-touch.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
                         // A click opens their profile beside the row and a right
                         // click their menu, as in Discord; their LIVE tag watches
@@ -1317,7 +1317,7 @@ export component RoomList inherits Rectangle {
                 if room.voice && room.id == root.voice-channel: VerticalLayout {
                     padding-left: 32px; padding-bottom: 4px; spacing: 0px;
                     for person in root.participants: participant-row := Rectangle {
-                        property <length> hover-shift: participant-touch.has-hover ? 6px : 0px;
+                        property <length> hover-shift: (Looks.better-animations && participant-touch.has-hover) ? 6px : 0px;
                         animate hover-shift { duration: participant-touch.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
                         // A click opens their profile and a right click their
                         // menu, as above.

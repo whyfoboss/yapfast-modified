@@ -158,29 +158,29 @@ export global Popup {
     /// fading card into a layer as large as what changed, which is the
     /// whole window under a dimmed backdrop, so there the card only grows.
     in property <bool> fade: true;
-    out property <duration> duration-enter: 200ms;
-    out property <duration> duration-exit: 135ms;
-    out property <duration> duration: 200ms;
-    out property <duration> menu-enter: 120ms;
-    out property <duration> tooltip-enter: 100ms;
-    out property <duration> popover-enter: 160ms;
-    out property <duration> hover-enter: 160ms;
-    out property <duration> hover-exit: 130ms;
+    out property <duration> duration-enter: Looks.better-animations ? 200ms : 0ms;
+    out property <duration> duration-exit: Looks.better-animations ? 135ms : 0ms;
+    out property <duration> duration: Looks.better-animations ? 200ms : 0ms;
+    out property <duration> menu-enter: Looks.better-animations ? 120ms : 0ms;
+    out property <duration> tooltip-enter: Looks.better-animations ? 100ms : 0ms;
+    out property <duration> popover-enter: Looks.better-animations ? 160ms : 0ms;
+    out property <duration> hover-enter: Looks.better-animations ? 160ms : 0ms;
+    out property <duration> hover-exit: Looks.better-animations ? 130ms : 0ms;
     // Navigation / Channel & Workspace switch transitions (BetterAnimations-style)
-    out property <duration> switch-enter: 195ms;
-    out property <duration> switch-exit: 75ms;
+    out property <duration> switch-enter: Looks.better-animations ? 195ms : 0ms;
+    out property <duration> switch-exit: Looks.better-animations ? 75ms : 0ms;
     // Channel / DM vertical offsets
-    out property <length> switch-offset: 24px;
-    out property <length> switch-drift: -6px;
+    out property <length> switch-offset: Looks.better-animations ? 24px : 0px;
+    out property <length> switch-drift: Looks.better-animations ? -6px : 0px;
     // Server / DM workspace horizontal offsets
-    out property <length> switch-offset-x: 24px;
-    out property <length> switch-drift-x: -8px;
+    out property <length> switch-offset-x: Looks.better-animations ? 24px : 0px;
+    out property <length> switch-drift-x: Looks.better-animations ? -8px : 0px;
     /// The card's size and opacity for how far it's open, from 0 to 1.
-    public pure function scale(amount: float) -> float { 0.92 + 0.08 * amount }
-    public pure function lift(amount: float) -> length { (1.0 - amount) * 10px }
-    public pure function menu-scale(amount: float) -> float { 0.93 + 0.07 * amount }
-    public pure function popover-scale(amount: float) -> float { 0.95 + 0.05 * amount }
-    public pure function opacity(amount: float) -> float { root.fade ? amount : (amount > 0 ? 1 : 0) }
+    public pure function scale(amount: float) -> float { Looks.better-animations ? (0.92 + 0.08 * amount) : 1.0 }
+    public pure function lift(amount: float) -> length { Looks.better-animations ? ((1.0 - amount) * 10px) : 0px }
+    public pure function menu-scale(amount: float) -> float { Looks.better-animations ? (0.93 + 0.07 * amount) : 1.0 }
+    public pure function popover-scale(amount: float) -> float { Looks.better-animations ? (0.95 + 0.05 * amount) : 1.0 }
+    public pure function opacity(amount: float) -> float { root.fade ? (Looks.better-animations ? amount : (amount > 0 ? 1 : 0)) : (amount > 0 ? 1 : 0) }
 }
 
 // The way in and out of a popup shown with `if`: `amount` goes from 0 to
@@ -188,8 +188,8 @@ export global Popup {
 // way out ends, which the popup's `if` waits for.
 export component PopupMotion {
     in property <bool> open;
-    out property <float> amount;
-    out property <bool> shown: self.open || self.amount > 0;
+    out property <float> amount: self.open ? 1 : 0;
+    out property <bool> shown: self.open || (Looks.better-animations && self.amount > 0);
     init => { if self.open { self.amount = 1; } }
     changed open => { self.amount = self.open ? 1 : 0; }
     animate amount {

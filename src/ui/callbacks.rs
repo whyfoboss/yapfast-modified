@@ -2152,6 +2152,12 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
             .app
             .dispatch(Action::HideNameplates(!window.get_show_nameplates()));
         adapter.restyle = true;
+        if !adapter.layout.better_animations || adapter.layout.animate == Animate::Never {
+            adapter.nav_transition.phase = NavPhase::Idle;
+            adapter.nav_transition.target = None;
+            adapter.nav_transition.timer.stop();
+            window.set_nav_motion_phase(0);
+        }
         // It refreshes the window, and asks for what the profile switches
         // may now show.
         adapter.action(&window, Action::SetCosmetics(cosmetics));

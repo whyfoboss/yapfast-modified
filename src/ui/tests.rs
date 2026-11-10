@@ -9993,7 +9993,24 @@ fn better_animations_phase_a_core_motion_and_overlays() {
     i_slint_backend_testing::init_no_event_loop();
     let window = YapfastWindow::new().unwrap();
     let popup = window.global::<Popup>();
-    // Verify expressive 0.92 -> 1.0 modal scale with 10px lift.
+    let looks = window.global::<Looks>();
+
+    // 1. By default, Better Animations is OFF: all durations are 0ms and transforms are identity.
+    assert!(!looks.get_better_animations());
+    assert_eq!(popup.get_duration_enter(), 0);
+    assert_eq!(popup.get_duration_exit(), 0);
+    assert_eq!(popup.get_menu_enter(), 0);
+    assert_eq!(popup.get_tooltip_enter(), 0);
+    assert_eq!(popup.get_popover_enter(), 0);
+    assert_eq!(popup.get_hover_enter(), 0);
+    assert_eq!(popup.get_hover_exit(), 0);
+    assert!((popup.invoke_scale(0.0) - 1.0).abs() < 1e-4);
+    assert!((popup.invoke_lift(0.0) - 0.0).abs() < 1e-4);
+    assert!((popup.invoke_menu_scale(0.0) - 1.0).abs() < 1e-4);
+    assert!((popup.invoke_popover_scale(0.0) - 1.0).abs() < 1e-4);
+
+    // 2. When Better Animations is ON: expressive durations, scale, and lift are enabled.
+    looks.set_better_animations(true);
     assert!((popup.invoke_scale(0.0) - 0.92).abs() < 1e-4);
     assert!((popup.invoke_scale(1.0) - 1.0).abs() < 1e-4);
     assert!((popup.invoke_lift(0.0) - 10.0).abs() < 1e-4);
@@ -10026,7 +10043,14 @@ fn better_animations_hover_interaction_durations_and_shift() {
     i_slint_backend_testing::init_no_event_loop();
     let window = YapfastWindow::new().unwrap();
     let popup = window.global::<Popup>();
-    // Verify hover enter (160ms) and hover exit (130ms) durations for channels and users.
+    let looks = window.global::<Looks>();
+
+    // When OFF: 0ms
+    assert_eq!(popup.get_hover_enter(), 0);
+    assert_eq!(popup.get_hover_exit(), 0);
+
+    // When ON: 160ms enter, 130ms exit
+    looks.set_better_animations(true);
     assert_eq!(popup.get_hover_enter(), 160);
     assert_eq!(popup.get_hover_exit(), 130);
 }
@@ -10118,7 +10142,18 @@ fn better_animations_phase_b1_switch_transition_constants() {
     i_slint_backend_testing::init_no_event_loop();
     let window = YapfastWindow::new().unwrap();
     let popup = window.global::<Popup>();
-    // Verify BetterAnimations switch transition timings and directional offsets
+    let looks = window.global::<Looks>();
+
+    // When OFF (default): 0ms and 0px
+    assert_eq!(popup.get_switch_enter(), 0);
+    assert_eq!(popup.get_switch_exit(), 0);
+    assert!((popup.get_switch_offset() - 0.0).abs() < 1e-4);
+    assert!((popup.get_switch_drift() - 0.0).abs() < 1e-4);
+    assert!((popup.get_switch_offset_x() - 0.0).abs() < 1e-4);
+    assert!((popup.get_switch_drift_x() - 0.0).abs() < 1e-4);
+
+    // When ON: BetterAnimations switch transition timings and directional offsets
+    looks.set_better_animations(true);
     assert_eq!(popup.get_switch_enter(), 195);
     assert_eq!(popup.get_switch_exit(), 75);
     assert!((popup.get_switch_offset() - 24.0).abs() < 1e-4);
@@ -10131,6 +10166,7 @@ fn better_animations_phase_b1_switch_transition_constants() {
 fn better_animations_phase_b1_chat_motion_phase_properties() {
     i_slint_backend_testing::init_no_event_loop();
     let window = YapfastWindow::new().unwrap();
+    window.global::<Looks>().set_better_animations(true);
     assert_eq!(window.get_nav_motion_phase(), 0);
     assert_eq!(window.get_nav_motion_direction(), 0);
     assert!((window.get_nav_transition_opacity() - 1.0).abs() < 1e-4);
@@ -10302,6 +10338,47 @@ fn better_animations_settings_toggle_and_defaults() {
     looks.set_better_animations(false);
     adapter.borrow_mut().layout.read_cosmetics(&window);
     assert!(!adapter.borrow().layout.better_animations);
+}
+
+#[test]
+fn better_animations_master_toggle_runtime_settle_on_disable() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.global::<ClientStyle>().set_enabled(true);
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().layout.better_animations = true;
+    window.global::<Looks>().set_better_animations(true);
+    window.invoke_explore_preview();
+
+    // 1. Initial room is "general"
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "general".into());
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+
+    // 2. Start transition to "games" -> Enters Exiting phase
+    adapter
+        .borrow_mut()
+        .select_room_transition(&window, "games".into());
+    assert!(adapter.borrow().nav_transition.is_exiting());
+    assert_eq!(window.get_nav_motion_phase(), 1);
+
+    // 3. User flips Better Animations switch to OFF while transition is in flight
+    window.global::<Looks>().set_better_animations(false);
+    window.invoke_preferences_changed();
+
+    // 4. Verify transition settled immediately: phase is Idle, timer stopped, phase is 0, view refreshed
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(adapter.borrow().nav_transition.target, None);
+    assert_eq!(window.get_nav_motion_phase(), 0);
+    assert_eq!(window.get_room_name(), "games");
 }
 
 #[test]

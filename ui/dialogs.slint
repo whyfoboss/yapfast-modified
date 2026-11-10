@@ -1,5 +1,5 @@
 import { ScrollView } from "scrollview.slint";
-import { Theme, Middle, Label, Popup, Twemoji } from "theme.slint";
+import { Theme, Middle, Label, Popup, Twemoji, Looks } from "theme.slint";
 import { ActionButton, IconButton, Avatar, TextField, MenuItem } from "controls.slint";
 import { DiscordBadge } from "discord.slint";
 import { StatusDot } from "rail.slint";
@@ -579,10 +579,10 @@ export component StatusMenu inherits Rectangle {
     callback choose(string);
     callback custom-status;
     callback edit-profile;
-    property <float> enter-amount: 0;
+    property <float> enter-amount: Looks.better-animations ? 0 : 1;
     init => { self.enter-amount = 1; }
     animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
-    opacity: 0.2 + 0.8 * self.enter-amount;
+    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
     background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
     drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
     accessible-role: groupbox;

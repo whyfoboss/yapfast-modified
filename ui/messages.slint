@@ -1,6 +1,6 @@
 import { ClientStyle } from "yapfast/style.slint";
 import { ListView, ScrollView } from "scrollview.slint";
-import { Theme, Tip, ReactionHover, Middle, Label, Twemoji, Popup } from "theme.slint";
+import { Theme, Tip, ReactionHover, Middle, Label, Twemoji, Popup, Looks } from "theme.slint";
 import { ActionButton, IconButton, Avatar, Picture, PictureStore, EmojiAnimations, Skeleton, SpoilerCover, MenuItem, TextField, ContextMenu, MenuRow, StyledName, NameStyleRow, ServerTagChip } from "controls.slint";
 import { FavoriteStar, GifFavorites } from "gifs.slint";
 
@@ -1328,11 +1328,11 @@ export component MessageMenu inherits Rectangle {
     callback view-edit-history(string);
     callback hide-deleted-message(string);
     callback hide-all-deleted-messages();
-    property <float> enter-amount: 0;
+    property <float> enter-amount: Looks.better-animations ? 0 : 1;
     init => { self.enter-amount = 1; }
     animate enter-amount { duration: Popup.menu-enter; easing: ease-out; }
-    opacity: 0.2 + 0.8 * self.enter-amount;
-    transform-scale: Popup.menu-scale(self.enter-amount);
+    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
+    transform-scale: Looks.better-animations ? Popup.menu-scale(self.enter-amount) : 1.0;
     background: Theme.menu; border-color: Theme.menu-line; border-width: 1px; border-radius: 8px;
     drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
     menu-content := VerticalLayout {

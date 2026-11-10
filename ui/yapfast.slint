@@ -38,7 +38,7 @@ import "fonts/DisplayName-Journal.ttf";
 // Yapfast's window. Its parts live beside it, by area: theme.slint, controls.slint,
 // discord.slint, voice.slint, rail.slint, composer.slint, messages.slint,
 // settings.slint, people.slint, friends.slint, dialogs.slint and sign-in.slint.
-import { Theme, Tip, BadgeTip, ReactionHover, Middle, Popup, PopupMotion, Twemoji } from "theme.slint";
+import { Theme, Tip, BadgeTip, ReactionHover, Middle, Popup, PopupMotion, Twemoji, Looks } from "theme.slint";
 import { TitleBar, ResizeEdges } from "title_bar.slint";
 import { InboxRow, InboxPopout } from "yapfast/inbox.slint";
 import { GifPicker, GifTile, PickerTab } from "gifs.slint";
@@ -2085,11 +2085,11 @@ export component YapfastWindow inherits Window {
         y: max(8px, root.menu-y - self.height - 8px);
         close-policy: PopupClosePolicy.close-on-click-outside;
         Rectangle {
-            property <float> enter-amount: 0;
+            property <float> enter-amount: Looks.better-animations ? 0 : 1;
             init => { self.enter-amount = 1; }
             animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
-            opacity: 0.2 + 0.8 * self.enter-amount;
-            transform-scale: Popup.popover-scale(self.enter-amount);
+            opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
+            transform-scale: Looks.better-animations ? Popup.popover-scale(self.enter-amount) : 1.0;
             transform-origin: { x: 0px, y: self.height };
             background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
             drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
@@ -4872,16 +4872,16 @@ export component YapfastWindow inherits Window {
     if Tip.text != "": tip-card := Rectangle {
         property <length> w: tip-text.preferred-width + 20px;
         property <length> h: 32px;
-        property <float> enter: 0;
+        property <float> enter: Looks.better-animations ? 0 : 1;
         init => { self.enter = 1; }
         animate enter { duration: Popup.tooltip-enter; easing: ease-out; }
         property <length> base-x: Tip.side == 1 ? Tip.x + 10px : max(8px, min(root.width - self.w - 8px, Tip.x - self.w / 2));
         property <length> base-y: Tip.side == 1 ? Tip.y - self.h / 2 : Tip.side == 0 ? max(4px, Tip.y - self.h - 6px) : Tip.y + 6px;
-        x: self.base-x + (Tip.side == 1 ? (self.enter - 1.0) * 3px : 0px);
-        y: self.base-y + (Tip.side == 0 ? (1.0 - self.enter) * 3px : Tip.side == 2 ? (self.enter - 1.0) * 3px : 0px);
+        x: self.base-x + (Looks.better-animations ? (Tip.side == 1 ? (self.enter - 1.0) * 3px : 0px) : 0px);
+        y: self.base-y + (Looks.better-animations ? (Tip.side == 0 ? (1.0 - self.enter) * 3px : Tip.side == 2 ? (self.enter - 1.0) * 3px : 0px) : 0px);
         width: self.w; height: self.h;
-        opacity: self.enter;
-        transform-scale: 0.97 + 0.03 * self.enter;
+        opacity: Looks.better-animations ? self.enter : 1.0;
+        transform-scale: Looks.better-animations ? (0.97 + 0.03 * self.enter) : 1.0;
         transform-origin: { x: self.w / 2, y: self.h };
         border-radius: 6px; background: Theme.tooltip;
         drop-shadow-blur: 12px; drop-shadow-color: #00000080; drop-shadow-offset-y: 3px;

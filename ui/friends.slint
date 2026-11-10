@@ -1,5 +1,5 @@
 import { ScrollView, ListView } from "scrollview.slint";
-import { Theme, Middle, Label, Popup } from "theme.slint";
+import { Theme, Middle, Label, Popup, Looks } from "theme.slint";
 import { ActionButton, IconButton, Avatar, TextField, StatusText, VoiceSpot } from "controls.slint";
 import { DiscordBadge } from "discord.slint";
 import { RoomRow, StatusDot, ChannelRow } from "rail.slint";
@@ -173,7 +173,7 @@ export component FriendItem inherits Rectangle {
     property <bool> has-activity: root.friend.activity != "" || root.friend.activity-emoji != "";
     property <string> status: root.friend.presence == "dnd" ? "Do Not Disturb" : root.friend.presence == "idle" ? "Idle" : root.friend.presence == "online" || root.friend.presence == "mobile" ? "Online" : "Offline";
     property <brush> surface: pointer.has-hover ? Theme.hover : Theme.chat;
-    property <length> hover-shift: pointer.has-hover ? 6px : 0px;
+    property <length> hover-shift: (Looks.better-animations && pointer.has-hover) ? 6px : 0px;
     animate hover-shift { duration: pointer.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
     height: 62px; border-radius: 8px;
     background: pointer.has-hover ? Theme.hover : transparent;

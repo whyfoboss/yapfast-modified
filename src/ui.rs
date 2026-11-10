@@ -1450,7 +1450,8 @@ impl Layout {
         looks.set_moving(cosmetics.moving);
         looks.set_name_styles(cosmetics.name_styles);
         looks.set_server_tags(cosmetics.server_tags);
-        looks.set_better_animations(self.better_animations);
+        let effective = self.better_animations && self.animate != Animate::Never;
+        looks.set_better_animations(effective);
         pictures::set_moving_collectibles(cosmetics.moving);
     }
 
@@ -1463,6 +1464,8 @@ impl Layout {
         self.name_styles = Some(looks.get_name_styles());
         self.server_tags = Some(looks.get_server_tags());
         self.better_animations = looks.get_better_animations();
+        let effective = self.better_animations && self.animate != Animate::Never;
+        looks.set_better_animations(effective);
         pictures::set_moving_collectibles(self.cosmetics().moving);
     }
 
@@ -1908,13 +1911,13 @@ struct Icons {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NavKind {
+pub(super) enum NavKind {
     Channel,
     Workspace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum NavPhase {
+pub(super) enum NavPhase {
     Idle,
     Exiting { kind: NavKind, target: String },
     Entering { kind: NavKind, target: String },

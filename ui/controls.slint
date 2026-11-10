@@ -1,5 +1,5 @@
 import { ScrollView } from "scrollview.slint";
-import { Theme, Tip, Middle, Label, FocusRing, Popup } from "theme.slint";
+import { Theme, Tip, Middle, Label, FocusRing, Popup, Looks } from "theme.slint";
 import { ClientStyle } from "yapfast/style.slint";
 
 // A labelled action. Primary is marigold, danger red, ghost transparent until hovered.
@@ -1113,7 +1113,7 @@ export component ContextMenu inherits Rectangle {
     callback chose(string);
     callback toggled(string);
     callback close;
-    property <float> enter-amount: 0;
+    property <float> enter-amount: Looks.better-animations ? 0 : 1;
     init => { self.enter-amount = 1; }
     animate enter-amount { duration: Popup.menu-enter; easing: ease-out; }
     property <int> current: -1;
@@ -1195,8 +1195,8 @@ export component ContextMenu inherits Rectangle {
             return accept;
         }
         main-panel := Rectangle {
-            opacity: 0.2 + 0.8 * root.enter-amount;
-            transform-scale: Popup.menu-scale(root.enter-amount);
+            opacity: Looks.better-animations ? (0.2 + 0.8 * root.enter-amount) : 1.0;
+            transform-scale: Looks.better-animations ? Popup.menu-scale(root.enter-amount) : 1.0;
             transform-origin: { x: root.flip ? root.menu-width : 0px, y: 0px };
             x: root.flip ? root.content-width - root.menu-width : 0px; y: root.lift;
             width: root.menu-width; height: root.main-height;
@@ -1239,10 +1239,10 @@ export component ContextMenu inherits Rectangle {
         }
         Rectangle {
             visible: root.sub-open;
-            property <float> sub-enter: 0;
+            property <float> sub-enter: Looks.better-animations ? 0 : 1;
             changed visible => { self.sub-enter = self.visible ? 1 : 0; }
             animate sub-enter { duration: Popup.menu-enter; easing: ease-out; }
-            opacity: 0.2 + 0.8 * self.sub-enter;
+            opacity: Looks.better-animations ? (0.2 + 0.8 * self.sub-enter) : 1.0;
             x: root.flip ? root.widest - root.submenu-width : root.menu-width + 4px;
             y: root.lift + root.sub-top;
             width: root.submenu-width; height: root.sub-height;
@@ -1355,10 +1355,10 @@ export component VolumeSlider inherits Rectangle {
 // which opens the list of them in place, how loud it is, anything placed
 // inside, then a way into the voice settings.
 export component QuickDeviceMenu inherits Rectangle {
-    property <float> enter-amount: 0;
+    property <float> enter-amount: Looks.better-animations ? 0 : 1;
     init => { self.enter-amount = 1; }
     animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
-    opacity: 0.2 + 0.8 * self.enter-amount;
+    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
     /// "Output" or "Input".
     in property <string> kind;
     in property <[string]> devices;
