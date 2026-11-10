@@ -780,10 +780,16 @@ impl FlickableDataInner {
             let now = crate::animations::current_tick();
 
             if let Some(x_simulation) = x_simulation {
-                delta.x += x_simulation.borrow().remaining_distance(now) as Coord;
+                let rem = x_simulation.borrow().remaining_distance(now) as Coord;
+                if delta.x * rem > 0. {
+                    delta.x += rem;
+                }
             }
             if let Some(y_simulation) = y_simulation {
-                delta.y += y_simulation.borrow().remaining_distance(now) as Coord;
+                let rem = y_simulation.borrow().remaining_distance(now) as Coord;
+                if delta.y * rem > 0. {
+                    delta.y += rem;
+                }
             }
         }
 

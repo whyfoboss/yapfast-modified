@@ -3520,6 +3520,86 @@ fn a_wheel_spun_fast_scrolls_farther_for_each_notch() {
 }
 
 #[test]
+fn wheel_scroll_direction_reversal_responds_immediately_on_first_notch() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    window.set_workspace(true);
+    window.set_room_selected(true);
+    window.set_room_ready(true);
+    window.set_history_start(true);
+    let rows: Vec<MessageRow> = (0..300)
+        .map(|index| {
+            let mut row = message_row_plain(&ChatMessage {
+                id: format!("m{index}"),
+                item: format!("i{index}"),
+                author: "Bob".into(),
+                body: format!("Message {index}"),
+                formatted: true,
+                ..Default::default()
+            });
+            row.first = true;
+            row
+        })
+        .collect();
+    window.set_messages(ModelRc::new(VecModel::from(rows)));
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1120., 760.));
+    let wait = |time: Duration| {
+        i_slint_backend_testing::mock_elapsed_time(time);
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(1100., 740.),
+            });
+    };
+    window.invoke_scroll_to_latest();
+    for _ in 0..20 {
+        wait(Duration::from_millis(50));
+    }
+
+    let send_wheel = |dy: f32| {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::internal(
+                i_slint_core::input::BackendMouseEvent::Wheel {
+                    position: i_slint_core::lengths::LogicalPoint::new(700., 380.),
+                    delta_x: 0.,
+                    delta_y: dy,
+                    phase: i_slint_core::input::TouchPhase::Moved,
+                },
+            ));
+    };
+
+    // Test sequence: UP -> UP -> DOWN -> DOWN -> UP -> DOWN
+    let steps: [(f32, &str); 6] = [
+        (60.0, "UP 1"),
+        (60.0, "UP 2"),
+        (-60.0, "DOWN 1 (reversal)"),
+        (-60.0, "DOWN 2"),
+        (60.0, "UP 3 (reversal)"),
+        (-60.0, "DOWN 3 (reversal)"),
+    ];
+
+    for (dy, label) in steps {
+        let (index_before, edge_before) = (window.get_top_index(), window.get_top_edge());
+        send_wheel(dy);
+        for _ in 0..6 {
+            wait(Duration::from_millis(40));
+        }
+        let (index_after, edge_after) = (window.get_top_index(), window.get_top_edge());
+        let moved = index_before != index_after || (edge_before - edge_after).abs() > 0.5;
+        assert!(
+            moved,
+            "Step {label} (dy={dy}) failed to move timeline: before=(index={index_before}, edge={edge_before}), after=(index={index_after}, edge={edge_after})"
+        );
+    }
+
+    window.hide().unwrap();
+}
+
+#[test]
 fn a_middle_click_scrolls_towards_the_pointer_until_the_next_press() {
     use slint::platform::{PointerEventButton, WindowEvent};
     i_slint_backend_testing::init_no_event_loop();
