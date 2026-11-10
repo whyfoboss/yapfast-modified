@@ -1048,6 +1048,7 @@ export component ProfileCard inherits Rectangle {
                             if root.data.name-style.length == 0: TextInput {
                                 text: root.data.name; color: root.data.name-has-color ? root.data.name-color : Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
                                 read-only: true; single-line: true;
+                                text-cursor-width: 0px;
                                 selection-background-color: Theme.accent.with-alpha(0.35);
                                 selection-foreground-color: Theme.text;
                                 accessible-label: "Name";
@@ -1062,6 +1063,7 @@ export component ProfileCard inherits Rectangle {
                                     text: root.data.handle + (root.data.pronouns != "" ? " \u{2022} " + root.data.pronouns : "");
                                     color: Theme.secondary; font-size: 14px; font-weight: 400; vertical-alignment: center;
                                     read-only: true; single-line: true;
+                                    text-cursor-width: 0px;
                                     selection-background-color: Theme.accent.with-alpha(0.35);
                                     selection-foreground-color: Theme.text;
                                     accessible-label: "Username";
