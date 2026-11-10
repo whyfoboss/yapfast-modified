@@ -3990,20 +3990,23 @@ impl Adapter {
     /// own, and what the corner shows while the call is off screen.
     pub(super) fn show_stage(&mut self, window: &YapfastWindow) {
         let voice = &self.app.state.voice;
-        let watching = voice
-            .watching
-            .as_ref()
-            .map(|watching| watching.user.as_str());
-        if watching != self.watched.as_deref() {
-            // A stream starts large, and leaves when watching it stops.
-            if let Some(user) = watching {
-                self.call_focus = Some(Focus::Stream(user.to_owned()));
-            } else if matches!(&self.call_focus, Some(Focus::Stream(user)) if self.watched.as_ref() == Some(user))
-            {
-                self.call_focus = None;
+        let watching_users: Vec<String> = voice.watching.iter().map(|w| w.user.clone()).collect();
+        let primary_watching = watching_users.first().map(|s| s.as_str());
+
+        // Focus handling:
+        // If focus was on a stream that was watched and is no longer watched, switch to another watched stream or None
+        if let Some(Focus::Stream(user)) = &self.call_focus {
+            if !watching_users.contains(user) && self.watched_streams.contains(user) {
+                self.call_focus = watching_users.first().map(|u| Focus::Stream(u.clone()));
             }
-            self.watched = watching.map(str::to_owned);
+        } else if self.call_focus.is_none() && !watching_users.is_empty() && self.watched.is_none()
+        {
+            // First time watching a stream: start focused on it
+            self.call_focus = watching_users.first().map(|u| Focus::Stream(u.clone()));
         }
+        self.watched = primary_watching.map(str::to_owned);
+        self.watched_streams = watching_users.clone();
+
         let stage = Stage {
             participants: if voice.active() {
                 &voice.participants
@@ -4018,12 +4021,42 @@ impl Adapter {
         }
         let slot = |slot: Option<usize>| slot.map_or(-1, |slot| slot as i32);
         window.set_call_focus(slot(focused));
+        let focused_user = match &self.call_focus {
+            Some(crate::ui::tiles::Focus::Stream(u)) => Some(u.as_str()),
+            _ => None,
+        };
+        let sharing_offset = usize::from(voice.sharing.is_some());
+        let focused_active = if let Some(u) = focused_user {
+            voice
+                .watching
+                .iter()
+                .position(|w| w.user == u)
+                .map(|i| (i + sharing_offset) as i32)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        window.set_focused_active(focused_active);
+        let watched_stream_count = (voice.watching.len() + sharing_offset) as i32;
+        window.set_watched_stream_count(watched_stream_count);
+        let single_watched_slot = if voice.sharing.is_some() {
+            0
+        } else if let Some(u) = primary_watching {
+            stage
+                .slot(&Focus::Stream(u.to_string()))
+                .map_or(-1, |s| s as i32)
+        } else {
+            -1
+        };
+        window.set_single_watched_slot(single_watched_slot);
         update_model(
             &self.models.stream_tiles,
             stage.streams().map(|person| person as i32).collect(),
         );
-        window.set_watch_user(watching.unwrap_or_default().into());
-        let pip = stage.pip(self.call_focus.as_ref(), watching);
+        window.set_has_active_streams(!voice.watching.is_empty() || voice.sharing.is_some());
+        let active_focus_user = focused_user.or(primary_watching);
+        window.set_watch_user(active_focus_user.unwrap_or_default().into());
+        let pip = stage.pip(self.call_focus.as_ref(), primary_watching);
         window.set_pip_kind(match pip {
             Pip::None => 0,
             Pip::Watched => 1,
@@ -4034,12 +4067,12 @@ impl Adapter {
             Pip::Camera(person) => person as i32,
             _ => -1,
         });
-        window.set_pip_slot(slot(stage.pip_slot(pip, watching)));
+        window.set_pip_slot(slot(stage.pip_slot(pip, primary_watching)));
     }
 
     /// The call: the voice dock, sharing and watching a screen, a DM's call,
     /// ringing, and the devices.
-    fn show_voice(&mut self, window: &YapfastWindow) {
+    pub(super) fn show_voice(&mut self, window: &YapfastWindow) {
         self.ring();
         let role_colors = self.layout.role_colors_everywhere;
         // The server of a call shows it on the rail, so the rail follows a
@@ -4120,8 +4153,15 @@ impl Adapter {
         if voice.sharing.is_none() {
             window.set_share_frame(slint::Image::default());
         }
-        window.set_watching(voice.watching.is_some());
-        match &voice.watching {
+        window.set_watching(!voice.watching.is_empty());
+        let focused_user = match &self.call_focus {
+            Some(crate::ui::tiles::Focus::Stream(u)) => Some(u.as_str()),
+            _ => None,
+        };
+        let focused_watching = focused_user
+            .and_then(|u| voice.watching.iter().find(|w| w.user == u))
+            .or_else(|| voice.watching.first());
+        match focused_watching {
             Some(watching) => {
                 window.set_watch_title(format!("{}'s screen", watching.name).into());
                 window.set_watch_status(
@@ -4277,54 +4317,81 @@ impl Adapter {
         update_model(
             &self.models.participants,
             if voice.active() {
+                let mut unwatched_count = 0;
                 voice
                     .participants
                     .iter()
-                    .map(|person| PersonRow {
-                        id: person.id.clone().into(),
-                        local: person.local,
-                        name: display_part(&person.user).into(),
-                        initial: initial(display_part(&person.user)),
-                        tint: tint(display_part(if person.local {
-                            account
+                    .map(|person| {
+                        let watching_pos = voice.watching.iter().position(|w| w.user == person.id);
+                        let watched = watching_pos.is_some();
+                        let watched_index = watching_pos.map_or(-1, |i| i as i32);
+                        let unwatched_index = if watched {
+                            -1
                         } else {
-                            &person.user
-                        })),
-                        color: if role_colors {
-                            role_color(person.color)
-                        } else {
-                            Default::default()
-                        },
-                        has_color: role_colors && person.color.is_some(),
-                        speaking: person.speaking && !person.muted && person.connected,
-                        connected: person.connected,
-                        status: if let Some(problem) = &person.problem {
-                            problem.as_str()
-                        } else if !person.connected {
-                            "Connection lost"
-                        } else if person.deafened {
-                            "Deafened"
-                        } else if person.muted {
-                            "Muted"
-                        } else if person.speaking {
-                            "Speaking"
-                        } else {
-                            "Listening"
+                            let idx = unwatched_count;
+                            unwatched_count += 1;
+                            idx
+                        };
+                        let stream_status =
+                            if let Some(w) = watching_pos.and_then(|i| voice.watching.get(i)) {
+                                if w.frames.is_none() {
+                                    format!("Connecting to {}'s stream...", w.name).into()
+                                } else {
+                                    format!("Waiting for {}'s picture...", w.name).into()
+                                }
+                            } else {
+                                SharedString::default()
+                            };
+                        PersonRow {
+                            id: person.id.clone().into(),
+                            local: person.local,
+                            name: display_part(&person.user).into(),
+                            initial: initial(display_part(&person.user)),
+                            tint: tint(display_part(if person.local {
+                                account
+                            } else {
+                                &person.user
+                            })),
+                            color: if role_colors {
+                                role_color(person.color)
+                            } else {
+                                Default::default()
+                            },
+                            has_color: role_colors && person.color.is_some(),
+                            speaking: person.speaking && !person.muted && person.connected,
+                            connected: person.connected,
+                            status: if let Some(problem) = &person.problem {
+                                problem.as_str()
+                            } else if !person.connected {
+                                "Connection lost"
+                            } else if person.deafened {
+                                "Deafened"
+                            } else if person.muted {
+                                "Muted"
+                            } else if person.speaking {
+                                "Speaking"
+                            } else {
+                                "Listening"
+                            }
+                            .into(),
+                            muted: person.muted,
+                            deafened: person.deafened,
+                            live: person.streaming,
+                            video: person.video.is_some(),
+                            elsewhere: false,
+                            server_muted: person.server_muted,
+                            server_deafened: person.server_deafened,
+                            person: person.person.clone().into(),
+                            picture: cached_picture(
+                                &mut self.pictures,
+                                state,
+                                person.avatar.as_deref(),
+                            ),
+                            watched,
+                            watched_index,
+                            unwatched_index,
+                            stream_status,
                         }
-                        .into(),
-                        muted: person.muted,
-                        deafened: person.deafened,
-                        live: person.streaming,
-                        video: person.video.is_some(),
-                        elsewhere: false,
-                        server_muted: person.server_muted,
-                        server_deafened: person.server_deafened,
-                        person: person.person.clone().into(),
-                        picture: cached_picture(
-                            &mut self.pictures,
-                            state,
-                            person.avatar.as_deref(),
-                        ),
                     })
                     .collect()
             } else {
@@ -4353,7 +4420,7 @@ impl Adapter {
             &self.models.watch_viewers,
             voice
                 .watching
-                .as_ref()
+                .first()
                 .map(|watching| viewers(&watching.viewers, Some(&watching.user)))
                 .unwrap_or_default(),
         );
@@ -4369,6 +4436,7 @@ impl Adapter {
         // A picture per participant, kept while their camera stays on and
         // they stay in that place.
         let frames = &self.models.participant_frames;
+        let stream_frames = &self.models.stream_frames;
         let count = if voice.active() {
             voice.participants.len()
         } else {
@@ -4378,6 +4446,10 @@ impl Adapter {
             let moved = self.frame_ids.get(index) != Some(&person.id);
             if (person.video.is_none() || moved) && index < frames.row_count() {
                 frames.set_row_data(index, slint::Image::default());
+            }
+            let is_watched = voice.watching.iter().any(|w| w.user == person.id);
+            if (!is_watched || moved) && index < stream_frames.row_count() {
+                stream_frames.set_row_data(index, slint::Image::default());
             }
         }
         self.frame_ids = voice
@@ -4391,6 +4463,12 @@ impl Adapter {
         }
         while frames.row_count() < count {
             frames.push(slint::Image::default());
+        }
+        while stream_frames.row_count() > count {
+            stream_frames.remove(stream_frames.row_count() - 1);
+        }
+        while stream_frames.row_count() < count {
+            stream_frames.push(slint::Image::default());
         }
         self.show_stage(window);
         self.show_soundboard(window);

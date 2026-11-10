@@ -98,7 +98,7 @@ fn viewer_sound(before: &voice::State, after: &voice::State) -> Option<Sound> {
         let mine = state.sharing.as_ref().map(|_| None);
         let watched = state
             .watching
-            .as_ref()
+            .iter()
             .map(|watching| Some(watching.user.clone()));
         mine.into_iter().chain(watched).collect()
     };

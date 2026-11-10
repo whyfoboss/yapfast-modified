@@ -586,6 +586,24 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                 match event {
                     WindowEvent::CursorMoved { position, .. } => cursor = Some(*position),
                     WindowEvent::CursorLeft { .. } => cursor = None,
+                    WindowEvent::MouseWheel { .. } => {
+                        if let Some(position) = cursor
+                            && let Some(window) = weak.upgrade()
+                            && !window.get_browsing()
+                        {
+                            let scale = slint_window.scale_factor();
+                            let logical = position.to_logical::<f32>(f64::from(scale));
+                            let position = slint::LogicalPosition::new(logical.x, logical.y);
+                            let weak = weak.clone();
+                            slint::Timer::single_shot(Duration::from_millis(16), move || {
+                                if let Some(window) = weak.upgrade() {
+                                    window.window().dispatch_event(
+                                        slint::platform::WindowEvent::PointerMoved { position },
+                                    );
+                                }
+                            });
+                        }
+                    }
                     _ => {}
                 }
                 if let Some(window) = weak.upgrade()
@@ -1744,6 +1762,8 @@ struct Models {
     watch_viewers: Rc<VecModel<PersonRow>>,
     /// Each participant's newest camera picture, in the same order.
     participant_frames: Rc<VecModel<slint::Image>>,
+    /// Each participant's newest stream picture, in the same order.
+    stream_frames: Rc<VecModel<slint::Image>>,
     /// The streams in tiles of their own, as indexes of their participants.
     stream_tiles: Rc<VecModel<i32>>,
     /// Who is in the open DM's call, shown above its messages.
@@ -1815,6 +1835,7 @@ impl Models {
         window.set_share_viewers(ModelRc::from(self.share_viewers.clone()));
         window.set_watch_viewers(ModelRc::from(self.watch_viewers.clone()));
         window.set_participant_frames(ModelRc::from(self.participant_frames.clone()));
+        window.set_stream_frames(ModelRc::from(self.stream_frames.clone()));
         window.set_stream_tiles(ModelRc::from(self.stream_tiles.clone()));
         window.set_call_people(ModelRc::from(self.call_people.clone()));
         window.set_soundboard_rows(ModelRc::from(self.soundboard_rows.clone()));
@@ -2132,6 +2153,7 @@ struct Adapter {
     /// call last showed, so a stream starts large.
     call_focus: Option<tiles::Focus>,
     watched: Option<String>,
+    watched_streams: Vec<String>,
     /// Runs the microphone through Discord's processing while voice settings
     /// show the voice gate's sensitivity.
     #[cfg(feature = "discord")]
@@ -2423,6 +2445,7 @@ impl Adapter {
                 tiles: None,
                 call_focus: None,
                 watched: None,
+                watched_streams: Vec::new(),
                 #[cfg(feature = "discord")]
                 gate_meter: None,
                 talk_key: None,

@@ -308,7 +308,7 @@ impl StreamReceiver {
         let shared = Shared::new((0, 0));
         *lock(&shared.offers) = decodes;
         // Frames waiting to be decoded; more means decoding can't keep up.
-        let (frames, receiver) = channel::sync_channel(4);
+        let (frames, receiver) = channel::sync_channel(16);
         // Opus frames waiting to be played: 320 ms.
         let (sounds, heard) = channel::sync_channel(16);
         let (stop, stopped) = oneshot::channel();
@@ -719,6 +719,14 @@ impl Streamer {
                 };
                 self.video = ssrc(&data["video_ssrc"]).or(self.video);
                 self.rtx = ssrc(&data["rtx_ssrc"]).or(self.rtx);
+                if let Some(streams) = data["streams"].as_array() {
+                    for stream in streams {
+                        if stream["type"] == "video" || stream["type"] == "screen" {
+                            self.video = ssrc(&stream["ssrc"]).or(self.video);
+                            self.rtx = ssrc(&stream["rtx_ssrc"]).or(self.rtx);
+                        }
+                    }
+                }
             }
             // Session update: the codec may change.
             14 => {
@@ -853,18 +861,27 @@ async fn receive_stream(
             _ = repairs.tick() => {}
             _ = reports.tick() => {
                 let Some(media) = streamer.video else { continue };
-                let Some(video) = incoming.get_mut(&media) else { continue };
-                let Some((highest, lost)) = video.reorder.counts() else { continue };
-                let (expected, missed) = (
-                    highest.wrapping_sub(video.reported.0),
-                    lost.saturating_sub(video.reported.1),
-                );
-                let fraction = (u64::from(missed) * 256 / u64::from(expected.max(1))).min(255) as u8;
-                video.reported = (highest, lost);
+                let (highest, lost_count, fraction) = if let Some(video) = incoming.get_mut(&media) {
+                    if let Some((highest, lost)) = video.reorder.counts() {
+                        let (expected, missed) = (
+                            highest.wrapping_sub(video.reported.0),
+                            lost.saturating_sub(video.reported.1),
+                        );
+                        let fraction = (u64::from(missed) * 256 / u64::from(expected.max(1))).min(255) as u8;
+                        video.reported = (highest, lost);
+                        (highest, lost, fraction)
+                    } else {
+                        (0, 0, 0)
+                    }
+                } else {
+                    (0, 0, 0)
+                };
                 let (middle, delay) = last_report.map_or((0, 0), |(middle, heard)| {
                     (middle, (heard.elapsed().as_secs_f64() * 65536.0) as u32)
                 });
-                let mut report = rtp::receiver_report(connection.ssrc, media, (highest, lost, fraction), (middle, delay));
+                let mut report = rtp::receiver_report(connection.ssrc, media, (highest, lost_count, fraction), (middle, delay));
+                let remb = rtp::remb_packet(connection.ssrc, &[media], 15_000_000);
+                report.extend_from_slice(&remb);
                 connection.transport.seal(&mut report, rtp::RTCP_CLEAR)?;
                 connection.udp.send(&report).await?;
             }
@@ -984,11 +1001,12 @@ async fn receive_stream(
                     keyframe: frame.keyframe,
                 };
                 if let Err(channel::TrySendError::Full(_)) = frames.try_send(frame) {
-                    // The decoder is behind; the frames after this one
-                    // need it, so wait for a keyframe.
+                    // The decoder is behind; wait for a keyframe if repeatedly overflowing.
                     received.behind += 1;
-                    video.assembler.wait_for_keyframe();
-                    lost = true;
+                    if received.behind.is_multiple_of(8) {
+                        video.assembler.wait_for_keyframe();
+                        lost = true;
+                    }
                 }
             }
             let missing = video.reorder.to_ask(now);

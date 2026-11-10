@@ -19,6 +19,14 @@ export struct PersonRow {
     /// Who they are across calls, by Discord or Matrix user id, which their
     /// volumes are remembered by.
     person: string,
+    /// This participant's stream is actively watched.
+    watched: bool,
+    /// Index in active watched streams list, 0-based (-1 if not watched).
+    watched-index: int,
+    /// Index in unwatched participants list for the strip in Grid Mode (-1 if watched).
+    unwatched-index: int,
+    /// Status message for this participant's stream.
+    stream-status: string,
 }
 
 // Marks someone sharing their screen, as Discord's red LIVE tag does.
@@ -45,6 +53,7 @@ export component ViewerStack inherits Rectangle {
     in property <[PersonRow]> viewers;
     /// "Watching: " and their names, for the tooltip.
     in property <string> names;
+    out property <bool> hovered: stack-touch.has-hover;
     property <int> faces: min(3, root.viewers.length);
     property <length> pictures: root.faces > 0 ? 22px + (root.faces - 1) * 15px : 0px;
     visible: root.viewers.length > 0;
@@ -66,7 +75,7 @@ export component ViewerStack inherits Rectangle {
         x: 28px + count.preferred-width + 6px + root.pictures + 4px;
         text: "+" + (root.viewers.length - 3); color: #ffffff; font-size: 13px; font-weight: 700;
     }
-    TouchArea {
+    stack-touch := TouchArea {
         changed has-hover => {
             if self.has-hover {
                 Tip.text = root.names; Tip.side = 2;
@@ -663,17 +672,23 @@ component StageTile inherits Rectangle {
     in property <string> viewer-names;
     /// Stops the stream it shows; none when empty.
     in property <string> stop-label;
+    /// Whether this tile is broadcasting and unwatched (can show stream action buttons on hover)
+    in property <bool> can-watch: false;
+    in property <bool> is-strip: false;
+    in property <bool> top-right-avoid: false;
     callback clicked;
     callback right-clicked(length, length);
     callback stop;
     callback full-screen(bool);
-    out property <bool> has-hover: touch.has-hover;
-    border-radius: root.full ? 0px : 12px; clip: true;
+    callback watch-stream;
+    callback add-stream;
+    out property <bool> has-hover: root.tile-hovered;
+    border-radius: root.full ? 0px : (root.is-strip ? 8px : 12px); clip: true;
     accessible-role: button; accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
-    animate x, y, width, height { duration: root.full ? 0ms : 160ms; easing: ease-out; }
-    property <bool> stop-shown: root.stop-label != "" && (touch.has-hover || root.focused);
-    @children
+    property <bool> tile-hovered: touch.has-hover || (root.stop-label != "" && stop-btn.hovered) || (root.focused && fs-btn.hovered) || (root.viewers.length > 0 && stack.hovered) || (root.can-watch && (eye-touch.has-hover || watch-touch.has-hover));
+
+    // Main touch area at the back for clicking the tile itself
     touch := TouchArea {
         mouse-cursor: root.focused ? MouseCursor.default : MouseCursor.pointer;
         clicked => { root.clicked(); }
@@ -683,23 +698,104 @@ component StageTile inherits Rectangle {
                 root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
-        // Inside the touch area, so the pointer on a button still hovers the tile.
-        ViewerStack {
-            x: parent.width - self.width - (root.stop-shown ? 50px : 10px); y: 11px;
+    }
+
+    @children
+
+    // Overlay stream controls, hidden by default and smoothly fading in on hover.
+    controls-overlay := Rectangle {
+        width: parent.width; height: parent.height;
+        opacity: root.tile-hovered ? 1.0 : 0.0;
+        visible: self.opacity > 0.01;
+        animate opacity {
+            duration: Looks.better-animations ? (root.tile-hovered ? 120ms : 150ms) : 0ms;
+            easing: ease-out;
+        }
+
+        // Dark hover scrim for unwatched stream tiles
+        scrim := Rectangle {
+            visible: root.can-watch;
+            width: parent.width; height: parent.height;
+            background: #000000a6;
+        }
+
+        stack := ViewerStack {
+            x: parent.width - self.width - ((root.focused || root.top-right-avoid) ? (root.stop-label != "" ? 122px : 88px) : (root.stop-label != "" ? 44px : 8px)); y: 8px;
             viewers: root.viewers; names: root.viewer-names;
         }
-        if root.stop-shown: IconButton {
-            x: parent.width - self.width - 10px; y: 10px; height: self.size;
+        stop-btn := IconButton {
+            visible: root.stop-label != ""; enabled: root.stop-label != "";
+            x: parent.width - self.width - ((root.focused || root.top-right-avoid) ? 88px : 8px); y: 8px; height: self.size;
             icon: @image-url("icons/x.svg"); label: root.stop-label; tint: #ffffff;
-            fill: #000000a6; radius: 16px;
+            fill: #000000a6; radius: 14px; size: 28px; glyph: 14px;
             clicked => { root.stop(); }
         }
-        if root.focused && self.has-hover: IconButton {
+        fs-btn := IconButton {
+            visible: root.focused; enabled: root.focused;
             x: parent.width - self.width - 10px; y: parent.height - self.size - 10px; height: self.size;
             icon: root.full ? @image-url("icons/minimize.svg") : @image-url("icons/maximize.svg");
             label: root.full ? "Exit full screen" : "Full screen"; tint: #ffffff;
             fill: #000000a6; radius: 16px;
             clicked => { root.full-screen(!root.full); }
+        }
+
+        // Discord-style Stream Action Button Group: [ Eye + ] [ Watch stream ]
+        action-group := HorizontalLayout {
+            visible: root.can-watch;
+            alignment: center;
+            y: (parent.height - self.height) / 2 - 3px;
+            height: 28px;
+            spacing: 6px;
+
+            // [ Eye + ] button (Add stream / Multi-stream viewing)
+            eye-btn := Rectangle {
+                width: 28px; height: 28px; border-radius: 6px;
+                background: eye-touch.has-hover ? #35373c : #2b2d31;
+                border-width: 1px; border-color: eye-touch.has-hover ? #4e5058 : #3f4147;
+                animate background { duration: Looks.better-animations ? 100ms : 0ms; }
+                Image {
+                    x: 6px; y: 6px; width: 16px; height: 16px;
+                    source: @image-url("icons/eye-plus.svg");
+                    colorize: eye-touch.has-hover ? #ffffff : #dbdee1;
+                }
+                eye-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        Tip.text = "";
+                        root.add-stream();
+                    }
+                    changed has-hover => {
+                        if self.has-hover {
+                            Tip.text = "Watch multiple streams";
+                            Tip.side = 0;
+                            Tip.x = eye-btn.absolute-position.x + eye-btn.width / 2;
+                            Tip.y = eye-btn.absolute-position.y;
+                        } else if Tip.text == "Watch multiple streams" {
+                            Tip.text = "";
+                        }
+                    }
+                }
+            }
+
+            // [ Watch Stream ] button (Replace currently focused stream)
+            watch-btn := Rectangle {
+                height: 28px; border-radius: 6px;
+                background: watch-touch.has-hover ? Theme.danger-hover : Theme.danger;
+                animate background { duration: Looks.better-animations ? 100ms : 0ms; }
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px;
+                    watch-label := Text {
+                        text: "Watch stream"; color: #ffffff; font-size: 12px; font-weight: 700; vertical-alignment: center;
+                    }
+                }
+                watch-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        Tip.text = "";
+                        root.watch-stream();
+                    }
+                }
+            }
         }
     }
 }
@@ -716,9 +812,13 @@ component TileChip inherits Rectangle {
     in property <length> tile-height;
     in property <bool> hover-only: false;
     in property <bool> hovered: false;
-    x: 10px; y: root.tile-height - self.height - 10px;
-    width: min(root.tile-width - 20px, chip.preferred-width); height: 26px;
-    border-radius: 6px; background: #000000a6;
+    property <bool> is-compact: root.tile-height <= 110px;
+    x: root.is-compact ? 6px : 10px;
+    y: root.tile-height - self.height - (root.is-compact ? 6px : 10px);
+    width: min(root.tile-width - (root.is-compact ? 12px : 20px), chip.preferred-width);
+    height: root.is-compact ? 22px : 26px;
+    border-radius: root.is-compact ? 4px : 6px;
+    background: #000000a6;
     opacity: !root.hover-only ? 1.0 : (root.hovered ? 1.0 : 0.0);
     visible: !root.hover-only || root.hovered || self.opacity > 0.01;
     animate opacity {
@@ -726,11 +826,21 @@ component TileChip inherits Rectangle {
         easing: ease-out;
     }
     chip := HorizontalLayout {
-        padding-left: 8px; padding-right: 8px; spacing: 6px;
+        padding-left: root.is-compact ? 6px : 8px;
+        padding-right: root.is-compact ? 6px : 8px;
+        spacing: root.is-compact ? 4px : 6px;
         @children
-        Text { text: root.name; color: root.name-color; font-size: 14px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+        Text {
+            text: root.name; color: root.name-color;
+            font-size: root.is-compact ? 11px : 13px;
+            font-weight: 700; vertical-alignment: center; overflow: elide;
+        }
         if root.live: Middle { LivePill { } }
-        if root.note != "": Text { text: root.note; color: Theme.accent; font-size: 13px; vertical-alignment: center; overflow: elide; }
+        if root.note != "": Text {
+            text: root.note; color: Theme.accent;
+            font-size: root.is-compact ? 11px : 13px;
+            vertical-alignment: center; overflow: elide;
+        }
     }
 }
 
@@ -753,6 +863,8 @@ export component ParticipantGrid inherits Flickable {
     in property <[PersonRow]> participants;
     /// Each participant's newest camera picture, in the same order.
     in property <[image]> frames;
+    /// Decoded video frames for each participant's stream, in the same order.
+    in property <[image]> stream-frames;
     /// This account's camera is on its way, until its first picture.
     in property <bool> camera-starting;
     in property <bool> sharing;
@@ -764,6 +876,12 @@ export component ParticipantGrid inherits Flickable {
     /// The streams of those who film too, in tiles of their own, as indexes
     /// of `participants`. Others' streams show in their own tiles.
     in property <[int]> stream-tiles;
+    /// Whether any stream is currently being actively watched.
+    in property <bool> has-active-streams: false;
+    /// Total count of active streams currently watched or shared.
+    in property <int> watched-stream-count: 0;
+    /// Active slot of the focused stream in focus mode.
+    in property <int> focused-active: 0;
     /// The stream being watched: whose, its newest picture, what shows until
     /// it, and who watches.
     in property <string> watch-user;
@@ -774,13 +892,23 @@ export component ParticipantGrid inherits Flickable {
     /// The tile shown large, by its place: this account's shared screen
     /// first, then the streams' tiles, then the participants'; -1 for none.
     in property <int> focused: -1;
+    /// The slot of the single watched stream when only one is watched.
+    in property <int> single-watched-slot: -1;
+    /// The voice channel room id.
+    in property <string> voice-channel;
     /// Over the whole window: the large tile alone, edge to edge.
     in property <bool> full;
+    /// Presentation mode: Grid Mode (multiple streams in grid) vs Focus Mode (one large stream).
+    in-out property <bool> grid-mode: false;
     /// Show the tile at this place large, or none for -1.
     callback focus-tile(int);
     callback full-screen(bool);
     callback watch-stream(string);
-    callback stop-watching;
+    callback add-stream(string);
+    callback show-voice-person(string, string);
+    callback stop-watching(string);
+    callback stop-watching-all;
+    callback set-layout-mode(bool);
     /// A right click on someone, with where it was in the window.
     callback open-volume(PersonRow, length, length);
     /// Where the tiles are, so cameras are decoded only for tiles in sight,
@@ -802,82 +930,224 @@ export component ParticipantGrid inherits Flickable {
     changed focusing => { self.report(); }
     changed focus-width => { self.report(); }
     vertical-stretch: 1;
-    property <length> gap: root.full ? 0px : 12px;
-    property <length> inset: root.full ? 0px : 24px;
-    property <length> span: self.width - 2 * self.inset;
-    // Your shared screen leads the grid, then the streams with tiles of their own.
+    property <length> gap: root.full ? 0px : 10px;
+    property <length> inset: root.full ? 0px : 8px;
+    property <length> top-inset: root.full ? 0px : self.inset;
+    property <length> bottom-inset: root.full ? 0px : 8px;
+    property <length> avail-w: max(100px, self.width - 2 * self.inset);
+    property <length> avail-h: max(100px, self.height - self.top-inset - self.bottom-inset);
+
     property <int> extra: (root.sharing ? 1 : 0) + root.stream-tiles.length;
     property <int> count: root.participants.length + self.extra;
     property <bool> focusing: root.focused >= 0 && root.focused < self.count;
-    // A few people take the columns, and the size, that make their tiles
-    // largest within both the width and the height, so a short call above a
-    // DM's messages shows everyone without scrolling. Side by side wins
-    // unless stacking makes tiles a tenth larger. More people take tiles at
-    // least 240px wide, and scroll.
-    pure function fitted(columns: int) -> length {
-        let rows = ceil(root.count / columns);
-        min(420px, (root.span - (columns - 1) * root.gap) / columns,
-            (root.height - 2 * root.inset - (rows - 1) * root.gap) / rows / 0.5625)
+    property <int> active-count: root.has-active-streams ? (root.watched-stream-count > 0 ? root.watched-stream-count : 1) : self.count;
+    property <int> grid-lead: 0;
+
+    property <int> large-slot: root.focusing ? root.focused : root.single-watched-slot;
+    property <bool> is-multi-grid: root.has-active-streams && root.grid-mode && root.watched-stream-count >= 2;
+    property <bool> is-focus-mode: root.has-active-streams && !self.is-multi-grid;
+    property <int> total-call-items: (root.sharing ? 1 : 0) + root.stream-tiles.length + root.participants.length;
+    property <int> grid-strip-count: max(0, self.total-call-items - self.active-count);
+    property <int> strip-count: (root.is-focus-mode || (!root.has-active-streams && root.focusing))
+        ? max(0, self.total-call-items - 1)
+        : (root.is-multi-grid ? self.grid-strip-count : 0);
+
+    // Focus & Grid Mode strip geometry: normal size preserved everywhere
+    property <length> strip-gap: 8px;
+    property <length> strip-max-h-by-w: self.strip-count > 0 ? (self.avail-w - max(0, self.strip-count - 1) * self.strip-gap) / self.strip-count / 1.7 : 0px;
+    property <length> strip-thumb-h: self.strip-count > 0 ? min(104px, max(68px, min(self.avail-h * 0.22, self.strip-max-h-by-w))) : 0px;
+    property <length> strip-thumb-w: min(180px, self.strip-thumb-h * 1.7);
+    property <length> strip-total-w: self.strip-count > 0 ? (self.strip-count * self.strip-thumb-w + max(0, self.strip-count - 1) * self.strip-gap) : 0px;
+    property <length> strip-start-x: max(self.inset, (self.width - self.strip-total-w) / 2);
+    property <length> strip-y: self.height - self.bottom-inset - self.strip-thumb-h;
+
+    // Usable height for video (Focus Mode and Grid Mode):
+    property <length> stage-avail-h: self.strip-count > 0 ? (self.avail-h - self.strip-thumb-h - self.strip-gap) : self.avail-h;
+    property <length> focus-avail-h: self.stage-avail-h;
+    property <length> focus-avail-w: self.avail-w;
+    property <length> focus-w: root.full ? self.width : min(self.focus-avail-w, self.focus-avail-h / 0.5625);
+    property <length> focus-h: root.full ? self.height : self.focus-w * 0.5625;
+    property <length> focus-x: root.full ? 0px : (self.width - self.focus-w) / 2;
+    property <length> focus-y: root.full ? 0px : (self.top-inset + (self.focus-avail-h - self.focus-h) / 2);
+
+    // Normal voice call fitting (no active streams)
+    pure function normal-fitted(cols: int) -> length {
+        let r = ceil(root.count / cols);
+        min(420px, (root.span - (cols - 1) * root.gap) / cols,
+            (root.height - 2 * root.inset - (r - 1) * root.gap) / r / 0.5625)
     }
-    property <int> fewest: max(1, min(self.count, floor((self.span + self.gap) / (240px + self.gap))));
-    property <int> best-fit: self.count >= 2 && self.fitted(2) * 1.1 > self.fitted(1)
-        ? (self.count >= 3 && self.fitted(3) * 1.1 > self.fitted(2)
-            ? (self.count >= 4 && self.fitted(4) * 1.1 > self.fitted(3) ? 4 : 3) : 2)
+    property <length> span: self.width - 2 * self.inset;
+    property <int> normal-fewest: max(1, min(self.count, floor((self.span + self.gap) / (240px + self.gap))));
+    property <int> normal-best-fit: self.count >= 2 && self.normal-fitted(2) * 1.1 > self.normal-fitted(1)
+        ? (self.count >= 3 && self.normal-fitted(3) * 1.1 > self.normal-fitted(2)
+            ? (self.count >= 4 && self.normal-fitted(4) * 1.1 > self.normal-fitted(3) ? 4 : 3) : 2)
         : 1;
-    // With a tile large, the others are small, 120 to 192px wide, in rows
-    // beneath it; full screen shows it alone.
-    property <int> others: self.count - 1;
-    property <length> strip-width: self.others <= 0 ? 0px
-        : max(120px, min(192px, (self.span - (self.others - 1) * self.gap) / self.others));
-    property <int> strip-columns: max(1, min(self.others, floor((self.span + self.gap) / (self.strip-width + self.gap))));
-    property <int> strip-rows: root.full || self.others <= 0 ? 0 : ceil(self.others / self.strip-columns);
-    property <length> strip-height: self.strip-rows * self.strip-width * 0.5625 + max(0, self.strip-rows - 1) * self.gap;
-    property <length> under-focus: self.strip-rows > 0 ? self.gap + self.strip-height : 0px;
-    property <length> focus-width: root.full ? self.width
-        : min(self.span, max(160px, self.height - 2 * self.inset - self.under-focus) / 0.5625);
-    property <length> focus-height: root.full ? self.height : self.focus-width * 0.5625;
-    property <length> focus-top: root.full ? 0px : max(self.inset, (self.height - self.focus-height - self.under-focus) / 2);
-    property <int> columns: self.focusing ? (root.full ? 0 : self.strip-columns)
-        : self.count <= 4 ? self.best-fit : self.fewest;
-    property <length> tile-width: self.focusing ? self.strip-width
-        : self.count <= 4 ? max(160px, self.fitted(self.columns))
-        : min(420px, (self.span - (self.columns - 1) * self.gap) / self.columns);
-    property <length> tile-height: self.tile-width * 0.5625;
-    // The tiles in rows: all of them, or all but the large one.
-    property <int> placed: self.focusing ? self.others : self.count;
-    property <int> rows: ceil(self.placed / max(1, self.columns));
-    property <length> grid-height: self.rows * self.tile-height + max(0, self.rows - 1) * self.gap;
-    property <length> grid-width: self.columns * self.tile-width + max(0, self.columns - 1) * self.gap;
-    property <length> first-row: self.focusing ? self.focus-top + self.focus-height + self.gap
-        : max(self.inset, (self.height - self.grid-height) / 2);
-    content-height: self.focusing ? max(self.height, self.focus-top + self.focus-height + self.under-focus + self.inset)
-        : max(self.height, self.grid-height + 2 * self.inset);
-    pure function large(slot: int) -> bool { root.focusing && slot == root.focused }
-    // The place in the rows of the tile at `slot`, which skip the large one.
-    pure function place(slot: int) -> int { root.focusing && slot > root.focused ? slot - 1 : slot }
-    pure function tile-x(slot: int) -> length {
-        root.large(slot) ? (root.width - root.focus-width) / 2
-            : (root.width - root.grid-width) / 2 + mod(root.place(slot), max(1, root.columns)) * (root.tile-width + root.gap)
+    property <int> normal-columns: self.count <= 4 ? self.normal-best-fit : self.normal-fewest;
+    property <length> normal-tile-width: self.count <= 4 ? max(160px, self.normal-fitted(self.normal-columns))
+        : min(420px, (self.span - (self.normal-columns - 1) * self.gap) / self.normal-columns);
+    property <length> normal-tile-height: self.normal-tile-width * 0.5625;
+    property <int> normal-rows: ceil(self.count / max(1, self.normal-columns));
+    property <length> normal-grid-width: self.normal-columns * self.normal-tile-width + max(0, self.normal-columns - 1) * self.gap;
+    property <length> normal-grid-height: self.normal-rows * self.normal-tile-height + max(0, self.normal-rows - 1) * self.gap;
+    property <length> normal-first-row: max(self.inset, (self.height - self.normal-grid-height) / 2);
+
+    // Grid Mode 2-stream:
+    property <length> g2-w: min((self.avail-w - self.gap) / 2, self.stage-avail-h / 0.5625);
+    property <length> g2-h: self.g2-w * 0.5625;
+    property <length> g2-tot-w: 2 * self.g2-w + self.gap;
+    property <length> g2-start-x: (self.width - self.g2-tot-w) / 2;
+    property <length> g2-y: self.top-inset + (self.stage-avail-h - self.g2-h) / 2;
+
+    // Grid Mode 3-stream (1 large left, 2 stacked right):
+    property <length> g3-max-w-for-h: (self.avail-w - self.gap * 1.11) / 1.5;
+    property <length> g3-large-h: min(self.stage-avail-h, max(60px, self.g3-max-w-for-h * 0.5625));
+    property <length> g3-large-w: self.g3-large-h / 0.5625;
+    property <length> g3-small-h: (self.g3-large-h - self.gap) / 2;
+    property <length> g3-small-w: self.g3-small-h / 0.5625;
+    property <length> g3-tot-w: self.g3-large-w + self.gap + self.g3-small-w;
+    property <length> g3-start-x: (self.width - self.g3-tot-w) / 2;
+    property <length> g3-start-y: self.top-inset + (self.stage-avail-h - self.g3-large-h) / 2;
+
+    // Grid Mode 4-stream (2x2 grid):
+    property <length> g4-w: min((self.avail-w - self.gap) / 2, (self.stage-avail-h - self.gap) / 2 / 0.5625);
+    property <length> g4-h: self.g4-w * 0.5625;
+    property <length> g4-tot-w: 2 * self.g4-w + self.gap;
+    property <length> g4-tot-h: 2 * self.g4-h + self.gap;
+    property <length> g4-start-x: (self.width - self.g4-tot-w) / 2;
+    property <length> g4-start-y: self.top-inset + (self.stage-avail-h - self.g4-tot-h) / 2;
+
+    // Grid Mode fallback (> 4 streams):
+    property <int> gn-cols: ceil(sqrt(self.active-count));
+    property <int> gn-rows: ceil(self.active-count / max(1, self.gn-cols));
+    property <length> gn-w: min((self.avail-w - max(0, self.gn-cols - 1) * self.gap) / max(1, self.gn-cols),
+                                (self.stage-avail-h - max(0, self.gn-rows - 1) * self.gap) / max(1, self.gn-rows) / 0.5625);
+    property <length> gn-h: self.gn-w * 0.5625;
+    property <length> gn-tot-w: self.gn-cols * self.gn-w + max(0, self.gn-cols - 1) * self.gap;
+    property <length> gn-tot-h: self.gn-rows * self.gn-h + max(0, self.gn-rows - 1) * self.gap;
+    property <length> gn-start-x: (self.width - self.gn-tot-w) / 2;
+    property <length> gn-start-y: self.top-inset + (self.stage-avail-h - self.gn-tot-h) / 2;
+
+    property <length> tile-width: root.has-active-streams ? self.g4-w : self.normal-tile-width;
+    property <length> tile-height: root.has-active-streams ? self.g4-h : self.normal-tile-height;
+    property <int> columns: root.has-active-streams ? (self.active-count <= 2 ? self.active-count : 2) : self.normal-columns;
+    property <length> first-row: root.has-active-streams ? self.top-inset : self.normal-first-row;
+    property <length> focus-width: self.focus-w;
+    property <length> focus-height: self.focus-h;
+    content-height: self.height;
+
+    // Three-stream lead selection: follow the currently focused stream active slot!
+    property <int> effective-lead: min(max(0, root.focused-active), 2);
+    property <int> g3-sub0: self.effective-lead == 0 ? 1 : 0;
+    property <int> g3-sub1: self.effective-lead == 2 ? 1 : 2;
+
+    pure function tile-x-pos(slot: int, is-large: bool, in-strip: bool, strip-idx: int, a-slot: int) -> length {
+        is-large ? root.focus-x : (
+            in-strip ? (root.strip-start-x + strip-idx * (root.strip-thumb-w + root.strip-gap)) : (
+                root.is-multi-grid ? (
+                    root.active-count == 2 ? (root.g2-start-x + a-slot * (root.g2-w + root.gap)) : (
+                        root.active-count == 3 ? (
+                            a-slot == root.effective-lead ? root.g3-start-x : (root.g3-start-x + root.g3-large-w + root.gap)
+                        ) : (
+                            root.active-count == 4 ? (
+                                root.g4-start-x + mod(a-slot, 2) * (root.g4-w + root.gap)
+                            ) : (
+                                root.gn-start-x + mod(a-slot, max(1, root.gn-cols)) * (root.gn-w + root.gap)
+                            )
+                        )
+                    )
+                ) : (
+                    (root.width - root.normal-grid-width) / 2 + mod(slot, max(1, root.normal-columns)) * (root.normal-tile-width + root.gap)
+                )
+            )
+        )
     }
-    pure function tile-y(slot: int) -> length {
-        root.large(slot) ? root.focus-top
-            : root.first-row + floor(root.place(slot) / max(1, root.columns)) * (root.tile-height + root.gap)
+
+    pure function tile-y-pos(slot: int, is-large: bool, in-strip: bool, a-slot: int) -> length {
+        is-large ? root.focus-y : (
+            in-strip ? root.strip-y : (
+                root.is-multi-grid ? (
+                    root.active-count == 2 ? root.g2-y : (
+                        root.active-count == 3 ? (
+                            a-slot == root.effective-lead ? root.g3-start-y : (
+                                a-slot == root.g3-sub0 ? root.g3-start-y : (root.g3-start-y + root.g3-small-h + root.gap)
+                            )
+                        ) : (
+                            root.active-count == 4 ? (
+                                root.g4-start-y + floor(a-slot / 2) * (root.g4-h + root.gap)
+                            ) : (
+                                root.gn-start-y + floor(a-slot / max(1, root.gn-cols)) * (root.gn-h + root.gap)
+                            )
+                        )
+                    )
+                ) : (
+                    root.normal-first-row + floor(slot / max(1, root.normal-columns)) * (root.normal-tile-height + root.gap)
+                )
+            )
+        )
     }
+
+    pure function tile-w-size(is-large: bool, in-strip: bool, a-slot: int) -> length {
+        is-large ? root.focus-w : (
+            in-strip ? root.strip-thumb-w : (
+                root.is-multi-grid ? (
+                    root.active-count == 2 ? root.g2-w : (
+                        root.active-count == 3 ? (
+                            a-slot == root.effective-lead ? root.g3-large-w : root.g3-small-w
+                        ) : (
+                            root.active-count == 4 ? root.g4-w : root.gn-w
+                        )
+                    )
+                ) : root.normal-tile-width
+            )
+        )
+    }
+
+    pure function tile-h-size(is-large: bool, in-strip: bool, a-slot: int) -> length {
+        is-large ? root.focus-h : (
+            in-strip ? root.strip-thumb-h : (
+                root.is-multi-grid ? (
+                    root.active-count == 2 ? root.g2-h : (
+                        root.active-count == 3 ? (
+                            a-slot == root.effective-lead ? root.g3-large-h : root.g3-small-h
+                        ) : (
+                            root.active-count == 4 ? root.g4-h : root.gn-h
+                        )
+                    )
+                ) : root.normal-tile-height
+            )
+        )
+    }
+
     // A click beside the large tile shows the grid again.
     TouchArea {
         width: root.width; height: root.content-height;
         clicked => { if root.focusing && !root.full { root.focus-tile(-1); } }
     }
     if root.sharing: StageTile {
-        x: root.tile-x(0); y: root.tile-y(0);
-        width: root.large(0) ? root.focus-width : root.tile-width;
-        height: root.large(0) ? root.focus-height : root.tile-height;
-        visible: !root.full || root.large(0);
-        focused: root.large(0); full: root.full;
+        property <int> slot: 0;
+        property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
+        property <bool> in-strip: root.is-focus-mode && !self.is-large;
+        property <int> strip-index: 0;
+        property <int> active-slot: 0;
+        property <bool> is-active: true;
+        x: root.tile-x-pos(self.slot, self.is-large, self.in-strip, self.strip-index, self.active-slot);
+        y: root.tile-y-pos(self.slot, self.is-large, self.in-strip, self.active-slot);
+        width: root.tile-w-size(self.is-large, self.in-strip, self.active-slot);
+        height: root.tile-h-size(self.is-large, self.in-strip, self.active-slot);
+        visible: !root.full || self.is-large;
+        focused: root.is-focus-mode ? self.is-large : (root.focused-active == 0);
+        full: root.full;
+        top-right-avoid: root.is-focus-mode && self.is-large;
         background: #000000;
         label: "Your screen, " + root.share-status;
         viewers: root.share-viewers; viewer-names: root.share-viewer-names;
-        clicked => { if !self.focused { root.focus-tile(0); } }
+        clicked => {
+            if root.is-focus-mode {
+                if !self.is-large { root.focus-tile(0); }
+            } else if root.active-count == 3 {
+                root.grid-lead = self.active-slot;
+            }
+        }
         full-screen(on) => { root.full-screen(on); }
         Image { width: parent.width; height: parent.height; source: root.share-frame; image-fit: contain; }
         if root.share-frame.width == 0: VerticalLayout {
@@ -896,42 +1166,63 @@ export component ParticipantGrid inherits Flickable {
     for index[position] in root.stream-tiles: stream := StageTile {
         property <int> slot: position + (root.sharing ? 1 : 0);
         property <PersonRow> person: root.participants[index];
-        property <bool> watched: self.person.id == root.watch-user;
-        x: root.tile-x(self.slot); y: root.tile-y(self.slot);
-        width: root.large(self.slot) ? root.focus-width : root.tile-width;
-        height: root.large(self.slot) ? root.focus-height : root.tile-height;
-        visible: !root.full || root.large(self.slot);
-        focused: root.large(self.slot); full: root.full;
+        property <bool> watched: self.person.watched || (self.person.id == root.watch-user && root.has-active-streams);
+        property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
+        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
+        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : self.person.unwatched-index;
+        property <int> active-slot: (root.sharing ? 1 : 0) + self.person.watched-index;
+        property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
+        property <bool> is-active: true;
+        x: self.is-active ? root.tile-x-pos(self.slot, self.is-large, self.in-strip, self.strip-index, self.active-slot) : -1000px;
+        y: self.is-active ? root.tile-y-pos(self.slot, self.is-large, self.in-strip, self.active-slot) : -1000px;
+        width: self.is-active ? root.tile-w-size(self.is-large, self.in-strip, self.active-slot) : 0px;
+        height: self.is-active ? root.tile-h-size(self.is-large, self.in-strip, self.active-slot) : 0px;
+        visible: self.is-active && (!root.full || self.is-large);
+        focused: root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active);
+        full: root.full;
+        top-right-avoid: self.is-top-right;
+        is-strip: self.in-strip;
         background: #000000;
         label: self.watched ? self.person.name + "'s screen" : "Watch " + self.person.name + "'s stream";
         viewers: self.watched ? root.watch-viewers : [];
         viewer-names: self.watched ? root.watch-viewer-names : "";
         stop-label: self.watched ? "Stop watching" : "";
+        can-watch: !self.watched;
+        watch-stream => { root.watch-stream(self.person.id); }
+        add-stream => { root.add-stream(self.person.id); }
         clicked => {
             if !self.watched {
                 root.watch-stream(self.person.id);
-            } else if !self.focused {
+            } else if root.is-focus-mode {
+                if !self.is-large { root.focus-tile(self.slot); }
+            } else if root.is-multi-grid {
                 root.focus-tile(self.slot);
             }
         }
         right-clicked(x, y) => { root.open-volume(self.person, x, y); }
-        stop => { root.stop-watching(); }
+        stop => { root.stop-watching(self.person.id); }
         full-screen(on) => { root.full-screen(on); }
-        if stream.watched: StreamPicture { frame: root.watch-frame; status: root.watch-status; }
+        if stream.watched: StreamPicture {
+            frame: root.stream-frames.length > index && root.stream-frames[index].width > 0
+                ? root.stream-frames[index]
+                : ((stream.is-large || stream.focused) && stream.person.id == root.watch-user ? root.watch-frame : @image-url(""));
+            status: stream.person.stream-status != "" ? stream.person.stream-status : root.watch-status;
+        }
         if !stream.watched: VerticalLayout {
             alignment: center; spacing: 10px;
             Image { height: 30px; source: @image-url("icons/screen-share.svg"); image-fit: contain; colorize: #b5b8c1; }
-            HorizontalLayout {
-                alignment: center;
-                Rectangle {
-                    height: 26px; width: stream-label.preferred-width + 20px; border-radius: 13px;
-                    background: Theme.danger;
-                    stream-label := Text { text: "Watch stream"; color: Theme.on-danger; font-size: 13px; font-weight: 700; }
-                }
+        }
+        if !stream.watched: Rectangle {
+            x: 8px; y: 8px;
+            width: stream-live-badge.preferred-width + 8px; height: 16px; border-radius: 3px;
+            background: Theme.danger;
+            stream-live-badge := Text {
+                text: "LIVE"; color: #ffffff; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;
+                vertical-alignment: center; horizontal-alignment: center;
             }
         }
         TileChip {
-            tile-width: parent.width; tile-height: parent.height; name: stream.person.name; live: true;
+            tile-width: parent.width; tile-height: parent.height; name: stream.person.name; live: stream.is-large;
             name-color: stream.person.has-color ? stream.person.color : #ffffff;
             hover-only: stream.watched;
             hovered: stream.has-hover;
@@ -940,42 +1231,76 @@ export component ParticipantGrid inherits Flickable {
     }
     for person[position] in root.participants: tile := StageTile {
         property <int> slot: position + root.extra;
-        x: root.tile-x(self.slot); y: root.tile-y(self.slot);
-        width: root.large(self.slot) ? root.focus-width : root.tile-width;
-        height: root.large(self.slot) ? root.focus-height : root.tile-height;
-        visible: !root.full || root.large(self.slot);
-        focused: root.large(self.slot); full: root.full;
         property <image> frame: person.video ? root.frames[position] : @image-url("");
         property <bool> filmed: self.frame.width > 0;
-        // Someone who shares without a camera shows the stream in their tile,
-        // once it's watched; until then a click watches it.
         property <bool> streams-here: person.live && !person.local && !person.video;
-        property <bool> watched: self.streams-here && person.id == root.watch-user;
+        property <bool> watched: self.streams-here && (person.watched || (person.id == root.watch-user && root.has-active-streams));
+        property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
+        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
+        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : person.unwatched-index;
+        property <int> active-slot: (root.sharing ? 1 : 0) + person.watched-index;
+        property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
+        property <bool> is-active: true;
+        x: self.is-active ? root.tile-x-pos(self.slot, self.is-large, self.in-strip, self.strip-index, self.active-slot) : -1000px;
+        y: self.is-active ? root.tile-y-pos(self.slot, self.is-large, self.in-strip, self.active-slot) : -1000px;
+        width: self.is-active ? root.tile-w-size(self.is-large, self.in-strip, self.active-slot) : 0px;
+        height: self.is-active ? root.tile-h-size(self.is-large, self.in-strip, self.active-slot) : 0px;
+        visible: self.is-active && (!root.full || self.is-large);
+        focused: root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active);
+        full: root.full;
+        top-right-avoid: self.is-top-right;
+        is-strip: self.in-strip;
         background: self.filmed || self.watched ? #000000 : Theme.raised;
         label: person.name + ", " + person.status + (person.video ? ", camera on" : "");
         viewers: self.watched ? root.watch-viewers : [];
         viewer-names: self.watched ? root.watch-viewer-names : "";
         stop-label: self.watched ? "Stop watching" : "";
+        can-watch: self.streams-here && !self.watched;
+        watch-stream => { root.watch-stream(person.id); }
+        add-stream => { root.add-stream(person.id); }
         clicked => {
             if self.streams-here && !self.watched {
                 root.watch-stream(person.id);
-            } else if !self.focused {
-                root.focus-tile(self.slot);
+            } else if self.watched {
+                if root.is-focus-mode {
+                    if !self.is-large { root.focus-tile(self.slot); }
+                } else if root.is-multi-grid {
+                    root.focus-tile(self.slot);
+                }
+            } else if !self.streams-here && !self.watched {
+                root.show-voice-person(root.voice-channel, person.id);
             }
         }
         right-clicked(x, y) => { root.open-volume(person, x, y); }
-        stop => { root.stop-watching(); }
+        stop => { root.stop-watching(person.id); }
         full-screen(on) => { root.full-screen(on); }
+
         if tile.filmed: Image { width: tile.width; height: tile.height; source: tile.frame; image-fit: contain; }
-        if tile.watched: StreamPicture { frame: root.watch-frame; status: root.watch-status; }
+        if tile.watched: StreamPicture {
+            frame: root.stream-frames.length > position && root.stream-frames[position].width > 0
+                ? root.stream-frames[position]
+                : ((tile.is-large || tile.focused) && person.id == root.watch-user ? root.watch-frame : @image-url(""));
+            status: person.stream-status != "" ? person.stream-status : root.watch-status;
+        }
         if !tile.filmed && !tile.watched: Avatar {
-            size: min(80px, parent.height * 0.45); initial: person.initial; tint: person.tint; picture: person.picture;
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 8px;
+            size: root.is-focus-mode && tile.is-large ? min(96px, min(parent.height * 0.35, parent.width * 0.35)) : min(48px, min(parent.height * 0.5, parent.width * 0.5));
+            initial: person.initial; tint: person.tint; picture: person.picture;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 4px;
             opacity: person.connected ? 1 : 0.5;
         }
-        // Drawn over the camera's picture.
+        // Small crisp red LIVE badge at top-left for unwatched broadcasting tiles
+        if tile.streams-here && !tile.watched: Rectangle {
+            x: 8px; y: 8px;
+            width: live-badge.preferred-width + 8px; height: 16px; border-radius: 3px;
+            background: Theme.danger;
+            live-badge := Text {
+                text: "LIVE"; color: #ffffff; font-size: 9px; font-weight: 800; letter-spacing: 0.5px;
+                vertical-alignment: center; horizontal-alignment: center;
+            }
+        }
+        // Speaking ring border
         Rectangle {
-            border-radius: tile.border-radius; border-width: person.speaking ? 3px : 0px; border-color: Theme.live;
+            border-radius: tile.border-radius; border-width: person.speaking ? 2px : 0px; border-color: Theme.live;
         }
         if person.local && root.camera-starting: Rectangle {
             x: 10px; y: 10px; height: 26px;
@@ -983,24 +1308,80 @@ export component ParticipantGrid inherits Flickable {
             background: #000000a6; opacity: (0.6 + 0.4 * sin(animation-tick() / 1ms * 0.36deg));
             starting-label := Text { text: "Starting camera..."; color: #ffffff; font-size: 13px; font-weight: 700; }
         }
-        if tile.streams-here && !tile.watched: Rectangle {
-            x: parent.width - self.width - 10px; y: 10px; height: 26px;
-            width: watch-label.preferred-width + 20px; border-radius: 13px;
-            background: Theme.danger;
-            accessible-role: button; accessible-label: "Watch " + person.name + "'s stream";
-            accessible-action-default => { root.watch-stream(person.id); }
-            watch-label := Text { text: "Watch stream"; color: Theme.on-danger; font-size: 13px; font-weight: 700; }
-        }
         TileChip {
             tile-width: parent.width; tile-height: parent.height;
-            // A stream with a tile of its own is LIVE there.
-            name: person.name; live: person.live && (person.local || !person.video);
+            name: person.name; live: tile.is-large && person.live && (person.local || !person.video);
             name-color: person.has-color ? person.color : #ffffff;
             note: person.status != "Muted" && person.status != "Deafened" && person.status != "Speaking" && person.status != "Listening" ? person.status : "";
             hover-only: tile.watched;
             hovered: tile.has-hover;
-            if person.muted && !person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 14px; image-fit: contain; colorize: Theme.danger; }
-            if person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 14px; image-fit: contain; colorize: Theme.danger; }
+            if person.muted && !person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
+            if person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
+        }
+    }
+    // Layout switcher (Focus / Grid) when streams are being watched: compact vertical stack at top-right
+    if root.has-active-streams && !root.full: Rectangle {
+        x: root.width - self.width - 12px;
+        y: 8px;
+        width: 74px;
+        height: 52px;
+        z: 10;
+        border-radius: 6px;
+        background: #000000a6;
+        VerticalLayout {
+            padding: 2px; spacing: 2px;
+            // Focus Button
+            Rectangle {
+                height: 23px; border-radius: 4px;
+                background: root.is-focus-mode ? Theme.button-default-hover : (focus-touch.has-hover ? Theme.button-default : #00000000);
+                animate background { duration: Looks.better-animations ? 100ms : 0ms; }
+                HorizontalLayout {
+                    alignment: center; spacing: 5px;
+                    Middle {
+                        Image {
+                            source: @image-url("icons/tv.svg"); width: 14px; height: 14px; image-fit: contain;
+                            colorize: root.is-focus-mode || focus-touch.has-hover ? Theme.text : Theme.muted;
+                        }
+                    }
+                    Text {
+                        text: "Focus"; color: root.is-focus-mode || focus-touch.has-hover ? Theme.text : Theme.muted;
+                        font-size: 12px; font-weight: 600; vertical-alignment: center;
+                    }
+                }
+                focus-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.grid-mode = false;
+                        root.set-layout-mode(true);
+                    }
+                }
+            }
+            // Grid Button
+            Rectangle {
+                height: 23px; border-radius: 4px;
+                background: root.is-multi-grid ? Theme.button-default-hover : (grid-touch.has-hover ? Theme.button-default : #00000000);
+                animate background { duration: Looks.better-animations ? 100ms : 0ms; }
+                HorizontalLayout {
+                    alignment: center; spacing: 5px;
+                    Middle {
+                        Image {
+                            source: @image-url("icons/stage.svg"); width: 14px; height: 14px; image-fit: contain;
+                            colorize: root.is-multi-grid || grid-touch.has-hover ? Theme.text : Theme.muted;
+                        }
+                    }
+                    Text {
+                        text: "Grid"; color: root.is-multi-grid || grid-touch.has-hover ? Theme.text : Theme.muted;
+                        font-size: 12px; font-weight: 600; vertical-alignment: center;
+                    }
+                }
+                grid-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        root.grid-mode = true;
+                        root.set-layout-mode(false);
+                    }
+                }
+            }
         }
     }
 }

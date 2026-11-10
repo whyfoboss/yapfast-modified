@@ -7653,7 +7653,7 @@ const ENV_IDS = 1_450_000_000_000_000_000n;
 const GENERIC_CONTROLS = new Set([
   "media-requests", "history", "forwards", "gif-selects", "nitro", "profile", "profile-reset", "server-profile", "health", "presence", "logouts",
   "voice-identifies", "voice-changes", "call-audio", "call-video", "voice-link", "voice-drop", "voice-move", "voice-kick",
-  "stream-move", "sessions", "cookies", "list-requests", "audit-log", "slow", "gateway-reconnect", "qr-scan",
+  "stream-move", "stream-stop", "stream-start", "sessions", "cookies", "list-requests", "audit-log", "slow", "gateway-reconnect", "qr-scan",
   "qr-confirm", "qr-captcha", "qr-cancel", "qr-expire", "voice-audio", "video", "stream-codec", "reactor-pages",
   "reactor-removals", "thread-searches", "thread-creates", "thread-members", "typed", "acks", "invites",
   "invite-joins", "invite-captcha", "invite-form", "event-interest", "gift-redeems", "oauth-authorizations", "mfa", "soundboard-sends", "custom-call-sounds",
@@ -8418,6 +8418,43 @@ const server = Bun.serve<SocketData>({
         send(ws, 0, streamServer(ws, key), "STREAM_SERVER_UPDATE");
       }
       return new Response(`moved ${key}\n`);
+    }
+    if (req.method === "POST" && path === "/_control/stream-stop") {
+      const whoParam = (url.searchParams.get("who") ?? url.searchParams.get("user") ?? (await req.text()).trim()).toLowerCase();
+      let foundKey: string | undefined;
+      for (const [key] of streams.entries()) {
+        const streamerId = streamOf(key).user;
+        const u = userById.get(streamerId ?? "");
+        if (streamerId === whoParam || u?.username?.toLowerCase() === whoParam || users[whoParam]?.id === streamerId) {
+          foundKey = key;
+          break;
+        }
+      }
+      if (!foundKey) return new Response("no such stream\n", { status: 404 });
+      endStream(foundKey, url.searchParams.get("reason") ?? "user_requested");
+      return new Response(`stopped stream ${foundKey}\n`);
+    }
+    if (req.method === "POST" && path === "/_control/stream-start") {
+      const whoParam = (url.searchParams.get("who") ?? url.searchParams.get("user") ?? (await req.text()).trim()).toLowerCase();
+      let streamerUser: User | undefined;
+      for (const u of userById.values()) {
+        if (u.id === whoParam || u.username.toLowerCase() === whoParam) {
+          streamerUser = u;
+          break;
+        }
+      }
+      if (!streamerUser && users[whoParam]) streamerUser = users[whoParam];
+      if (!streamerUser) return new Response("no such user\n", { status: 404 });
+      const state = voice.get(streamerUser.id);
+      if (!state || !state.channel) return new Response("user not in voice\n", { status: 400 });
+      const key = streamKey(state.guild, state.channel, streamerUser.id);
+      if (streams.has(key)) return new Response(`stream already running for ${key}\n`);
+      const streamObj: Stream = { viewers: new Set(), paused: false };
+      streams.set(key, streamObj);
+      state.self_stream = true;
+      announce(streamerUser.id);
+      dispatch("STREAM_CREATE", wireStream(key, streamObj));
+      return new Response(`started stream ${key}\n`);
     }
     if (path === "/_control/sessions") return Response.json(sessionCounts);
     if (path === "/_control/cookies") return Response.json(cookieCounts);

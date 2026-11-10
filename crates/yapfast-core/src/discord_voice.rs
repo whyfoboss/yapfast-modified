@@ -212,10 +212,12 @@ struct Watch {
     worker: Option<(Worker, mpsc::UnboundedReceiver<Report>)>,
 }
 
+const MAX_STREAMS: usize = 4;
+
 impl Watch {
-    /// Plays the stream's sound, or not, as being deafened changes.
-    fn hear(watch: &mut Option<Self>, hearing: bool) {
-        if let Some((worker, _)) = watch.as_mut().and_then(|watch| watch.worker.as_mut())
+    /// Plays the stream's sound, or not, as being deafened or focus changes.
+    fn hear(&mut self, hearing: bool) {
+        if let Some((worker, _)) = self.worker.as_mut()
             && let Err(error) = worker.hear(hearing)
         {
             tracing::warn!(
@@ -227,12 +229,11 @@ impl Watch {
 
     /// Plays the stream's sound at the volume chosen for it, times the
     /// speakers'.
-    fn volume(watch: &mut Option<Self>) {
-        if let Some(watching) = watch.as_mut()
-            && let Some((worker, _)) = watching.worker.as_mut()
+    fn volume(&mut self) {
+        if let Some((worker, _)) = self.worker.as_mut()
             && let Err(error) = worker.volume(crate::volume::heard(
                 crate::volume::Kind::Stream,
-                &watching.user,
+                &self.user,
             ))
         {
             tracing::warn!(
@@ -249,13 +250,15 @@ impl Watch {
             .iter()
             .find(|person| person.id == user)
             .map_or_else(|| "Someone".into(), |person| person.user.clone());
-        state.watching = Some(Box::new(Watching {
-            user: user.to_owned(),
-            name,
-            opening: true,
-            frames: None,
-            viewers: vec![],
-        }));
+        if !state.watching.iter().any(|w| w.user == user) {
+            state.watching.push(Watching {
+                user: user.to_owned(),
+                name,
+                opening: true,
+                frames: None,
+                viewers: vec![],
+            });
+        }
         let (discord, asked) = (discord.clone(), key.clone());
         Self {
             key,
@@ -267,13 +270,14 @@ impl Watch {
 
     /// Shows the stream from `server`, in place of a worker showing it from
     /// the server it was on before.
-    fn open(&mut self, server: &StreamServer, state: &mut State) -> Result<()> {
+    fn open(&mut self, server: &StreamServer, state: &mut State, audible: bool) -> Result<()> {
         self.opening = None;
         let volume = crate::volume::heard(crate::volume::Kind::Stream, &self.user);
+        let deafened = state.deafened || !audible;
         let (worker, frames, reports) =
-            Worker::watch(server, state.speaker.clone(), state.deafened, volume)?;
+            Worker::watch(server, state.speaker.clone(), deafened, volume)?;
         self.worker = Some((worker, reports));
-        if let Some(shown) = state.watching.as_mut() {
+        if let Some(shown) = state.watching.iter_mut().find(|w| w.user == self.user) {
             shown.frames = Some(Arc::new(frames));
         }
         Ok(())
@@ -283,26 +287,60 @@ impl Watch {
     fn stop(self, discord: &Discord, state: &mut State) {
         discord.end_stream(&self.key);
         drop(self.worker);
-        state.watching = None;
+        state.watching.retain(|w| w.user != self.user);
     }
 }
 
 enum WatchEvent {
-    Opened(Result<StreamServer>),
-    Report(Option<Report>),
+    Opened(usize, Result<StreamServer>),
+    Report(usize, Option<Report>),
 }
 
-/// Discord's answer, then the worker's reports; never without a watch.
-async fn watch_event(watch: &mut Option<Watch>) -> WatchEvent {
-    let Some(watch) = watch else {
-        return std::future::pending().await;
-    };
+async fn watch_step(watch: &mut Watch, idx: usize) -> WatchEvent {
     if let Some(opening) = watch.opening.as_mut() {
-        return WatchEvent::Opened(opening.await);
+        return WatchEvent::Opened(idx, opening.await);
     }
     match watch.worker.as_mut() {
-        Some((_, reports)) => WatchEvent::Report(reports.recv().await),
+        Some((_, reports)) => WatchEvent::Report(idx, reports.recv().await),
         None => std::future::pending().await,
+    }
+}
+
+/// Discord's answer, then the worker's reports across all active watches.
+async fn watch_event(watches: &mut [Watch]) -> WatchEvent {
+    match watches.len() {
+        0 => std::future::pending().await,
+        1 => watch_step(&mut watches[0], 0).await,
+        2 => {
+            let (first, rest) = watches.split_at_mut(1);
+            tokio::select! {
+                biased;
+                e = watch_step(&mut first[0], 0) => e,
+                e = watch_step(&mut rest[0], 1) => e,
+            }
+        }
+        3 => {
+            let (first, rest) = watches.split_at_mut(1);
+            let (second, third) = rest.split_at_mut(1);
+            tokio::select! {
+                biased;
+                e = watch_step(&mut first[0], 0) => e,
+                e = watch_step(&mut second[0], 1) => e,
+                e = watch_step(&mut third[0], 2) => e,
+            }
+        }
+        _ => {
+            let (first, rest) = watches.split_at_mut(1);
+            let (second, rest2) = rest.split_at_mut(1);
+            let (third, fourth) = rest2.split_at_mut(1);
+            tokio::select! {
+                biased;
+                e = watch_step(&mut first[0], 0) => e,
+                e = watch_step(&mut second[0], 1) => e,
+                e = watch_step(&mut third[0], 2) => e,
+                e = watch_step(&mut fourth[0], 3) => e,
+            }
+        }
     }
 }
 
@@ -409,7 +447,8 @@ pub(crate) async fn call(
     let mut cameras = Cameras::start(call.video_frames());
     let mut share: Option<Share> = None;
     let mut starting: Starting = None;
-    let mut watch: Option<Watch> = None;
+    let mut watches: Vec<Watch> = Vec::new();
+    let mut focused_stream: Option<String> = None;
     // Ringing the others while they haven't come, with the ringback heard meanwhile.
     let mut ringing: Ringing = None;
     let mut ringback: Option<Ringer> = None;
@@ -575,7 +614,10 @@ pub(crate) async fn call(
                             if state.deafened {
                                 state.deafened = false;
                                 hearing.set_deafened(false);
-                                Watch::hear(&mut watch, true);
+                                for w in &mut watches {
+                                    let aud = focused_stream.as_deref() == Some(&w.user);
+                                    w.hear(aud);
+                                }
                             }
                             match open_discord_microphone(state, &reverse, &microphone, &track, &microphone_thread) {
                                 Ok(opened) => {
@@ -596,7 +638,10 @@ pub(crate) async fn call(
                             }
                             state.deafened = deafened;
                             hearing.set_deafened(deafened);
-                            Watch::hear(&mut watch, !deafened);
+                            for w in &mut watches {
+                                let aud = !deafened && focused_stream.as_deref() == Some(&w.user);
+                                w.hear(aud);
+                            }
                         }
                         Some(Command::Devices) => { let _ = devices(state); }
                         Some(Command::Microphone(id)) => {
@@ -674,18 +719,93 @@ pub(crate) async fn call(
                             starting = None;
                         }
                         Some(Command::Watch(user)) => {
-                            let watching = state.watching.as_ref().is_some_and(|watching| watching.user == user);
-                            if user != me && !watching {
-                                if let Some(stopped) = watch.take() {
-                                    stopped.stop(discord, state);
+                            let is_watching = watches.iter().any(|w| w.user == user);
+                            if user != me {
+                                if is_watching {
+                                    focused_stream = Some(user.clone());
+                                    for w in &mut watches {
+                                        let aud = focused_stream.as_deref() == Some(&w.user);
+                                        w.hear(!state.deafened && aud);
+                                    }
+                                } else {
+                                    // Replace the currently focused watched stream
+                                    if let Some(focused) = focused_stream.take() {
+                                        if let Some(pos) = watches.iter().position(|w| w.user == focused) {
+                                            let stopped = watches.remove(pos);
+                                            stopped.stop(discord, state);
+                                        }
+                                    } else if watches.len() >= MAX_STREAMS {
+                                        let stopped = watches.remove(0);
+                                        stopped.stop(discord, state);
+                                    }
+                                    state.error = None;
+                                    let watch = Watch::start(discord, guild, &channel, &user, state);
+                                    focused_stream = Some(user.clone());
+                                    watches.push(watch);
+                                    for w in &mut watches {
+                                        let aud = focused_stream.as_deref() == Some(&w.user);
+                                        w.hear(!state.deafened && aud);
+                                    }
                                 }
-                                state.error = None;
-                                watch = Some(Watch::start(discord, guild, &channel, &user, state));
                             }
                         }
-                        Some(Command::StopWatching) => {
-                            if let Some(stopped) = watch.take() {
-                                stopped.stop(discord, state);
+                        Some(Command::AddStream(user)) => {
+                            let is_watching = watches.iter().any(|w| w.user == user);
+                            if user != me && !is_watching {
+                                if watches.len() < MAX_STREAMS {
+                                    state.error = None;
+                                    let watch = Watch::start(discord, guild, &channel, &user, state);
+                                    if focused_stream.is_none() {
+                                        focused_stream = watches.first().map(|w| w.user.clone()).or(Some(user.clone()));
+                                    }
+                                    watches.push(watch);
+                                    for w in &mut watches {
+                                        let aud = focused_stream.as_deref() == Some(&w.user);
+                                        w.hear(!state.deafened && aud);
+                                    }
+                                } else {
+                                    tracing::warn!(user, "maximum of 4 simultaneous streams reached");
+                                }
+                            }
+                        }
+                        Some(Command::StopWatching(target)) => {
+                            match target {
+                                Some(user) => {
+                                    if let Some(pos) = watches.iter().position(|w| w.user == user) {
+                                        let stopped = watches.remove(pos);
+                                        stopped.stop(discord, state);
+                                        if focused_stream.as_deref() == Some(&user) {
+                                            focused_stream = watches.first().map(|w| w.user.clone());
+                                            for w in &mut watches {
+                                                let aud = focused_stream.as_deref() == Some(&w.user);
+                                                w.hear(!state.deafened && aud);
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    if let Some(focused) = focused_stream.take() {
+                                        if let Some(pos) = watches.iter().position(|w| w.user == focused) {
+                                            let stopped = watches.remove(pos);
+                                            stopped.stop(discord, state);
+                                            focused_stream = watches.first().map(|w| w.user.clone());
+                                            for w in &mut watches {
+                                                let aud = focused_stream.as_deref() == Some(&w.user);
+                                                w.hear(!state.deafened && aud);
+                                            }
+                                        }
+                                    } else if !watches.is_empty() {
+                                        let stopped = watches.remove(0);
+                                        stopped.stop(discord, state);
+                                    }
+                                }
+                            }
+                        }
+                        Some(Command::FocusStream(target)) => {
+                            focused_stream = target;
+                            for w in &mut watches {
+                                let aud = focused_stream.as_deref() == Some(&w.user);
+                                w.hear(!state.deafened && aud);
                             }
                         }
                         // Played here at once, as Discord's client does,
@@ -863,34 +983,50 @@ pub(crate) async fn call(
                         }
                     }
                 }
-                Ok(()) = volumes.changed() => Watch::volume(&mut watch),
-                event = watch_event(&mut watch) => {
-                    let mut stop = None;
+                Ok(()) = volumes.changed() => {
+                    for w in &mut watches {
+                        w.volume();
+                    }
+                }
+                event = watch_event(&mut watches) => {
+                    let mut stop_idx = None;
                     match event {
-                        WatchEvent::Opened(Ok(server)) => {
-                            if let Some(watching) = watch.as_mut()
-                                && let Err(error) = watching.open(&server, state)
-                            {
-                                tracing::warn!(error = format!("{error:#}"), "could not watch the stream");
-                                stop = Some(Some(format!("{error:#}")));
+                        WatchEvent::Opened(idx, Ok(server)) => {
+                            if idx < watches.len() {
+                                let is_audible = focused_stream.as_deref() == Some(&watches[idx].user)
+                                    || (focused_stream.is_none() && idx == 0);
+                                if let Err(error) = watches[idx].open(&server, state, is_audible) {
+                                    tracing::warn!(error = format!("{error:#}"), "could not watch the stream");
+                                    stop_idx = Some((idx, Some(format!("{error:#}"))));
+                                }
                             }
                         }
-                        WatchEvent::Opened(Err(error)) => {
+                        WatchEvent::Opened(idx, Err(error)) => {
                             tracing::warn!(error = format!("{error:#}"), kind = kind(guild), "could not watch the stream");
-                            stop = Some(Some(error.to_string()));
+                            stop_idx = Some((idx, Some(error.to_string())));
                         }
-                        WatchEvent::Report(Some(Report::Ready)) => {
-                            if let Some(frames) = state.watching.as_ref().and_then(|watching| watching.frames.as_ref()) {
-                                frames.unlink();
+                        WatchEvent::Report(idx, Some(Report::Ready)) => {
+                            if idx < watches.len() {
+                                let user = &watches[idx].user;
+                                if let Some(watching) = state.watching.iter().find(|w| &w.user == user)
+                                    && let Some(frames) = watching.frames.as_ref()
+                                {
+                                    frames.unlink();
+                                }
                             }
                         }
-                        WatchEvent::Report(Some(Report::Streaming)) => {
-                            if let Some(watching) = state.watching.as_mut() {
-                                watching.opening = false;
+                        WatchEvent::Report(idx, Some(Report::Streaming)) => {
+                            if idx < watches.len() {
+                                let user = &watches[idx].user;
+                                if let Some(watching) = state.watching.iter_mut().find(|w| &w.user == user) {
+                                    watching.opening = false;
+                                }
                             }
                         }
-                        WatchEvent::Report(Some(Report::Ended { error })) => stop = Some(error),
-                        WatchEvent::Report(Some(
+                        WatchEvent::Report(idx, Some(Report::Ended { error })) => {
+                            stop_idx = Some((idx, error));
+                        }
+                        WatchEvent::Report(_, Some(
                             Report::Sharing { .. }
                             | Report::Sending(_)
                             | Report::Preview { .. }
@@ -898,13 +1034,26 @@ pub(crate) async fn call(
                             | Report::Finished
                             | Report::Screen { .. },
                         )) => {}
-                        WatchEvent::Report(None) => stop = Some(None),
+                        WatchEvent::Report(idx, None) => {
+                            stop_idx = Some((idx, None));
+                        }
                     }
-                    if let Some(error) = stop
-                        && let Some(stopped) = watch.take()
+                    if let Some((idx, error)) = stop_idx
+                        && idx < watches.len()
                     {
+                        let stopped = watches.remove(idx);
+                        let user = stopped.user.clone();
                         stopped.stop(discord, state);
-                        state.error = error;
+                        if focused_stream.as_deref() == Some(&user) {
+                            focused_stream = watches.first().map(|w| w.user.clone());
+                            for w in &mut watches {
+                                let aud = focused_stream.as_deref() == Some(&w.user);
+                                w.hear(!state.deafened && aud);
+                            }
+                        }
+                        if let Some(err) = error {
+                            state.error = Some(err);
+                        }
                     }
                     snapshots.send_replace(state.clone());
                 }
@@ -934,26 +1083,40 @@ pub(crate) async fn call(
                     }
                     // Who watches this account's stream, or the one it watches.
                     Live::StreamUpdated { stream_key, viewers, .. } => {
-                        let shown = if share.as_ref().is_some_and(|share| share.key.as_ref() == Some(&stream_key)) {
-                            state.sharing.as_mut().map(|sharing| &mut sharing.viewers)
-                        } else if watch.as_ref().is_some_and(|watch| watch.key == stream_key) {
-                            state.watching.as_mut().map(|watching| &mut watching.viewers)
-                        } else {
-                            None
-                        };
-                        if let Some(shown) = shown
-                            && *shown != viewers
+                        let mut changed = false;
+                        if share.as_ref().is_some_and(|share| share.key.as_ref() == Some(&stream_key))
+                            && let Some(sharing) = state.sharing.as_mut()
+                            && sharing.viewers != viewers
                         {
-                            *shown = viewers;
+                            sharing.viewers = viewers.clone();
+                            changed = true;
+                        }
+                        for w in &watches {
+                            if w.key == stream_key
+                                && let Some(shown) = state.watching.iter_mut().find(|s| s.user == w.user)
+                                && shown.viewers != viewers
+                            {
+                                shown.viewers = viewers.clone();
+                                changed = true;
+                            }
+                        }
+                        if changed {
                             snapshots.send_replace(state.clone());
                         }
                     }
                     Live::StreamEnded { stream_key, reason } => {
                         // The streamer stopped, or Discord ended watching.
-                        if watch.as_ref().is_some_and(|watch| watch.key == stream_key)
-                            && let Some(stopped) = watch.take()
-                        {
+                        if let Some(pos) = watches.iter().position(|w| w.key == stream_key) {
+                            let stopped = watches.remove(pos);
+                            let user = stopped.user.clone();
                             stopped.stop(discord, state);
+                            if focused_stream.as_deref() == Some(&user) {
+                                focused_stream = watches.first().map(|w| w.user.clone());
+                                for w in &mut watches {
+                                    let aud = focused_stream.as_deref() == Some(&w.user);
+                                    w.hear(!state.deafened && aud);
+                                }
+                            }
                             snapshots.send_replace(state.clone());
                         }
                         if share.as_ref().is_some_and(|share| share.key.as_ref() == Some(&stream_key))
@@ -1001,15 +1164,15 @@ pub(crate) async fn call(
                             stopped.stop(discord, state);
                             state.error = Some(error.to_string());
                         }
-                        if let Some(watching) = watch.as_mut().filter(|watching| watching.key == next.stream_key && watching.opening.is_none()) {
-                            if let Some(shown) = state.watching.as_mut() {
-                                shown.opening = true;
-                            }
-                            if let Err(error) = watching.open(&next, state)
-                                && let Some(stopped) = watch.take()
-                            {
-                                stopped.stop(discord, state);
-                                state.error = Some(format!("{error:#}"));
+                        for w in &mut watches {
+                            if w.key == next.stream_key && w.opening.is_none() {
+                                if let Some(shown) = state.watching.iter_mut().find(|s| s.user == w.user) {
+                                    shown.opening = true;
+                                }
+                                let is_audible = focused_stream.as_deref() == Some(&w.user);
+                                if let Err(error) = w.open(&next, state, is_audible) {
+                                    tracing::warn!(error = format!("{error:#}"), "could not reopen moved stream");
+                                }
                             }
                         }
                         snapshots.send_replace(state.clone());
@@ -1049,7 +1212,7 @@ pub(crate) async fn call(
     if let Some(stopped) = share.take() {
         stopped.stop(discord, state);
     }
-    if let Some(stopped) = watch.take() {
+    for stopped in watches.drain(..) {
         stopped.stop(discord, state);
     }
     state.phase = Phase::Leaving;

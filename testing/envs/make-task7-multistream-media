@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Generates media for testing/envs/task7_multistream.json
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+out=testing/envs/task7_multistream
+mkdir -p "$out"
+
+echo "Generating avatars for Task 7..."
+avatar() {
+  nix shell nixpkgs#imagemagick -c magick -size 128x128 radial-gradient:"$2"-"$3" \
+    \( -size 128x128 xc:none -fill 'rgba(255,255,255,0.85)' \
+       -draw 'circle 64,50 64,26' -draw 'ellipse 64,122 42,36 180,360' \) \
+    -composite -depth 8 -strip -define png:compression-level=9 "$out/$1.png"
+}
+avatar alice '#ff8a65' '#d84315'
+avatar bob '#ef5350' '#b71c1c'
+avatar carol '#42a5f5' '#0d47a1'
+avatar dave '#66bb6a' '#1b5e20'
+avatar eve '#ab47bc' '#4a148c'
+avatar server '#26a69a' '#004d40'
+
+echo "Generating Stream 1: Bob (Red / Yellow)..."
+nix shell nixpkgs#ffmpeg -c ffmpeg -v error -y \
+  -f lavfi -i "color=c=0xb71c1c:size=640x360:rate=30:duration=4" \
+  -f lavfi -i "sine=frequency=440:duration=4" \
+  -vf "drawbox=x=30:y=30:w=580:h=60:color=black@0.55:t=fill,drawtext=text='[ 1 ] BOB - STREAM 1':fontsize=32:fontcolor=white:x=50:y=45,drawbox=x=40+abs(mod(t*180\,800)-400):y=140:w=90:h=90:color=0xffd600@0.95:t=fill,drawbox=x=40:y=280:w=mod(t*140\,560):h=20:color=white@0.85:t=fill" \
+  -c:v libx264 -pix_fmt yuv420p -crf 28 -c:a aac -b:a 48k -shortest -movflags +faststart \
+  "$out/stream1-bob.mp4"
+
+echo "Generating Stream 2: Carol (Blue / Cyan)..."
+nix shell nixpkgs#ffmpeg -c ffmpeg -v error -y \
+  -f lavfi -i "color=c=0x0d47a1:size=640x360:rate=30:duration=4" \
+  -f lavfi -i "sine=frequency=554:duration=4" \
+  -vf "drawbox=x=30:y=30:w=580:h=60:color=black@0.55:t=fill,drawtext=text='[ 2 ] CAROL - STREAM 2':fontsize=32:fontcolor=0x00e5ff:x=50:y=45,drawbox=x=275:y=110+abs(mod(t*150\,240)-120):w=90:h=90:color=0x00e5ff@0.95:t=fill,drawbox=x=40+mod(t*160\,500):y=280:w=60:h=20:color=0x80d8ff@0.9:t=fill" \
+  -c:v libx264 -pix_fmt yuv420p -crf 28 -c:a aac -b:a 48k -shortest -movflags +faststart \
+  "$out/stream2-carol.mp4"
+
+echo "Generating Stream 3: Dave (Green / Lime)..."
+nix shell nixpkgs#ffmpeg -c ffmpeg -v error -y \
+  -f lavfi -i "color=c=0x1b5e20:size=640x360:rate=30:duration=4" \
+  -f lavfi -i "sine=frequency=659:duration=4" \
+  -vf "drawbox=x=30:y=30:w=580:h=60:color=black@0.55:t=fill,drawtext=text='[ 3 ] DAVE - STREAM 3':fontsize=32:fontcolor=0x76ff03:x=50:y=45,drawbox=x=40+abs(mod(t*130\,700)-350):y=110+abs(mod(t*100\,200)-100):w=85:h=85:color=0x76ff03@0.95:t=fill,drawbox=x=40:y=280:w=mod(t*120\,560):h=20:color=0xb9f6ca@0.9:t=fill" \
+  -c:v libx264 -pix_fmt yuv420p -crf 28 -c:a aac -b:a 48k -shortest -movflags +faststart \
+  "$out/stream3-dave.mp4"
+
+echo "Generating Stream 4: Eve (Purple / Pink)..."
+nix shell nixpkgs#ffmpeg -c ffmpeg -v error -y \
+  -f lavfi -i "color=c=0x4a148c:size=640x360:rate=30:duration=4" \
+  -f lavfi -i "sine=frequency=880:duration=4" \
+  -vf "drawbox=x=30:y=30:w=580:h=60:color=black@0.55:t=fill,drawtext=text='[ 4 ] EVE - STREAM 4':fontsize=32:fontcolor=0xff4081:x=50:y=45,drawbox=x=480-abs(mod(t*170\,800)-400):y=140:w=90:h=90:color=0xff4081@0.95:t=fill,drawbox=x=40+mod(t*200\,500):y=280:w=70:h=20:color=white@0.9:t=fill" \
+  -c:v libx264 -pix_fmt yuv420p -crf 28 -c:a aac -b:a 48k -shortest -movflags +faststart \
+  "$out/stream4-eve.mp4"
+
+echo "Media generation complete:"
+ls -lh "$out"

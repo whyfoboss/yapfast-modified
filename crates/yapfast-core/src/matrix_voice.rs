@@ -502,7 +502,7 @@ async fn connected(
                         state.camera_phase = CameraPhase::Off;
                     }
                     Some(Command::GoLive(_)) => state.error = Some("Screen sharing works in Discord calls for now.".into()),
-                    Some(Command::StopLive | Command::SwitchLive | Command::Watch(_) | Command::StopWatching | Command::Soundboard(_) | Command::PreviewSound(_) | Command::FavoriteSound(..) | Command::LeaveStale) => {}
+                    Some(Command::StopLive | Command::SwitchLive | Command::Watch(_) | Command::AddStream(_) | Command::StopWatching(_) | Command::FocusStream(_) | Command::Soundboard(_) | Command::PreviewSound(_) | Command::FavoriteSound(..) | Command::LeaveStale) => {}
                 },
                 result = camera::opened(&mut opening) => {
                     opening = None;

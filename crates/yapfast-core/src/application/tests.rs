@@ -2421,15 +2421,17 @@ fn streams_sound_as_others_start_and_stop_watching() {
             frames: frames.clone(),
             viewers: viewers.iter().map(|&viewer| viewer.into()).collect(),
         }),
-        watching: watching.map(|viewers| {
-            Box::new(voice::Watching {
-                user: "sam".into(),
-                name: "sam".into(),
-                opening: false,
-                frames: None,
-                viewers: viewers.iter().map(|&viewer| viewer.into()).collect(),
+        watching: watching
+            .map(|viewers| {
+                vec![voice::Watching {
+                    user: "sam".into(),
+                    name: "sam".into(),
+                    opening: false,
+                    frames: None,
+                    viewers: viewers.iter().map(|&viewer| viewer.into()).collect(),
+                }]
             })
-        }),
+            .unwrap_or_default(),
         ..Default::default()
     };
     let mut heard = |state: voice::State| sounds(&app.apply(Event::Voice(state)));

@@ -241,7 +241,7 @@ pub struct State {
     /// not received this device's audio key.
     pub warning: Option<String>,
     pub sharing: Option<Sharing>,
-    pub watching: Option<Box<Watching>>,
+    pub watching: Vec<Watching>,
     /// How the next screen share is sent.
     pub quality: StreamQuality,
     /// This account's camera, turned on or starting.
@@ -311,7 +311,7 @@ impl Default for State {
             error: None,
             warning: None,
             sharing: None,
-            watching: None,
+            watching: vec![],
             quality: StreamQuality::default(),
             camera_phase: CameraPhase::Off,
             can_film: false,
@@ -335,7 +335,7 @@ impl State {
         self.deafened = false;
         self.warning = None;
         self.sharing = None;
-        self.watching = None;
+        self.watching.clear();
         self.camera_phase = CameraPhase::Off;
         self.can_film = false;
         self.link = None;
@@ -372,9 +372,14 @@ pub enum Command {
     /// Add the soundboard sound with this id to the account's favourites,
     /// or take it out.
     FavoriteSound(String, bool),
-    /// Watch the participant with this id's stream.
+    /// Watch the participant with this id's stream, replacing the currently focused stream.
     Watch(String),
-    StopWatching,
+    /// Add the participant with this id's stream to active streams without stopping existing ones.
+    AddStream(String),
+    /// Stop watching someone's stream, or all streams if none is named.
+    StopWatching(Option<String>),
+    /// Focus on this stream for primary audio routing.
+    FocusStream(Option<String>),
     /// Remove memberships this device left in voice channels, for example
     /// after Yapfast was killed. Ignored during a call.
     LeaveStale,

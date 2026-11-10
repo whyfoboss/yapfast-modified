@@ -69,7 +69,44 @@ more take tiles at least 240px wide, and scroll. A click on a tile shows it
 large, as Discord's focus does, with the others in rows of small tiles
 beneath; a click beside it shows the grid again. The large tile goes full
 screen from its button or a double click, over the whole window, until
-Escape. Rust keeps which tile is large (`tiles::Focus`), by whose it is, so
+Escape.
+
+Yapfast supports viewing up to 4 simultaneous streams in a call, offering both
+Focus and Grid layout modes with a dedicated switcher in the top right of the
+stage. In Grid mode, streams dynamically adapt to the active stream count:
+1 stream takes a centered large 16:9 view with the channel participant strip
+visible below; 2 streams take equal side-by-side positions; 3 streams use a
+1 large on the left (~2/3 width) plus 2 stacked on the right (~1/3 width) layout
+with click-to-promote; 4 streams form a 2x2 grid. In multi-stream Grid mode
+(2-4 streams), the stage dedicates full space to the stream videos. All layouts
+preserve 16:9 aspect ratios.
+
+In Focus mode (or Grid mode with a single stream), the focused stream occupies
+the upper stage area, and a horizontal participant thumbnail strip appears
+below it. This strip displays all other people currently in the voice channel
+(non-streaming members with their avatars, unwatched broadcasters with a LIVE
+badge and stream controls, and secondary watched streams with live video),
+excluding only the currently focused streamer. Clicking a non-streaming member
+opens their profile. For broadcasting participants, hovering over their tile
+reveals Discord-style stream controls:
+- **Watch stream**: Switches focus to that user's stream (replacing the previous
+  stream focus or starting playback) and routes audio to it.
+- **Eye icon button**: Additively subscribes to that user's stream in the
+  background (up to the 4-stream limit) without replacing the currently focused
+  stream or switching audio.
+Clicking any secondary watched stream in the strip smoothly switches focus to it
+without restarting decoder processes.
+
+Stream overlay controls (viewer count, eye icon, viewer avatars, close stream X
+button, and streamer nickname chip) appear only on hover with smooth fade
+animations (120ms in, 150ms out) when Better Animations is enabled, and zero
+flicker over buttons. Audio routes dynamically: only the focused stream is
+audible (`Control::Hear(true)`), while background streams render video silently
+(`Control::Hear(false)`). Toggling deafen silences all streams. Closing a stream
+releases its dedicated worker process and memory immediately, dynamically
+adjusting the grid layout.
+
+Rust keeps which tile is large (`tiles::Focus`), by whose it is, so
 it stays as people come and go. The grid tells Rust its columns, tile size,
 scroll and large tile whenever they change (`call-tiles`), so each feed is
 made at its tile's size in physical pixels, and only while the tile is in

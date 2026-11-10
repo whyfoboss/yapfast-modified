@@ -3191,18 +3191,141 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     let weak = window.as_weak();
     window.on_watch_stream(move |id| {
         if let Some(window) = weak.upgrade() {
-            state
-                .borrow_mut()
-                .action(&window, Action::Voice(voice::Command::Watch(id.into())));
+            let mut adapter = state.borrow_mut();
+            let new_user = id.to_string();
+            // Clear watch_frame so stale frames from the previous stream do not linger or flash
+            window.set_watch_frame(slint::Image::default());
+            // If replacing, clear the replaced stream's frame from stream_frames
+            if let Some(super::tiles::Focus::Stream(old_user)) = &adapter.call_focus
+                && old_user != &new_user
+                && let Some(old_pos) = adapter
+                    .app
+                    .state
+                    .voice
+                    .participants
+                    .iter()
+                    .position(|p| &p.id == old_user)
+                && old_pos < adapter.models.stream_frames.row_count()
+            {
+                adapter
+                    .models
+                    .stream_frames
+                    .set_row_data(old_pos, slint::Image::default());
+            }
+            adapter.call_focus = Some(super::tiles::Focus::Stream(new_user));
+            adapter.action(&window, Action::Voice(voice::Command::Watch(id.into())));
+            adapter.show_stage(&window);
         }
     });
     let state = adapter.clone();
     let weak = window.as_weak();
-    window.on_stop_watching(move || {
+    window.on_add_stream(move |id| {
         if let Some(window) = weak.upgrade() {
-            state
-                .borrow_mut()
-                .action(&window, Action::Voice(voice::Command::StopWatching));
+            let mut adapter = state.borrow_mut();
+            // Ensure currently focused stream stays firmly focused so adding does not visually interrupt it
+            if adapter.call_focus.is_none() {
+                let current_first = adapter
+                    .app
+                    .state
+                    .voice
+                    .watching
+                    .first()
+                    .map(|w| w.user.clone());
+                if let Some(u) = current_first {
+                    adapter.call_focus = Some(super::tiles::Focus::Stream(u));
+                }
+            }
+            adapter.action(&window, Action::Voice(voice::Command::AddStream(id.into())));
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_stop_watching(move |id| {
+        if let Some(window) = weak.upgrade() {
+            let mut adapter = state.borrow_mut();
+            let target_user = if id.is_empty() {
+                match &adapter.call_focus {
+                    Some(super::tiles::Focus::Stream(u)) => Some(u.clone()),
+                    _ => adapter
+                        .app
+                        .state
+                        .voice
+                        .watching
+                        .first()
+                        .map(|w| w.user.clone()),
+                }
+            } else {
+                Some(id.to_string())
+            };
+
+            if let Some(ref target) = target_user {
+                // 1. Immediately clear the stopped stream's frame from stream_frames
+                if let Some(pos) = adapter
+                    .app
+                    .state
+                    .voice
+                    .participants
+                    .iter()
+                    .position(|p| &p.id == target)
+                    && pos < adapter.models.stream_frames.row_count()
+                {
+                    adapter
+                        .models
+                        .stream_frames
+                        .set_row_data(pos, slint::Image::default());
+                }
+                // 2. If the stopped stream was the focused stream, switch focus to another remaining watched stream
+                if matches!(&adapter.call_focus, Some(super::tiles::Focus::Stream(u)) if u == target) {
+                    let next_focus = adapter
+                        .app
+                        .state
+                        .voice
+                        .watching
+                        .iter()
+                        .find(|w| &w.user != target)
+                        .map(|w| super::tiles::Focus::Stream(w.user.clone()));
+                    adapter.call_focus = next_focus;
+                    window.set_watch_frame(slint::Image::default());
+                }
+                // 3. Synchronously remove from watching so video tick immediately discards any late frames
+                adapter
+                    .app
+                    .state
+                    .voice
+                    .watching
+                    .retain(|w| &w.user != target);
+            }
+
+            // 4. Dispatch stop command to backend
+            adapter.action(
+                &window,
+                Action::Voice(voice::Command::StopWatching(target_user)),
+            );
+
+            // 5. Immediately refresh UI stage and participants synchronously
+            adapter.show_stage(&window);
+            adapter.show_voice(&window);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_set_layout_mode(move |focus_mode| {
+        if let Some(window) = weak.upgrade() {
+            let mut adapter = state.borrow_mut();
+            let voice = &adapter.app.state.voice;
+            if focus_mode && adapter.call_focus.is_none() {
+                let first = voice.watching.first().map(|w| w.user.clone());
+                adapter.call_focus = first.map(super::tiles::Focus::Stream);
+            }
+            adapter.show_stage(&window);
+            let focus_user = match &adapter.call_focus {
+                Some(super::tiles::Focus::Stream(u)) => Some(u.clone()),
+                _ => None,
+            };
+            adapter.action(
+                &window,
+                Action::Voice(voice::Command::FocusStream(focus_user)),
+            );
         }
     });
     // Frames skip the application state, which would redraw far more than the pictures.
@@ -3245,13 +3368,23 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         {
             window.set_camera_preview(frame);
         }
-        if let Some(frame) = voice
-            .watching
-            .as_ref()
-            .and_then(|watching| watching.frames.as_ref())
-            .and_then(|frames| frames.take(image))
-        {
-            window.set_watch_frame(frame);
+        let stream_frames = &adapter.models.stream_frames;
+        for (index, person) in voice.participants.iter().enumerate() {
+            if let Some(watching) = voice.watching.iter().find(|w| w.user == person.id)
+                && let Some(frames) = watching.frames.as_ref()
+                && let Some(frame) = frames.take(image)
+            {
+                if index < stream_frames.row_count() {
+                    stream_frames.set_row_data(index, frame.clone());
+                }
+                let is_focused = match &adapter.call_focus {
+                    Some(super::tiles::Focus::Stream(u)) => u == &person.id,
+                    _ => voice.watching.first().is_some_and(|w| w.user == person.id),
+                };
+                if is_focused {
+                    window.set_watch_frame(frame);
+                }
+            }
         }
         let video = adapter.app.state.video.as_ref();
         let taken =
@@ -3602,6 +3735,14 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
             .ok()
             .and_then(|slot| stage.focus_at(slot));
         adapter.show_stage(&window);
+        let focus_user = match &adapter.call_focus {
+            Some(super::tiles::Focus::Stream(u)) => Some(u.clone()),
+            _ => None,
+        };
+        adapter.action(
+            &window,
+            Action::Voice(voice::Command::FocusStream(focus_user)),
+        );
     });
     let state = adapter.clone();
     let weak = window.as_weak();

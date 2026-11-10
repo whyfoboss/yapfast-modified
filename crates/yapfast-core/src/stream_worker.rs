@@ -57,9 +57,9 @@ pub const SHARE_HEIGHT: u32 = 1080;
 pub const PREVIEW_WIDTH: u32 = 1280;
 pub const PREVIEW_HEIGHT: u32 = 720;
 /// The largest picture shown of someone else's stream; larger ones are
-/// scaled down to it.
-pub const WATCH_WIDTH: u32 = 1920;
-pub const WATCH_HEIGHT: u32 = 1080;
+/// scaled down to it. Up to 1440p (2560x1440) fits directly without scaling.
+pub const WATCH_WIDTH: u32 = 2560;
+pub const WATCH_HEIGHT: u32 = 1440;
 /// The largest preview Discord shows of a stream, and how often its client
 /// sends a new one.
 const THUMBNAIL_WIDTH: u32 = 512;

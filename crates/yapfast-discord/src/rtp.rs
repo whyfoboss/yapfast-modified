@@ -1141,6 +1141,31 @@ pub fn bandwidth_estimate(mut rtcp: &[u8], ssrc: u32) -> Option<u64> {
     lowest
 }
 
+/// An RTCP REMB packet estimating `bitrate` for `ssrcs`.
+pub fn remb_packet(sender: u32, ssrcs: &[u32], bitrate: u64) -> Vec<u8> {
+    let mut exponent = 0u8;
+    let mut mantissa = bitrate;
+    while mantissa > 0x3_ffff && exponent < 63 {
+        mantissa >>= 1;
+        exponent += 1;
+    }
+    let count = ssrcs.len().min(255) as u8;
+    let length = 4 + u16::from(count);
+    let mut packet = vec![0x8f, 206, (length >> 8) as u8, length as u8];
+    packet.extend_from_slice(&sender.to_be_bytes());
+    packet.extend_from_slice(&0u32.to_be_bytes());
+    packet.extend_from_slice(b"REMB");
+    let exp_mantissa = (u32::from(exponent) << 18) | (mantissa as u32 & 0x3_ffff);
+    packet.push(count);
+    packet.push((exp_mantissa >> 16) as u8);
+    packet.push((exp_mantissa >> 8) as u8);
+    packet.push(exp_mantissa as u8);
+    for &ssrc in ssrcs.iter().take(255) {
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+    }
+    packet
+}
+
 /// The video packets sent lately, unencrypted, to resend when a viewer
 /// reports one lost: about two seconds at 9 Mbit/s.
 pub struct History {
@@ -2220,6 +2245,10 @@ mod tests {
             None,
             "about another stream"
         );
+        let built = remb_packet(1, &[55], 1_000_000);
+        assert_eq!(bandwidth_estimate(&built, 55), Some(1_000_000));
+        let built_15m = remb_packet(1, &[55], 15_000_000);
+        assert_eq!(bandwidth_estimate(&built_15m, 55), Some(15_000_000));
     }
 
     #[test]

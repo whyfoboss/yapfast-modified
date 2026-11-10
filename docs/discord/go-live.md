@@ -218,7 +218,29 @@ call is connected; Discord drops a watch sent before. The stream's sound, Opus
 on the streamer's audio SSRC, is DAVE-decrypted as audio and played by the
 worker through `audio_io.rs` on the call's speakers (`stream_audio::Player`),
 about 100 ms queued; being deafened silences it, which Yapfast tells the worker
-with a `hear` control. Yapfast's workers play as "Yapfast", which sharing
+with a `hear` control. Up to 4 streams can be watched simultaneously in the same
+call. Each active stream runs an independent worker process, WebRTC socket,
+decoder and shared-memory frame buffer. The gateway manages concurrent op 20
+(`STREAM_WATCH`) and op 19 (`STREAM_DELETE`) sessions keyed by stream key. The
+receive loop periodically transmits compound RTCP packets containing Receiver
+Reports (type 201) and REMB (Receiver Estimated Maximum Bitrate, type 206 fmt 15)
+at 15 Mbit/s to satisfy WebRTC Google Congestion Control (GCC) estimators and
+prevent stream stalls on Discord's voice servers. Shared memory frame buffers
+support up to 2560x1440 without software downscaling, converting decoded I420
+frames directly to RGBA via SIMD. In Focus Mode (or single-stream Grid mode),
+the focused stream is featured at the top, while all other channel participants
+appear in a thumbnail strip below (members, unwatched broadcasters with a LIVE
+badge, and secondary watched streams). In multi-stream Grid Mode (2-4 streams),
+all watched streams are laid out in a balanced 16:9 grid (2 side-by-side, 3 balanced,
+4 in 2x2). Broadcaster tiles provide two actions: "Watch stream" (replaces the
+current focused stream and audio route) and an eye icon button (adds the stream
+to active viewing without replacing current streams or changing audio focus).
+Audio is dynamically routed: only the currently focused stream plays sound
+(`Control::Hear(true)`), while background streams remain visually active without
+audio (`Control::Hear(false)`). Deafen silences all streams. Each stream tile
+includes an individual close control that stops only that stream; closing the
+focused stream seamlessly re-focuses on the next active stream. Yapfast's
+workers play as "Yapfast", which sharing
 leaves out, so a stream you watch never reaches one you share. Watching a
 stream from Discord's own client works: H264 with DAVE. Discord's client shows
 Yapfast's stream at 1080p with its sound, without the call's.
