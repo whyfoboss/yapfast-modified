@@ -10482,6 +10482,7 @@ fn better_animations_workspace_horizontal_transition() {
         adapter.borrow().app.state.navigation,
         Navigation::Server("friends".into())
     );
+    assert!(!window.get_dms_selected());
 
     // Navigate to DirectMessages
     adapter
@@ -10499,12 +10500,20 @@ fn better_animations_workspace_horizontal_transition() {
         "Must be Horizontal direction (1)"
     );
     assert!(adapter.borrow().nav_transition.is_workspace_exiting());
+    assert!(
+        !window.get_dms_selected(),
+        "dms_selected must remain held (false) during exit to avoid flickering"
+    );
     let epoch = adapter.borrow().nav_transition.epoch;
 
     // Exit completes
     adapter.borrow_mut().on_nav_exit_complete(&window, epoch);
     assert_eq!(window.get_nav_motion_phase(), 2);
     assert_eq!(window.get_nav_motion_direction(), 1);
+    assert!(
+        window.get_dms_selected(),
+        "dms_selected must update to true once exit reaches opacity 0"
+    );
 
     // Enter starts
     adapter.borrow_mut().on_nav_enter_start(&window, epoch);
@@ -10516,6 +10525,66 @@ fn better_animations_workspace_horizontal_transition() {
     assert_eq!(
         adapter.borrow().app.state.navigation,
         Navigation::DirectMessages
+    );
+}
+
+#[test]
+fn better_animations_workspace_switch_dms_to_server_holds_presentation() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.global::<ClientStyle>().set_enabled(true);
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().layout.better_animations = true;
+    window.invoke_explore_preview();
+
+    // First go to DirectMessages without animation
+    adapter.borrow_mut().layout.better_animations = false;
+    adapter
+        .borrow_mut()
+        .navigate_transition(&window, Navigation::DirectMessages);
+    assert!(window.get_dms_selected());
+
+    // Re-enable Better Animations
+    adapter.borrow_mut().layout.better_animations = true;
+
+    // Navigate to Server("friends")
+    adapter
+        .borrow_mut()
+        .navigate_transition(&window, Navigation::Server("friends".into()));
+    assert_eq!(
+        adapter.borrow().app.state.navigation,
+        Navigation::Server("friends".into()),
+        "Logical navigation must be immediate at T=0"
+    );
+    assert!(adapter.borrow().nav_transition.is_workspace_exiting());
+    assert!(
+        window.get_dms_selected(),
+        "dms_selected must be held as true during exit to avoid flickering"
+    );
+    let epoch = adapter.borrow().nav_transition.epoch;
+
+    // Complete exit
+    adapter.borrow_mut().on_nav_exit_complete(&window, epoch);
+    assert_eq!(window.get_nav_motion_phase(), 2);
+    assert!(
+        !window.get_dms_selected(),
+        "dms_selected must flip to false while hidden"
+    );
+
+    // Enter completes
+    adapter.borrow_mut().on_nav_enter_start(&window, epoch);
+    adapter.borrow_mut().on_nav_enter_complete(&window, epoch);
+    assert_eq!(adapter.borrow().nav_transition.phase, NavPhase::Idle);
+    assert_eq!(
+        adapter.borrow().app.state.navigation,
+        Navigation::Server("friends".into())
     );
 }
 

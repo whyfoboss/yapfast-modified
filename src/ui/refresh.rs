@@ -449,8 +449,10 @@ impl Adapter {
         } else {
             update_model(&self.models.inbox, Vec::new());
         }
+        let exiting = self.nav_transition.is_exiting();
+        let workspace_exiting = self.nav_transition.is_workspace_exiting();
         let changes = Changes::read(self, window);
-        if changes.reset || self.navigation != self.app.state.navigation {
+        if changes.reset || (!workspace_exiting && self.navigation != self.app.state.navigation) {
             window.set_filter(SharedString::default());
         }
         if changes.reset {
@@ -459,8 +461,6 @@ impl Adapter {
             window.set_settings_open(false);
         }
         self.show_workspace(window);
-        let exiting = self.nav_transition.is_exiting();
-        let workspace_exiting = self.nav_transition.is_workspace_exiting();
         if !workspace_exiting {
             self.show_sidebar(window);
         }
@@ -476,8 +476,8 @@ impl Adapter {
             self.show_forum(window);
             self.show_new_post(window);
             self.show_new_thread(window);
+            self.show_members(window);
         }
-        self.show_members(window);
         self.show_invite(window);
         self.show_join(window);
         self.show_oauth(window);
@@ -520,7 +520,9 @@ impl Adapter {
             self.selection_version = state.selection_version;
             self.messages = state.messages.clone();
         }
-        self.navigation = state.navigation.clone();
+        if !workspace_exiting {
+            self.navigation = state.navigation.clone();
+        }
         self.reset_version = state.reset_version;
         self.forwarding = state.forwarding.is_some();
         self.show_tray();
@@ -723,7 +725,9 @@ impl Adapter {
         if !workspace {
             window.set_restore_available(yapfast_core::chat::can_restore(&self.root));
         }
-        window.set_dms_selected(state.navigation == Navigation::DirectMessages);
+        if !self.nav_transition.is_workspace_exiting() {
+            window.set_dms_selected(state.navigation == Navigation::DirectMessages);
+        }
         window.set_dms_unread(
             state
                 .rooms
