@@ -791,6 +791,14 @@ export component YapfastWindow inherits Window {
     changed role-open => {
         if root.role-open { root.role-x = root.anchor-x; root.role-y = root.anchor-y; root.role-width = root.anchor-width; }
     }
+    changed profile-open => {
+        if root.profile-open && root.profile-anchor-width == 0px && root.profile-anchor-x == 0px && root.profile-anchor-y == 0px {
+            root.profile-anchor-x = root.anchor-x;
+            root.profile-anchor-y = root.anchor-y;
+            root.profile-anchor-width = root.anchor-width;
+            root.profile-anchor-height = root.anchor-height;
+        }
+    }
     /// The member whose card is beside the list, highlighted in it.
     in property <string> profile-member;
     callback show-profile(string);
@@ -1950,6 +1958,20 @@ export component YapfastWindow inherits Window {
         root.anchor-x = x; root.anchor-y = y; root.anchor-width = width; root.anchor-height = height;
         root.anchor-pointer = pointer;
     }
+    // The mini profile card opened beside a member or message author, with where
+    // it opened. Other popups, such as the card's own "..." menu, move the main
+    // anchor without shifting the card.
+    out property <length> profile-anchor-x;
+    out property <length> profile-anchor-y;
+    out property <length> profile-anchor-width;
+    out property <length> profile-anchor-height;
+    public function anchor-profile(x: length, y: length, width: length, height: length) {
+        root.profile-anchor-x = x;
+        root.profile-anchor-y = y;
+        root.profile-anchor-width = width;
+        root.profile-anchor-height = height;
+        root.anchor(x, y, width, height, false);
+    }
     // The picker's width, which its left edge drags wider: 498px unless
     // dragged. The GIFs and the emoji share it, as they share the window: its
     // right edge stays on the control it opened from, and its height stays, as
@@ -2018,7 +2040,7 @@ export component YapfastWindow inherits Window {
     // A message author's card, beside their avatar or name, and their menu.
     function author-card(item: string, sender: string, x: length, y: length, width: length, height: length) {
         root.active-item = item;
-        root.anchor(x, y, width, height, false);
+        root.anchor-profile(x, y, width, height);
         root.profile-at-pointer = true;
         root.show-profile(sender);
     }
@@ -2036,7 +2058,7 @@ export component YapfastWindow inherits Window {
     function open-events-menu(x: length, y: length) {
         root.open-context-menu("events:" + root.header-server, false, x, y);
     }
-    function open-context-menu(id: string, person: bool, x: length, y: length) {
+    public function open-context-menu(id: string, person: bool, x: length, y: length) {
         root.header-menu = false;
         root.anchor(x, y, 0px, 0px, true);
         root.menu-target = id;
@@ -2061,7 +2083,10 @@ export component YapfastWindow inherits Window {
             room: root.width - 8px - root.anchor-x; tallest: root.height - 16px;
             room-below: root.height - 8px - context-menu.top;
             chose(id) => {
-                if root.menu-person { root.profile-at-pointer = true; }
+                if root.menu-person {
+                    root.anchor-profile(root.anchor-x, root.anchor-y, root.anchor-width, root.anchor-height);
+                    root.profile-at-pointer = true;
+                }
                 root.choose-menu(root.menu-target, root.menu-person, id);
                 context-menu.close();
             }
@@ -2405,6 +2430,7 @@ export component YapfastWindow inherits Window {
             room: root.width - 8px - root.anchor-x; tallest: root.height - 16px - voice-menu.head;
             room-below: root.height - 8px - voice-menu.top - voice-menu.head;
             chose(id) => {
+                root.anchor-profile(root.anchor-x, root.anchor-y, root.anchor-width, root.anchor-height);
                 root.profile-at-pointer = true;
                 root.choose-menu(root.menu-target, root.menu-person, id);
                 voice-menu.close();
@@ -2597,7 +2623,7 @@ export component YapfastWindow inherits Window {
                                 show-voice-person(room, id) => { root.show-voice-person(room, id); }
                                 open-voice-profile(person, x, y, width, height) => {
                                     if person.person != "" {
-                                        root.anchor(x, y, width, height, false);
+                                        root.anchor-profile(x, y, width, height);
                                         root.profile-at-pointer = true;
                                         root.show-profile(person.person);
                                     }
@@ -3880,7 +3906,7 @@ export component YapfastWindow inherits Window {
                             open-link(link) => { root.open-link(link); }
                             open-server(server, x, y, width, height) => { root.open-server-card(server, x, y, width, height); }
                             open-friend(id, x, y, width, height) => {
-                                root.anchor(x, y, width, height, false);
+                                root.anchor-profile(x, y, width, height);
                                 root.profile-at-pointer = true;
                                 root.show-friend-profile(id, false);
                             }
@@ -4331,11 +4357,18 @@ export component YapfastWindow inherits Window {
             role-name: root.role-name; role-color: root.role-color; role-has-color: root.role-has-color;
             role-members: root.role-members; role-note: root.role-note;
             open-member(id, x, y, width, height) => {
-                root.anchor(x, y, width, height, true);
+                root.anchor-profile(x, y, width, height);
                 root.profile-at-pointer = true;
                 root.show-profile(id);
             }
-            choose-member(id) => { root.profile-at-pointer = true; root.show-profile(id); }
+            choose-member(id) => {
+                root.profile-anchor-x = root.role-x;
+                root.profile-anchor-y = root.role-y;
+                root.profile-anchor-width = root.role-width;
+                root.profile-anchor-height = 0px;
+                root.profile-at-pointer = true;
+                root.show-profile(id);
+            }
         }
     }
     // A member's card, beside the member list. Escape or a click outside closes it.
@@ -4358,9 +4391,9 @@ export component YapfastWindow inherits Window {
             opacity: Popup.opacity(profile-motion.amount); transform-scale: Popup.scale(profile-motion.amount);
             width: 300px; limit: root.height - root.title-height - 16px;
             x: root.profile-at-pointer
-                ? root.beside(root.anchor-x, root.anchor-width, self.width)
+                ? root.beside(root.profile-anchor-x, root.profile-anchor-width, self.width)
                 : root.width - ClientStyle.members-width - 8px - self.width;
-            y: max(root.title-height + 8px, min(root.height - self.height - 8px, (root.profile-at-pointer ? root.anchor-y - 8px : root.profile-y - 16px))) + Popup.lift(profile-motion.amount);
+            y: max(root.title-height + 8px, min(root.height - self.height - 8px, (root.profile-at-pointer ? root.profile-anchor-y - 8px : root.profile-y - 16px))) + Popup.lift(profile-motion.amount);
             data: root.profile;
             enlarge => { root.enlarge-profile(); }
             close => { root.close-profile(); }
@@ -4369,6 +4402,12 @@ export component YapfastWindow inherits Window {
             open-link(link) => { root.open-link(link); }
             send-message(text) => { root.message-from-profile(root.profile.id, text); }
             edit-profile => { root.close-profile(); root.edit-profile(); }
+            open-server(server, x, y, width, height) => { root.open-server-card(server, x, y, width, height); }
+            open-friend(id, x, y, width, height) => {
+                root.anchor-profile(x, y, width, height);
+                root.profile-at-pointer = true;
+                root.show-friend-profile(id, false);
+            }
         }
     }
     // A full profile over the window, as the viewer shows images.

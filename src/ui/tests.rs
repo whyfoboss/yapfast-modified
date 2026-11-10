@@ -10650,3 +10650,35 @@ fn better_animations_profile_card_name_read_only_and_no_caret() {
     window.invoke_open_link("https://discord.com/users/4242".into());
     assert!(window.get_profile_open());
 }
+
+#[test]
+fn better_animations_mini_profile_anchoring_independent_of_context_menu() {
+    let window = one_message("Synthetic message");
+    window.invoke_anchor_profile(120.0, 200.0, 160.0, 32.0);
+    assert_eq!(window.get_profile_anchor_x(), 120.0);
+    assert_eq!(window.get_profile_anchor_y(), 200.0);
+    assert_eq!(window.get_profile_anchor_width(), 160.0);
+    assert_eq!(window.get_profile_anchor_height(), 32.0);
+
+    window.invoke_open_context_menu("person:42".into(), true, 380.0, 240.0);
+    assert_eq!(
+        window.get_profile_anchor_x(),
+        120.0,
+        "profile anchor x must remain unchanged when context menu opens"
+    );
+    assert_eq!(
+        window.get_profile_anchor_y(),
+        200.0,
+        "profile anchor y must remain unchanged when context menu opens"
+    );
+    assert_eq!(
+        window.get_profile_anchor_width(),
+        160.0,
+        "profile anchor width must remain unchanged when context menu opens"
+    );
+    assert_eq!(
+        window.get_profile_anchor_height(),
+        32.0,
+        "profile anchor height must remain unchanged when context menu opens"
+    );
+}
