@@ -10030,3 +10030,85 @@ fn better_animations_hover_interaction_durations_and_shift() {
     assert_eq!(popup.get_hover_enter(), 160);
     assert_eq!(popup.get_hover_exit(), 130);
 }
+
+#[test]
+fn better_animations_account_status_popup_geometry_stability() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = YapfastWindow::new().unwrap();
+    window.set_account_name("Tester".into());
+    window.set_account_user_id("12345678".into());
+    window.invoke_open_status_menu();
+
+    use i_slint_core::items::ItemRef;
+    use i_slint_core::window::{PopupWindowLocation, WindowInner};
+
+    let initial_y;
+    let initial_h;
+    {
+        let popups = WindowInner::from_pub(window.window()).active_popups();
+        assert_eq!(popups.len(), 1, "status-menu popup should be active");
+        match &popups[0].location {
+            PopupWindowLocation::ChildWindow(pt) => {
+                initial_y = pt.y;
+            }
+            _ => panic!("Expected ChildWindow"),
+        }
+        let component = i_slint_core::item_tree::ItemTreeRc::borrow_pin(&popups[0].component);
+        let root_item = component.as_ref().get_item_ref(0);
+        let w = ItemRef::downcast_pin::<i_slint_core::items::WindowItem>(root_item).unwrap();
+        initial_h = w.height().get();
+        // The bottom of the popup must align exactly at root.menu-y - 4px
+        assert_eq!(initial_y + initial_h, window.get_menu_y() - 4.0);
+    }
+
+    // Toggle expansion to true
+    window.set_account_status_expanded(true);
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(50));
+    slint::platform::update_timers_and_animations();
+
+    {
+        let popups = WindowInner::from_pub(window.window()).active_popups();
+        assert_eq!(popups.len(), 1);
+        match &popups[0].location {
+            PopupWindowLocation::ChildWindow(pt) => {
+                // Location must remain stable to avoid any off-sync repaint frames
+                assert_eq!(
+                    pt.y, initial_y,
+                    "Popup location must remain stable when expanded"
+                );
+            }
+            _ => panic!("Expected ChildWindow"),
+        }
+        let component = i_slint_core::item_tree::ItemTreeRc::borrow_pin(&popups[0].component);
+        let root_item = component.as_ref().get_item_ref(0);
+        let w = ItemRef::downcast_pin::<i_slint_core::items::WindowItem>(root_item).unwrap();
+        let expanded_h = w.height().get();
+        assert_eq!(
+            expanded_h, initial_h,
+            "PopupWindow height must remain stable"
+        );
+        assert_eq!(
+            initial_y + expanded_h,
+            window.get_menu_y() - 4.0,
+            "Popup bottom must stay at menu-y - 4px"
+        );
+    }
+
+    // Toggle expansion back to false
+    window.set_account_status_expanded(false);
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(50));
+    slint::platform::update_timers_and_animations();
+
+    {
+        let popups = WindowInner::from_pub(window.window()).active_popups();
+        assert_eq!(popups.len(), 1);
+        match &popups[0].location {
+            PopupWindowLocation::ChildWindow(pt) => {
+                assert_eq!(pt.y, initial_y);
+            }
+            _ => panic!("Expected ChildWindow"),
+        }
+    }
+}

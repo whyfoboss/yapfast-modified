@@ -1767,8 +1767,8 @@ export component YapfastWindow inherits Window {
     property <bool> shown-muted: root.voice-active ? root.muted : !root.unmute-on-join || root.deafen-on-join;
 
     // The device menus open above the toggle whose caret was clicked.
-    property <length> menu-x;
-    property <length> menu-y;
+    out property <length> menu-x;
+    out property <length> menu-y;
     function open-settings() { input-menu.close(); output-menu.close(); root.settings-section = 1; root.settings-open = true; root.refresh-devices(); }
     property <bool> input-open: input-menu.is-open;
     property <bool> output-open: output-menu.is-open;
@@ -2018,7 +2018,7 @@ export component YapfastWindow inherits Window {
     }
     // The status menu opens above the account panel, along its left edge.
     in-out property <bool> account-status-expanded;
-    function open-status-menu() {
+    public function open-status-menu() {
         root.account-status-expanded = false;
         root.menu-x = account-panel.absolute-position.x + (ClientStyle.enabled ? 0px : 8px);
         root.menu-y = account-panel.absolute-position.y;
@@ -2060,13 +2060,21 @@ export component YapfastWindow inherits Window {
     }
     status-menu := PopupWindow {
         width: ClientStyle.enabled ? 300px : 248px;
-        height: min(max(120px, root.menu-y - 12px), status-menu-content.preferred-height);
+        height: ClientStyle.enabled
+            ? min(max(120px, root.menu-y - 12px), 444px)
+            : min(max(120px, root.menu-y - 12px), status-menu-content.preferred-height);
         x: max(8px, min(root.width - self.width - 8px, root.menu-x));
-        y: max(8px, root.menu-y - min(max(120px, root.menu-y - 12px), status-menu-content.preferred-height) - 4px);
+        y: max(8px, root.menu-y - self.height - 4px);
         close-policy: PopupClosePolicy.close-on-click-outside;
         status-menu-content := VerticalLayout {
+            alignment: end;
+            if ClientStyle.enabled && !root.account-status-expanded: TouchArea {
+                vertical-stretch: 1;
+                mouse-cursor: default;
+                clicked => { status-menu.close(); }
+            }
             if ClientStyle.enabled: AccountPopover {
-                available-height: max(120px, root.menu-y - 12px);
+                available-height: min(max(120px, root.menu-y - 12px), 444px);
                 name: root.account-name; initial: root.account-initial; tint: root.account-tint; picture: root.account-picture;
                 user-id: root.account-user-id; profile: root.account-profile;
                 opened => { root.account-opened(); }
