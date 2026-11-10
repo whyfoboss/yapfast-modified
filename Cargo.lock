@@ -11512,6 +11512,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "chrono",
  "emojis",
  "futures-util",
  "harfrust",

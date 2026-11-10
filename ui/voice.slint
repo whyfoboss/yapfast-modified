@@ -667,6 +667,7 @@ component StageTile inherits Rectangle {
     callback right-clicked(length, length);
     callback stop;
     callback full-screen(bool);
+    out property <bool> has-hover: touch.has-hover;
     border-radius: root.full ? 0px : 12px; clip: true;
     accessible-role: button; accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
@@ -713,9 +714,17 @@ component TileChip inherits Rectangle {
     /// The tile's size.
     in property <length> tile-width;
     in property <length> tile-height;
+    in property <bool> hover-only: false;
+    in property <bool> hovered: false;
     x: 10px; y: root.tile-height - self.height - 10px;
     width: min(root.tile-width - 20px, chip.preferred-width); height: 26px;
     border-radius: 6px; background: #000000a6;
+    opacity: !root.hover-only ? 1.0 : (root.hovered ? 1.0 : 0.0);
+    visible: !root.hover-only || root.hovered || self.opacity > 0.01;
+    animate opacity {
+        duration: Looks.better-animations ? (root.hovered ? 120ms : 150ms) : 0ms;
+        easing: ease-out;
+    }
     chip := HorizontalLayout {
         padding-left: 8px; padding-right: 8px; spacing: 6px;
         @children
@@ -877,7 +886,12 @@ export component ParticipantGrid inherits Flickable {
             Image { height: 34px; source: @image-url("icons/screen-share.svg"); image-fit: contain; colorize: #b5b8c1; }
             Text { text: root.share-status; color: #b5b8c1; font-size: 14px; horizontal-alignment: center; wrap: word-wrap; }
         }
-        TileChip { tile-width: parent.width; tile-height: parent.height; name: "Your screen"; live: root.share-live; note: !root.share-live && root.share-frame.width > 0 ? root.share-status : ""; }
+        TileChip {
+            tile-width: parent.width; tile-height: parent.height; name: "Your screen"; live: root.share-live;
+            note: !root.share-live && root.share-frame.width > 0 ? root.share-status : "";
+            hover-only: root.share-live;
+            hovered: parent.has-hover;
+        }
     }
     for index[position] in root.stream-tiles: stream := StageTile {
         property <int> slot: position + (root.sharing ? 1 : 0);
@@ -919,6 +933,8 @@ export component ParticipantGrid inherits Flickable {
         TileChip {
             tile-width: parent.width; tile-height: parent.height; name: stream.person.name; live: true;
             name-color: stream.person.has-color ? stream.person.color : #ffffff;
+            hover-only: stream.watched;
+            hovered: stream.has-hover;
             Image { source: @image-url("icons/screen-share.svg"); width: 14px; image-fit: contain; colorize: #ffffff; }
         }
     }
@@ -981,6 +997,8 @@ export component ParticipantGrid inherits Flickable {
             name: person.name; live: person.live && (person.local || !person.video);
             name-color: person.has-color ? person.color : #ffffff;
             note: person.status != "Muted" && person.status != "Deafened" && person.status != "Speaking" && person.status != "Listening" ? person.status : "";
+            hover-only: tile.watched;
+            hovered: tile.has-hover;
             if person.muted && !person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 14px; image-fit: contain; colorize: Theme.danger; }
             if person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 14px; image-fit: contain; colorize: Theme.danger; }
         }

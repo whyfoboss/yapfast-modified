@@ -30,6 +30,7 @@ live-preview = ["desktop", "yapfast-ui/live-preview"]
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slint = { workspace = true, optional = true }

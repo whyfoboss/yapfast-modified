@@ -1695,7 +1695,10 @@ const pins = new Map<string, { message: Message; at: number }[]>([
  *  repeated for several, `min_id`, `max_id` and `pinned`. */
 function searchFilter(url: URL): (message: Message) => boolean {
   const params = url.searchParams;
-  const content = (params.get("content") ?? "").toLowerCase();
+  let content = (params.get("content") ?? "").toLowerCase();
+  if (content.startsWith('"') && content.endsWith('"') && content.length >= 2) {
+    content = content.slice(1, -1);
+  }
   const authors = params.getAll("author_id");
   const mentioned = params.getAll("mentions");
   const has = params.getAll("has");
@@ -1713,6 +1716,7 @@ function searchFilter(url: URL): (message: Message) => boolean {
       case "link": return /https?:\/\//.test(message.content);
       case "sticker": return (message.stickers?.length ?? 0) > 0;
       case "poll": return !!message.poll;
+      case "snapshot": return !!message.forward;
       default: return false;
     }
   };

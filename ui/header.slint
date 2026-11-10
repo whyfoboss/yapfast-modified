@@ -60,6 +60,21 @@ export struct PickRow {
     chosen: bool,
 }
 
+/// An item in the search filter dropdown: a category (from:, in:), a user, a channel,
+/// a content-type, or a date option.
+export struct SearchFilterItem {
+    kind: int,
+    token: string,
+    label: string,
+    detail: string,
+    avatar: image,
+    initial: string,
+    tint: color,
+    color: color,
+    has-color: bool,
+    heading: string,
+}
+
 // The conversation's search, in its header: Enter searches, and the cross,
 // or Escape, ends the search.
 export component HeaderSearch inherits Rectangle {
@@ -67,9 +82,26 @@ export component HeaderSearch inherits Rectangle {
     in property <string> placeholder;
     /// Takes the keyboard as it shows.
     in property <bool> autofocus;
+    out property <bool> has-focus: input.has-focus;
+    in-out property <bool> dropdown-open: false;
+    in-out property <int> selected-suggestion: -1;
+    in property <int> suggestion-count: 0;
+
     callback search(string);
     callback clear;
+    callback edited(string);
+    callback choose-suggestion(int);
+    callback close-dropdown;
+
+    public function focus-input() { input.focus(); }
+
     init => { if root.autofocus { input.focus(); } }
+    changed has-focus => {
+        if root.has-focus {
+            root.dropdown-open = true;
+            root.edited(root.text);
+        }
+    }
     // Discord's box: 243px with a faint outline, wider while it's used.
     width: input.has-focus || root.text != "" ? 300px : ClientStyle.enabled ? 240px : 180px;
     animate width { duration: Theme.quick; }
@@ -96,9 +128,41 @@ export component HeaderSearch inherits Rectangle {
             selection-background-color: Theme.accent.with-alpha(0.35);
             selection-foreground-color: Theme.text;
             accessible-label: root.placeholder;
-            accepted => { root.search(self.text); }
+            accepted => {
+                root.dropdown-open = false;
+                root.search(self.text);
+            }
+            edited => {
+                root.dropdown-open = true;
+                root.edited(self.text);
+            }
             key-pressed(event) => {
-                if event.text == Key.Escape && root.text != "" { root.clear(); return accept; }
+                if root.dropdown-open && root.suggestion-count > 0 {
+                    if event.text == Key.DownArrow {
+                        root.selected-suggestion = mod(root.selected-suggestion + 1, root.suggestion-count);
+                        return accept;
+                    }
+                    if event.text == Key.UpArrow {
+                        root.selected-suggestion = mod(root.selected-suggestion - 1 + root.suggestion-count, root.suggestion-count);
+                        return accept;
+                    }
+                    if event.text == Key.Return || event.text == Key.Tab {
+                        if root.selected-suggestion >= 0 && root.selected-suggestion < root.suggestion-count {
+                            root.choose-suggestion(root.selected-suggestion);
+                            return accept;
+                        }
+                    }
+                    if event.text == Key.Escape {
+                        root.dropdown-open = false;
+                        root.close-dropdown();
+                        return accept;
+                    }
+                }
+                if event.text == Key.Escape && root.text != "" {
+                    root.dropdown-open = false;
+                    root.clear();
+                    return accept;
+                }
                 return reject;
             }
             cursor-position-changed(position) => {
@@ -118,7 +182,136 @@ export component HeaderSearch inherits Rectangle {
     if root.text != "": IconButton {
         x: root.width - 26px; size: 24px; glyph: 14px; tip-side: 2;
         icon: @image-url("icons/x.svg"); label: "Clear search";
-        clicked => { root.clear(); }
+        clicked => {
+            root.dropdown-open = false;
+            root.clear();
+        }
+    }
+}
+
+// Discord-style dropdown offering search filter operators and values.
+export component SearchFilterDropdown inherits Rectangle {
+    in property <[SearchFilterItem]> items;
+    in property <int> selected-index: -1;
+    callback item-selected(int);
+
+    width: 320px;
+    height: min(340px, max(60px, content.preferred-height + 16px));
+    background: Theme.sidebar;
+    border-color: Theme.edge;
+    border-width: 1px;
+    border-radius: 8px;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: #00000080;
+    drop-shadow-offset-y: 6px;
+    clip: true;
+
+    ScrollView {
+        content := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            for item[idx] in root.items: VerticalLayout {
+                spacing: 2px;
+                if item.heading != "": Rectangle {
+                    height: 22px;
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px;
+                        Text {
+                            text: item.heading;
+                            color: Theme.muted;
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Rectangle {
+                    height: item.kind == 1 ? 38px : 32px;
+                    border-radius: 4px;
+                    background: idx == root.selected-index ? Theme.hover : row-touch.has-hover ? Theme.hover.with-alpha(0.5) : transparent;
+                    row-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.item-selected(idx);
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px; spacing: 8px;
+                        if item.kind == 1: Middle {
+                            Avatar {
+                                size: 24px;
+                                initial: item.initial;
+                                tint: item.tint;
+                                picture: item.avatar;
+                            }
+                        }
+                        if item.kind == 0: Middle {
+                            Rectangle {
+                                width: 20px; height: 20px; border-radius: 4px;
+                                background: Theme.sunken;
+                                Image {
+                                    width: 14px; height: 14px;
+                                    source: item.label == "from:" || item.label == "mentions:" ? @image-url("icons/at-sign.svg")
+                                        : item.label == "in:" ? @image-url("icons/hash.svg")
+                                        : item.label == "has:" ? @image-url("icons/file.svg")
+                                        : item.label == "pinned:" ? @image-url("icons/pin.svg")
+                                        : @image-url("icons/calendar.svg");
+                                    colorize: Theme.secondary;
+                                    image-fit: contain;
+                                }
+                            }
+                        }
+                        if item.kind == 2: Middle {
+                            Image {
+                                width: 16px; height: 16px;
+                                source: @image-url("icons/hash.svg");
+                                colorize: Theme.muted;
+                                image-fit: contain;
+                            }
+                        }
+                        if item.kind == 3: Middle {
+                            Image {
+                                width: 16px; height: 16px;
+                                source: item.label == "image" ? @image-url("icons/image.svg")
+                                    : item.label == "video" ? @image-url("icons/video.svg")
+                                    : item.label == "sound" ? @image-url("icons/soundboard.svg")
+                                    : item.label == "link" ? @image-url("icons/link.svg")
+                                    : item.label == "poll" ? @image-url("icons/chart-bar.svg")
+                                    : item.label == "sticker" ? @image-url("icons/sticker.svg")
+                                    : item.label == "forward" ? @image-url("icons/forward.svg")
+                                    : @image-url("icons/file.svg");
+                                colorize: Theme.secondary;
+                                image-fit: contain;
+                            }
+                        }
+                        if item.kind == 4: Middle {
+                            Image {
+                                width: 16px; height: 16px;
+                                source: item.token == "pinned:true " || item.token == "pinned:false " ? @image-url("icons/pin.svg") : @image-url("icons/calendar.svg");
+                                colorize: Theme.secondary;
+                                image-fit: contain;
+                            }
+                        }
+                        Text {
+                            text: item.label;
+                            color: item.has-color ? item.color : (item.kind == 0 ? Theme.accent : Theme.text);
+                            font-size: 13px;
+                            font-weight: item.kind == 0 ? 600 : 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if item.detail != "": Text {
+                            text: item.detail;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

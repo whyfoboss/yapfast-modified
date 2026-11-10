@@ -5236,6 +5236,7 @@ fn show_hits(
     twelve_hour: bool,
     role_colors: bool,
 ) {
+    let query = state.search.as_ref().map(|s| s.query.as_str());
     let kept = model
         .iter()
         .zip(hits)
@@ -5256,7 +5257,7 @@ fn show_hits(
         model.push(FoundRow {
             room: hit.room.as_str().into(),
             heading: heading.into(),
-            ..found_row_with_role_colors(&hit.message, twelve_hour, role_colors)
+            ..messages::found_row_styled(&hit.message, twelve_hour, role_colors, query)
         });
     }
 }

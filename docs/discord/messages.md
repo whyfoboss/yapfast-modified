@@ -332,7 +332,8 @@ Yapfast is back, rather than showing an error.
   in messages from 22 March 2023; Yapfast shows them in older ones too. Rules
   (`---`) and lines under a line (`===`), which Discord doesn't have, show as
   typed. Embeds' descriptions and field values, pinned messages and search
-  results show blocks too, a found message's up to 8 lines each. A reply's
+  results show blocks too, a found message's up to 8 lines each, with search
+  query terms highlighted in bold. A reply's
   quote of the message above shows it on one line.
 - Spoilers, `||like this||`, show under an opaque cover that a click lifts.
   The cover is drawn by Yapfast's patched Slint text renderer over a link to

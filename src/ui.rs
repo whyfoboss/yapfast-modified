@@ -57,6 +57,7 @@ mod placement;
 mod polls;
 mod profile;
 mod refresh;
+mod search;
 mod server_settings;
 mod shell;
 mod stickers;
@@ -1711,6 +1712,7 @@ struct Models {
     /// The answers of the poll being made.
     poll_answers: Rc<VecModel<PollAnswerDraft>>,
     search_results: Rc<VecModel<FoundRow>>,
+    search_filter_suggestions: Rc<VecModel<SearchFilterItem>>,
     history_entries: Rc<VecModel<EditHistoryRow>>,
     add_people: Rc<VecModel<PickRow>>,
     role_members: Rc<VecModel<MemberRow>>,
@@ -1792,6 +1794,7 @@ impl Models {
         window.set_reactor_rows(ModelRc::from(self.reactor_rows.clone()));
         window.set_poll_answers(ModelRc::from(self.poll_answers.clone()));
         window.set_search_results(ModelRc::from(self.search_results.clone()));
+        window.set_search_filter_suggestions(ModelRc::from(self.search_filter_suggestions.clone()));
         window.set_history_entries(ModelRc::from(self.history_entries.clone()));
         window.set_add_people(ModelRc::from(self.add_people.clone()));
         window.set_role_members(ModelRc::from(self.role_members.clone()));

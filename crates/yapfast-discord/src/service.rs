@@ -1130,6 +1130,9 @@ impl Discord {
         let snapshot = self.snapshots.borrow().clone();
         let server = snapshot.servers.iter().find(|server| server.id == guild)?;
         let channels = &server.text_channels;
+        if name.chars().all(|c| c.is_ascii_digit()) && channels.iter().any(|c| c.id == name) {
+            return Some(name.to_string());
+        }
         channels
             .iter()
             .find(|channel| channel.name == name)
@@ -1145,6 +1148,9 @@ impl Discord {
     /// server, the member Discord finds by it, as its search box asks; in
     /// DMs, someone Yapfast knows by it. One called exactly that comes first.
     async fn person_named(&self, guild: &str, name: &str) -> Result<String> {
+        if name.chars().all(|c| c.is_ascii_digit()) && name.len() >= 17 {
+            return Ok(name.to_string());
+        }
         let found = match server(guild) {
             Some(guild) => self.search_members(guild, name).await?,
             None => self.read_names().find_users(name),

@@ -1194,6 +1194,20 @@ pub(super) fn found_row_with_role_colors(
     twelve_hour: bool,
     role_colors: bool,
 ) -> FoundRow {
+    found_row_styled(message, twelve_hour, role_colors, None)
+}
+
+pub(super) fn found_row_styled(
+    message: &ChatMessage,
+    twelve_hour: bool,
+    role_colors: bool,
+    query: Option<&str>,
+) -> FoundRow {
+    let body = if let Some(q) = query {
+        super::search::highlight_search_terms(&message.body, q)
+    } else {
+        message.body.clone()
+    };
     let blocks = if message.formatted {
         body_blocks(message, None, role_colors)
     } else {
@@ -1202,14 +1216,13 @@ pub(super) fn found_row_with_role_colors(
     let styled = if blocks.is_some() {
         slint::StyledText::default()
     } else if message.formatted {
-        let linked = with_mentions(&message.body, &message.mentions, role_colors);
+        let linked = with_mentions(&body, &message.mentions, role_colors);
         styled(&emoji_text::text(&spoiler::hide(&custom_emoji::text(
             &linked,
             &message.emoji,
         ))))
     } else {
-        plain_with_links(&message.body)
-            .unwrap_or_else(|| slint::StyledText::from_plain_text(&message.body))
+        plain_with_links(&body).unwrap_or_else(|| styled_or(&body, &body))
     };
     let now = yapfast_core::clock::now_ms() / 1000;
     let time = yapfast_core::clock::sent(message.timestamp, now, twelve_hour, false);
