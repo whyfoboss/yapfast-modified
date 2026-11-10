@@ -59,13 +59,14 @@ import { PermissionRow, RoleMemberRow, RoleRow, RoleSwatch, RolesPrompt } from "
 import { BansPrompt, SafetyOption, SafetyPrompt } from "moderation.slint";
 import { ChannelSettingsPrompt, ChannelSettingsScreen, OverwriteRow, ThreeStateRow } from "channel_settings.slint";
 import { MfaChoice, MfaPrompt, MfaDialog } from "mfa.slint";
-import { FoundRow, PickRow, ThreadRow, HeaderSearch, PinsPopover, ThreadsPopover, AddPeoplePopover, SearchPanel, TopicPopover } from "header.slint";
+import { FoundRow, PickRow, ThreadRow, HeaderSearch, PinsPopover, ThreadsPopover, AddPeoplePopover, SearchPanel, TopicPopover, SearchFilterItem, SearchFilterDropdown } from "header.slint";
 import { ThreadPanel, NewThreadPanel } from "thread.slint";
 import { PostTag, PostRow, PostTagChoice, ForumPanel } from "forum.slint";
 import { BrowseRow, BrowseScreen } from "browse.slint";
 import { EditHistoryRow, EditHistoryPanel } from "history.slint";
 
 // Rust sees these, besides YapfastWindow.
+export { SearchFilterItem } from "header.slint";
 export { ClientStyle } from "yapfast/style.slint";
 export { InboxRow } from "yapfast/inbox.slint";
 export { Theme, FocusRing, Badges, Popup, Twemoji, Looks } from "theme.slint";
@@ -1182,6 +1183,12 @@ export component YapfastWindow inherits Window {
     /// and the box says so.
     in-out property <string> search-text;
     in property <string> search-placeholder;
+    in-out property <bool> search-dropdown-open: false;
+    in property <[SearchFilterItem]> search-filter-suggestions;
+    in-out property <int> search-suggestion-index: -1;
+    callback search-input-edited(string);
+    callback choose-search-suggestion(int);
+    callback close-search-dropdown;
     /// Show a search result in its room, by room id and item.
     callback jump-in-room(string, string);
     in property <bool> search-open;
@@ -1470,6 +1477,12 @@ export component YapfastWindow inherits Window {
     callback start-arranging(int) -> bool;
     callback arrange-room(int);
     callback stop-arranging;
+    /// Dragging a voice participant between voice channels:
+    in property <[bool]> voice-droppable;
+    in-out property <bool> room-dragging-voice;
+    callback start-voice-drag(string, string) -> bool;
+    callback move-voice-participant(string, string, string);
+    callback stop-voice-drag;
     // Someone's volumes, from a right click on them in a call, as percentages.
     callback volume-of(string, bool) -> int;
     /// A person, whether it's their stream, the volume, and whether it's
@@ -1625,6 +1638,7 @@ export component YapfastWindow inherits Window {
     /// search, then a reply or an edit in the channel, then in the thread
     /// beside it, then the new thread's form; whether it did anything.
     public function escape-composing() -> bool {
+        if root.room-dragging-voice { root.room-dragging-voice = false; root.stop-voice-drag(); return true; }
         if !root.workspace || root.composer-covered { return false; }
         if root.history-open { root.close-edit-history(); return true; }
         if root.search-open { root.search-text = ""; root.search(""); return true; }
@@ -1803,6 +1817,9 @@ export component YapfastWindow inherits Window {
     // The pin and add buttons open their popovers under themselves.
     property <length> popover-x;
     property <length> popover-y;
+    property <length> search-box-x;
+    property <length> search-box-y;
+    property <length> search-box-height;
     function toggle-profile-panel() {
         root.profile-panel = !root.profile-panel;
         root.profile-panel-toggled(root.profile-panel);
@@ -2632,6 +2649,11 @@ export component YapfastWindow inherits Window {
                                 start-arranging(place) => { return root.start-arranging(place); }
                                 arrange(place) => { root.arrange-room(place); }
                                 stop-arranging => { root.stop-arranging(); }
+                                voice-droppable: root.voice-droppable;
+                                dragging-voice <=> root.room-dragging-voice;
+                                start-voice-drag(room, user) => { return root.start-voice-drag(room, user); }
+                                move-voice-participant(source, user, target) => { root.move-voice-participant(source, user, target); }
+                                stop-voice-drag => { root.stop-voice-drag(); }
                                 toggle-category(category) => { root.toggle-category(category); }
                                 may-create(id) => { return root.may-create-channel(root.category-of(id)); }
                                 create-channel(id) => {
@@ -3015,11 +3037,25 @@ export component YapfastWindow inherits Window {
                             }
                         }
                         if root.can-search: Middle {
-                            HeaderSearch {
+                            header-search := HeaderSearch {
                                 text <=> root.search-text;
                                 placeholder: root.search-placeholder;
+                                dropdown-open <=> root.search-dropdown-open;
+                                selected-suggestion <=> root.search-suggestion-index;
+                                suggestion-count: root.search-filter-suggestions.length;
                                 search(text) => { root.search(text); }
-                                clear => { root.search-text = ""; root.search(""); }
+                                clear => { root.search-text = ""; root.search(""); root.search-dropdown-open = false; }
+                                edited(text) => {
+                                    root.search-box-x = self.absolute-position.x;
+                                    root.search-box-y = self.absolute-position.y;
+                                    root.search-box-height = self.height;
+                                    root.search-input-edited(text);
+                                }
+                                choose-suggestion(idx) => {
+                                    root.choose-search-suggestion(idx);
+                                    self.focus-input();
+                                }
+                                close-dropdown => { root.close-search-dropdown(); }
                             }
                         }
                         if !root.members-available && !root.profile-available && root.members != "": HorizontalLayout {
@@ -3514,6 +3550,11 @@ export component YapfastWindow inherits Window {
                                 accept(id) => { root.befriend(id); }
                                 remove(id) => { root.remove-friend-request(id); }
                                 open(id) => { root.select-room(id); }
+                                open-profile(id, x, y, width, height) => {
+                                    root.anchor-profile(x, y, width, height);
+                                    root.profile-at-pointer = true;
+                                    root.show-profile(id);
+                                }
                             }
                             if root.friends-open: FriendsScreen {
                                 width: parent.width; height: parent.height;
@@ -4316,6 +4357,25 @@ export component YapfastWindow inherits Window {
                 open(room, beside) => { root.open-listed-thread(room, beside); root.show-threads(false); }
                 more-threads => { root.more-threads(); }
                 close => { root.show-threads(false); }
+            }
+        }
+    }
+    // Search filter dropdown suggestions, anchored under the search box.
+    if root.search-dropdown-open && root.can-search && root.search-filter-suggestions.length > 0: Rectangle {
+        TouchArea {
+            clicked => {
+                root.search-dropdown-open = false;
+                root.close-search-dropdown();
+            }
+        }
+        SearchFilterDropdown {
+            x: max(8px, min(root.width - self.width - 8px, root.search-box-x));
+            y: root.search-box-y + root.search-box-height + 6px;
+            width: 320px;
+            items: root.search-filter-suggestions;
+            selected-index: root.search-suggestion-index;
+            item-selected(index) => {
+                root.choose-search-suggestion(index);
             }
         }
     }

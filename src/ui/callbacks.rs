@@ -1454,6 +1454,78 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     bind!(on_close_add_people, Action::CloseAddPeople);
     bind_item!(on_choose_person, Action::ChoosePerson);
     bind_item!(on_search, Action::Search);
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_search_input_edited(move |text| {
+            if let Some(window) = weak.upgrade() {
+                let mut adapter = adapter.borrow_mut();
+                let adapter = &mut *adapter;
+                let role_colors = adapter.layout.role_colors_everywhere;
+                let suggestions = super::search::compute_search_suggestions(
+                    &adapter.app.state,
+                    &text,
+                    &mut adapter.pictures,
+                    role_colors,
+                );
+                adapter
+                    .models
+                    .search_filter_suggestions
+                    .set_vec(suggestions);
+                if adapter.models.search_filter_suggestions.row_count() > 0 {
+                    window.set_search_suggestion_index(0);
+                } else {
+                    window.set_search_suggestion_index(-1);
+                }
+            }
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_choose_search_suggestion(move |index| {
+            if let Some(window) = weak.upgrade() {
+                let mut adapter = adapter.borrow_mut();
+                let adapter = &mut *adapter;
+                let index = index as usize;
+                let current_query = window.get_search_text();
+                let item = adapter.models.search_filter_suggestions.row_data(index);
+                if let Some(item) = item {
+                    let new_query = super::search::apply_search_suggestion(
+                        &current_query,
+                        item.kind,
+                        &item.token,
+                        &item.label,
+                    );
+                    window.set_search_text(new_query.as_str().into());
+                    let role_colors = adapter.layout.role_colors_everywhere;
+                    let next_suggestions = super::search::compute_search_suggestions(
+                        &adapter.app.state,
+                        &new_query,
+                        &mut adapter.pictures,
+                        role_colors,
+                    );
+                    adapter
+                        .models
+                        .search_filter_suggestions
+                        .set_vec(next_suggestions);
+                    if adapter.models.search_filter_suggestions.row_count() > 0 {
+                        window.set_search_suggestion_index(0);
+                    } else {
+                        window.set_search_suggestion_index(-1);
+                    }
+                    window.set_search_dropdown_open(true);
+                }
+            }
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        window.on_close_search_dropdown(move || {
+            let adapter = adapter.borrow();
+            adapter.models.search_filter_suggestions.set_vec(Vec::new());
+        });
+    }
     bind_item!(on_search_threads, Action::SearchThreads);
     bind!(on_more_threads, Action::MoreThreads);
     bind!(on_create_thread, Action::CreateThread);
@@ -2794,6 +2866,65 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         let Some(window) = weak.upgrade() else { return };
         state.borrow_mut().arranging = None;
         window.set_room_arranging(0);
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_start_voice_drag(move |source_room, user_id| {
+        let Some(window) = weak.upgrade() else {
+            return false;
+        };
+        let adapter = state.borrow();
+        let targets = adapter.app.move_targets(&source_room, &user_id);
+        if targets.is_empty() {
+            window.set_voice_droppable(slint::ModelRc::new(slint::VecModel::from(vec![])));
+            return false;
+        }
+        let target_rooms: std::collections::HashSet<String> =
+            targets.into_iter().map(|(r, _)| r).collect();
+        let rooms = window.get_rooms();
+        let droppable: Vec<bool> = (0..rooms.row_count())
+            .map(|i| {
+                rooms
+                    .row_data(i)
+                    .map(|row| target_rooms.contains(row.id.as_str()))
+                    .unwrap_or(false)
+            })
+            .collect();
+        window.set_voice_droppable(slint::ModelRc::new(slint::VecModel::from(droppable)));
+        true
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_move_voice_participant(move |source_room, user_id, target_room| {
+        let Some(window) = weak.upgrade() else { return };
+        let mut adapter = state.borrow_mut();
+        let allowed = adapter
+            .app
+            .move_targets(&source_room, &user_id)
+            .iter()
+            .any(|(room, _)| room == target_room.as_str());
+        window.set_voice_droppable(slint::ModelRc::new(slint::VecModel::from(vec![])));
+        window.set_room_dragging_voice(false);
+        if !allowed {
+            return;
+        }
+        let me = adapter.app.state.discord_user.as_deref() == Some(user_id.as_str());
+        let action = if me {
+            Action::RequestJoinVoice(target_room.to_string())
+        } else {
+            Action::ChangeMember {
+                place: source_room.to_string(),
+                user: user_id.to_string(),
+                change: yapfast_core::chat::MemberChange::Move(Some(target_room.to_string())),
+            }
+        };
+        adapter.action(&window, action);
+    });
+    let weak = window.as_weak();
+    window.on_stop_voice_drag(move || {
+        let Some(window) = weak.upgrade() else { return };
+        window.set_voice_droppable(slint::ModelRc::new(slint::VecModel::from(vec![])));
+        window.set_room_dragging_voice(false);
     });
     let state = adapter.clone();
     let weak = window.as_weak();

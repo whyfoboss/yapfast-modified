@@ -2180,7 +2180,18 @@ fn menus_list_their_choices_and_carry_them_out() {
     window.invoke_navigate_server("friends".into());
     window.invoke_select_room("general".into());
     window.invoke_prepare_menu("@sam:preview.local".into(), true);
-    assert_eq!(texts(&window), ["Profile", "Message"]);
+    assert_eq!(
+        texts(&window),
+        ["Profile", "Message", "Copy Username", "Copy Display Name"]
+    );
+    window.invoke_choose_menu("@sam:preview.local".into(), true, "copy-username".into());
+    assert_eq!(clipboard().as_deref(), Some("@sam:preview.local"));
+    window.invoke_choose_menu(
+        "@sam:preview.local".into(),
+        true,
+        "copy-display-name".into(),
+    );
+    assert_eq!(clipboard().as_deref(), Some("Sam"));
     window.invoke_choose_menu("@sam:preview.local".into(), true, "message".into());
     assert_eq!(adapter.borrow().app.state.selected.as_deref(), Some("sam"));
 }
@@ -2208,7 +2219,7 @@ fn a_server_members_menu_follows_permissions_and_ticks_roles() {
         .iter()
         .map(|row| row.text.into())
         .collect();
-    assert_eq!(texts.last().map(String::as_str), Some("Ban Dave"));
+    assert_eq!(texts.last().map(String::as_str), Some("Copy Display Name"));
     window.set_developer_mode(true);
     window.invoke_preferences_changed();
     assert!(Layout::read(directory.path()).developer_mode);
@@ -2232,6 +2243,8 @@ fn a_server_members_menu_follows_permissions_and_ticks_roles() {
             "Time out Dave",
             "Kick Dave",
             "Ban Dave",
+            "Copy Username",
+            "Copy Display Name",
             "Copy ID",
         ]
     );
@@ -2247,7 +2260,7 @@ fn a_server_members_menu_follows_permissions_and_ticks_roles() {
             "Remove friend",
             "Change nickname",
             "Time out Dave",
-            "Copy ID"
+            "Copy Username"
         ]
     );
     assert_eq!(
@@ -10750,4 +10763,493 @@ fn better_animations_mini_profile_anchoring_independent_of_context_menu() {
         32.0,
         "profile anchor height must remain unchanged when context menu opens"
     );
+}
+
+#[test]
+fn task3_profile_text_fields_and_copy_actions() {
+    let window = one_message("Synthetic message");
+    window.set_profile_available(true);
+    window.set_profile_open(true);
+    window.set_profile(ProfileData {
+        id: "12345".into(),
+        name: "Alice Wonderland".into(),
+        handle: "alice".into(),
+        pronouns: "she/her".into(),
+        created: "Jan 1, 2021".into(),
+        joined: "Feb 15, 2022".into(),
+        has_bio: true,
+        bio: slint::StyledText::from_plain_text("A curious mind\nand a tea lover."),
+        activity: "Playing Chess".into(),
+        ..Default::default()
+    });
+
+    let profile = window.get_profile();
+    assert_eq!(profile.name, "Alice Wonderland");
+    assert_eq!(profile.handle, "alice");
+    assert_eq!(profile.pronouns, "she/her");
+    assert_eq!(profile.created, "Jan 1, 2021");
+    assert_eq!(profile.joined, "Feb 15, 2022");
+    assert_eq!(profile.activity, "Playing Chess");
+    assert!(profile.has_bio);
+}
+
+#[test]
+fn task3_person_context_menu_offers_copy_username_and_display_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    adapter.borrow_mut().app.state.selected = Some("discord:channel_1".into());
+
+    // Without developer mode: Copy Username and Copy Display Name appear, Copy ID does not
+    adapter.borrow_mut().layout.developer_mode = false;
+    let (rows, _) = super::menus::menu(&adapter.borrow(), "person_1", true);
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        ids.contains(&"copy-username"),
+        "Person context menu must offer Copy Username"
+    );
+    assert!(
+        ids.contains(&"copy-display-name"),
+        "Person context menu must offer Copy Display Name"
+    );
+    assert!(
+        !ids.contains(&"copy-id"),
+        "Copy ID should be hidden when developer_mode is false"
+    );
+
+    // With developer mode: Copy Username, Copy Display Name, and Copy ID appear
+    adapter.borrow_mut().layout.developer_mode = true;
+    let (rows_dev, _) = super::menus::menu(&adapter.borrow(), "person_1", true);
+    let ids_dev: Vec<&str> = rows_dev.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids_dev.contains(&"copy-username"));
+    assert!(ids_dev.contains(&"copy-display-name"));
+    assert!(
+        ids_dev.contains(&"copy-id"),
+        "Copy ID should be visible when developer_mode is true"
+    );
+}
+
+#[test]
+fn task4_incoming_friend_request_opens_mini_profile() {
+    use yapfast_core::chat::FriendRequest;
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.friend_requests = vec![FriendRequest {
+            id: "1001".into(),
+            name: "AliceRequester".into(),
+            avatar: None,
+            incoming: true,
+            spam: false,
+        }];
+        ad.refresh(&window);
+    }
+    window.invoke_anchor_profile(320.0, 150.0, 240.0, 48.0);
+    assert_eq!(window.get_profile_anchor_x(), 320.0);
+    assert_eq!(window.get_profile_anchor_y(), 150.0);
+    assert_eq!(window.get_profile_anchor_width(), 240.0);
+
+    adapter.borrow_mut().action(
+        &window,
+        Action::ShowProfile {
+            user: "1001".into(),
+            large: false,
+        },
+    );
+
+    assert!(window.get_profile_open());
+    let profile = window.get_profile();
+    assert_eq!(profile.id, "1001");
+    assert_eq!(profile.name, "AliceRequester");
+    assert_eq!(profile.friend, 3, "Friend offer 3 = Accept Friend Request");
+}
+
+#[test]
+fn task4_outgoing_friend_request_shows_sent_status() {
+    use yapfast_core::chat::FriendRequest;
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.friend_requests = vec![FriendRequest {
+            id: "1002".into(),
+            name: "BobOutgoing".into(),
+            avatar: None,
+            incoming: false,
+            spam: false,
+        }];
+        ad.refresh(&window);
+    }
+    adapter.borrow_mut().action(
+        &window,
+        Action::ShowProfile {
+            user: "1002".into(),
+            large: false,
+        },
+    );
+
+    assert!(window.get_profile_open());
+    let profile = window.get_profile();
+    assert_eq!(profile.id, "1002");
+    assert_eq!(profile.name, "BobOutgoing");
+    assert_eq!(profile.friend, 2, "Friend offer 2 = Friend Request Sent");
+}
+
+#[test]
+fn task4_friend_request_action_buttons_do_not_open_profile() {
+    use yapfast_core::chat::FriendRequest;
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.friend_requests = vec![FriendRequest {
+            id: "1003".into(),
+            name: "Charlie".into(),
+            avatar: None,
+            incoming: true,
+            spam: false,
+        }];
+        ad.refresh(&window);
+    }
+    adapter
+        .borrow_mut()
+        .action(&window, Action::Befriend("1003".into()));
+    assert!(!window.get_profile_open());
+
+    adapter
+        .borrow_mut()
+        .action(&window, Action::RemoveFriendRequest("1003".into()));
+    assert!(!window.get_profile_open());
+}
+
+#[test]
+fn task5_search_suggestions_categories_and_operators() {
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(
+            &window,
+            Action::Navigate(Navigation::Server("discord:10".into())),
+        );
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.app.state.friends = vec![yapfast_core::chat::Friend {
+            id: "100".into(),
+            name: "Bob".into(),
+            nickname: None,
+            avatar: None,
+            presence: None,
+            activity: None,
+            activities: Default::default(),
+        }];
+    }
+    let ad = adapter.borrow();
+    let mut pictures = HashMap::new();
+
+    // 1. Empty query produces search categories including "in:" in a server
+    let categories =
+        super::search::compute_search_suggestions(&ad.app.state, "", &mut pictures, true);
+    assert!(!categories.is_empty());
+    assert_eq!(categories[0].heading, "SEARCH OPTIONS");
+    let tokens: Vec<&str> = categories.iter().map(|c| c.token.as_str()).collect();
+    assert!(tokens.contains(&"from:"));
+    assert!(tokens.contains(&"mentions:"));
+    assert!(tokens.contains(&"has:"));
+    assert!(tokens.contains(&"in:"));
+    assert!(tokens.contains(&"before:"));
+    assert!(tokens.contains(&"after:"));
+    assert!(tokens.contains(&"during:"));
+    assert!(tokens.contains(&"pinned:"));
+
+    // 2. "from:" produces member suggestions
+    let from_suggestions =
+        super::search::compute_search_suggestions(&ad.app.state, "from:", &mut pictures, true);
+    assert!(!from_suggestions.is_empty());
+    assert_eq!(from_suggestions[0].kind, 1);
+    assert_eq!(from_suggestions[0].heading, "FROM USERS");
+
+    // 3. "has:" produces content type suggestions
+    let has_suggestions =
+        super::search::compute_search_suggestions(&ad.app.state, "has:", &mut pictures, true);
+    assert!(!has_suggestions.is_empty());
+    assert_eq!(has_suggestions[0].kind, 3);
+    let has_tokens: Vec<&str> = has_suggestions.iter().map(|c| c.token.as_str()).collect();
+    assert!(has_tokens.contains(&"has:image "));
+    assert!(has_tokens.contains(&"has:file "));
+    assert!(has_tokens.contains(&"has:link "));
+    assert!(has_tokens.contains(&"has:video "));
+    assert!(has_tokens.contains(&"has:sound "));
+
+    // 4. "has:im" filters to image
+    let has_im =
+        super::search::compute_search_suggestions(&ad.app.state, "has:im", &mut pictures, true);
+    assert_eq!(has_im.len(), 1);
+    assert_eq!(has_im[0].label, "image");
+
+    // 5. "before:" produces date guidance
+    let before_sugg =
+        super::search::compute_search_suggestions(&ad.app.state, "before:", &mut pictures, true);
+    assert!(!before_sugg.is_empty());
+    assert_eq!(before_sugg[0].kind, 4);
+    assert_eq!(before_sugg[0].label, "Today");
+
+    // 6. "pinned:" produces pinned options
+    let pinned_sugg =
+        super::search::compute_search_suggestions(&ad.app.state, "pinned:", &mut pictures, true);
+    assert_eq!(pinned_sugg.len(), 2);
+    assert_eq!(pinned_sugg[0].label, "true");
+    assert_eq!(pinned_sugg[1].label, "false");
+}
+
+#[test]
+fn task5_apply_search_suggestion_combinable() {
+    // Category selection from empty query
+    let q1 = super::search::apply_search_suggestion("", 0, "from:", "from:");
+    assert_eq!(q1, "from:");
+
+    // Member selection with simple name
+    let q2 = super::search::apply_search_suggestion(&q1, 1, "from:Bob ", "Bob");
+    assert_eq!(q2, "from:Bob ");
+
+    // Category selection after space
+    let q3 = super::search::apply_search_suggestion(&q2, 0, "has:", "has:");
+    assert_eq!(q3, "from:Bob has:");
+
+    // Content type selection
+    let q4 = super::search::apply_search_suggestion(&q3, 3, "has:image ", "image");
+    assert_eq!(q4, "from:Bob has:image ");
+
+    // Member selection with space in name (should quote)
+    let q5_base = "from:car";
+    let q5 = super::search::apply_search_suggestion(q5_base, 1, "from:\"Carol M\" ", "Carol M");
+    assert_eq!(q5, "from:\"Carol M\" ");
+
+    // Channel selection
+    let q6_base = "from:Bob in:gen";
+    let q6 = super::search::apply_search_suggestion(q6_base, 2, "in:general ", "general");
+    assert_eq!(q6, "from:Bob in:general ");
+}
+
+#[test]
+fn task5_search_highlight_terms() {
+    let highlighted = super::search::highlight_search_terms(
+        "Here are the trip notes for tomorrow.",
+        "trip notes from:bob",
+    );
+    assert_eq!(highlighted, "Here are the **trip** **notes** for tomorrow.");
+
+    // Quoted exact phrase highlighting
+    let phrase_hl = super::search::highlight_search_terms(
+        "Discussing project update in the meeting.",
+        "\"project update\" in:general",
+    );
+    assert_eq!(phrase_hl, "Discussing **project update** in the meeting.");
+
+    // Should not break URLs
+    let url_text = "See https://example.com/trip for notes.";
+    let url_hl = super::search::highlight_search_terms(url_text, "trip notes");
+    assert_eq!(url_hl, "See https://example.com/trip for **notes**.");
+}
+
+#[test]
+fn task5_search_dropdown_ui_interaction() {
+    let (window, adapter, _directory) = discord_server_window();
+    adapter
+        .borrow_mut()
+        .action(&window, Action::SelectRoom("discord:10:11".into()));
+
+    // Trigger edited callback
+    window.invoke_search_input_edited("has:".into());
+    assert!(
+        adapter
+            .borrow()
+            .models
+            .search_filter_suggestions
+            .row_count()
+            > 0
+    );
+    assert_eq!(window.get_search_suggestion_index(), 0);
+
+    // Choose the first suggestion
+    window.invoke_choose_search_suggestion(0);
+    let updated_query = window.get_search_text();
+    assert!(updated_query.starts_with("has:"));
+    assert!(window.get_search_dropdown_open());
+
+    // Close dropdown
+    window.invoke_close_search_dropdown();
+    assert_eq!(
+        adapter
+            .borrow()
+            .models
+            .search_filter_suggestions
+            .row_count(),
+        0
+    );
+}
+
+#[test]
+fn task6_voice_participant_drag_droppable_targets_and_permissions() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    // Alice is Staff ("30") with MOVE_MEMBERS; Dave ("4") is in Lounge ("discord:10:12")
+    adapter.borrow_mut().app = yapfast_core::application::member_server(&["30"]);
+    adapter.borrow_mut().show_sidebar(&window);
+
+    // Start dragging Dave from Lounge
+    let started = window.invoke_start_voice_drag("discord:10:12".into(), "4".into());
+    assert!(started, "Dave should be draggable by Staff");
+
+    let rooms = window.get_rooms();
+    let droppable = window.get_voice_droppable();
+    assert_eq!(rooms.row_count(), droppable.row_count());
+
+    // Check each room's droppable flag
+    for i in 0..rooms.row_count() {
+        let room = rooms.row_data(i).unwrap();
+        let can_drop = droppable.row_data(i).unwrap();
+        match room.id.as_str() {
+            // Den is another voice channel that Dave and Alice can join -> valid target
+            "discord:10:13" => assert!(can_drop, "Den must be a droppable target"),
+            // Lounge is current channel -> not droppable
+            "discord:10:12" => assert!(!can_drop, "Current channel must not be droppable"),
+            // Vault is closed to Dave -> not droppable
+            "discord:10:14" => assert!(!can_drop, "Vault (closed) must not be droppable"),
+            // General is a text channel -> not droppable
+            "discord:10:11" => assert!(!can_drop, "Text channel must not be droppable"),
+            _ => assert!(!can_drop, "Other rooms must not be droppable"),
+        }
+    }
+
+    // Now test without MOVE_MEMBERS permission (role "20")
+    adapter.borrow_mut().app = yapfast_core::application::member_server(&["20"]);
+    adapter.borrow_mut().show_sidebar(&window);
+    let started_no_perm = window.invoke_start_voice_drag("discord:10:12".into(), "4".into());
+    assert!(
+        !started_no_perm,
+        "Dave must not be draggable without MOVE_MEMBERS"
+    );
+    assert_eq!(window.get_voice_droppable().row_count(), 0);
+}
+
+#[test]
+fn task6_voice_participant_move_valid_and_invalid_destinations() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    adapter.borrow_mut().app = yapfast_core::application::member_server(&["30"]);
+    adapter.borrow_mut().show_sidebar(&window);
+
+    // Start drag
+    assert!(window.invoke_start_voice_drag("discord:10:12".into(), "4".into()));
+
+    // Attempt dropping on invalid destination (Vault or text channel)
+    window.invoke_move_voice_participant(
+        "discord:10:12".into(),
+        "4".into(),
+        "discord:10:14".into(),
+    );
+    assert_eq!(window.get_voice_droppable().row_count(), 0);
+    assert!(!window.get_room_dragging_voice());
+
+    // Valid drop onto Den
+    assert!(window.invoke_start_voice_drag("discord:10:12".into(), "4".into()));
+    window.invoke_move_voice_participant(
+        "discord:10:12".into(),
+        "4".into(),
+        "discord:10:13".into(),
+    );
+    assert_eq!(window.get_voice_droppable().row_count(), 0);
+    assert!(!window.get_room_dragging_voice());
+}
+
+#[test]
+fn task6_voice_participant_self_move() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    adapter.borrow_mut().app = yapfast_core::application::member_server(&["30"]);
+    adapter.borrow_mut().show_sidebar(&window);
+
+    // Alice ("1") dragging herself from Lounge
+    let started = window.invoke_start_voice_drag("discord:10:12".into(), "1".into());
+    assert!(
+        started,
+        "Self-drag must be allowed if connectable voice channels exist"
+    );
+
+    let rooms = window.get_rooms();
+    let droppable = window.get_voice_droppable();
+    for i in 0..rooms.row_count() {
+        let room = rooms.row_data(i).unwrap();
+        let can_drop = droppable.row_data(i).unwrap();
+        if room.id == "discord:10:13" {
+            assert!(can_drop, "Den must be droppable for Alice");
+        } else if room.id == "discord:10:12" {
+            assert!(
+                !can_drop,
+                "Current channel Lounge must not be droppable for Alice"
+            );
+        }
+    }
+
+    // Drop onto Den
+    window.invoke_move_voice_participant(
+        "discord:10:12".into(),
+        "1".into(),
+        "discord:10:13".into(),
+    );
+    assert_eq!(window.get_voice_droppable().row_count(), 0);
+}
+
+#[test]
+fn task6_voice_drag_stop_and_cancellation() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    adapter.borrow_mut().app = yapfast_core::application::member_server(&["30"]);
+    adapter.borrow_mut().show_sidebar(&window);
+
+    assert!(window.invoke_start_voice_drag("discord:10:12".into(), "4".into()));
+    assert!(window.get_voice_droppable().row_count() > 0);
+
+    // Cancel / stop
+    window.invoke_stop_voice_drag();
+    assert_eq!(window.get_voice_droppable().row_count(), 0);
+    assert!(!window.get_room_dragging_voice());
 }

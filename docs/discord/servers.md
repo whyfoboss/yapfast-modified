@@ -91,6 +91,11 @@ of the server, with what Discord's client adds there, in its order:
   own lists those it may join, and choosing one joins it there, as Discord's
   client does. Choosing one for someone else is `PATCH
   /guilds/{id}/members/{user}` with `{"channel_id": ...}`.
+  Dragging a voice participant row past a 6px threshold also moves them:
+  a lightweight preview card with avatar and name follows the pointer, the
+  original row dims, and eligible destination voice channels highlight when
+  hovered. Releasing over an eligible channel dispatches the move, while
+  releasing elsewhere or pressing Escape cancels.
 - In red, before Time out: Server mute and Server deafen, boxes ticked from
   their voice state's `mute` and `deaf`, which need Mute Members and Deafen
   Members, and send `{"mute": ...}` or `{"deaf": ...}`; then Disconnect,

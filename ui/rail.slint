@@ -432,6 +432,9 @@ export component ChannelRow inherits Rectangle {
     in property <bool> thread;
     /// A voice channel with a chat, which a button on the row opens.
     in property <bool> chat;
+    /// Visual drop target states during voice participant dragging.
+    in property <bool> voice-drop-target: false;
+    in property <bool> voice-drop-hovered: false;
     /// It may be dragged: once the pointer has moved a few pixels with the
     /// button down, `start-drag` asks whether it may, given how far down
     /// the row it was pressed, `dragged` says where the pointer is in the
@@ -462,10 +465,11 @@ export component ChannelRow inherits Rectangle {
     animate hover-shift { duration: pointer.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
     height: root.person ? ClientStyle.dm-row-height : ClientStyle.channel-row-height;
     border-radius: 6px;
-    background: root.selected ? Theme.active : pointer.has-hover ? Theme.hover : transparent;
-    animate background { duration: 90ms; }
-    border-width: focus.has-focus ? 2px : 0px;
-    border-color: Theme.accent;
+    background: root.voice-drop-hovered ? Theme.accent.with-alpha(0.25) : root.selected ? Theme.active : pointer.has-hover ? Theme.hover : transparent;
+    animate background { duration: (Looks.better-animations ? 120ms : 90ms); }
+    border-width: root.voice-drop-hovered ? 2px : focus.has-focus ? 2px : root.voice-drop-target ? 1px : 0px;
+    border-color: root.voice-drop-hovered ? Theme.accent : focus.has-focus ? Theme.accent : root.voice-drop-target ? Theme.accent.with-alpha(0.45) : transparent;
+    animate border-color { duration: (Looks.better-animations ? 120ms : 0ms); }
     accessible-role: button;
     accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
@@ -1037,6 +1041,68 @@ export component RoomList inherits Rectangle {
     callback start-arranging(int) -> bool;
     callback arrange(int);
     callback stop-arranging;
+    /// Dragging a voice participant between voice channels:
+    in property <[bool]> voice-droppable;
+    in-out property <bool> dragging-voice: false;
+    in-out property <string> drag-voice-room: "";
+    in-out property <string> drag-voice-user: "";
+    in-out property <PersonRow> drag-voice-person;
+    property <length> drag-voice-x;
+    property <length> drag-voice-y;
+    property <length> voice-grab-x;
+    property <length> voice-grab-y;
+    property <int> voice-hovered: -1;
+    callback start-voice-drag(string, string) -> bool;
+    callback move-voice-participant(string, string, string);
+    callback stop-voice-drag;
+    function begin-voice-drag(source-room: string, person: PersonRow, pointer-x: length, pointer-y: length, grab-x: length, grab-y: length) -> bool {
+        let allowed = root.start-voice-drag(source-room, person.id);
+        if allowed {
+            root.dragging-voice = true;
+            root.drag-voice-room = source-room;
+            root.drag-voice-user = person.id;
+            root.drag-voice-person = person;
+            root.drag-voice-x = pointer-x;
+            root.drag-voice-y = pointer-y;
+            root.voice-grab-x = grab-x;
+            root.voice-grab-y = grab-y;
+            root.voice-hovered = -1;
+        }
+        return allowed;
+    }
+    function update-voice-drag(pointer-x: length, pointer-y: length) {
+        root.drag-voice-x = pointer-x;
+        root.drag-voice-y = pointer-y;
+    }
+    function finish-voice-drag() {
+        if root.dragging-voice {
+            if root.voice-hovered >= 0 && root.voice-hovered < root.rooms.length
+                && root.voice-droppable.length > root.voice-hovered && root.voice-droppable[root.voice-hovered] {
+                let target-room = root.rooms[root.voice-hovered].id;
+                root.move-voice-participant(root.drag-voice-room, root.drag-voice-user, target-room);
+            } else {
+                root.stop-voice-drag();
+            }
+        }
+        root.dragging-voice = false;
+        root.drag-voice-room = "";
+        root.drag-voice-user = "";
+        root.voice-hovered = -1;
+    }
+    public function cancel-voice-drag() {
+        if root.dragging-voice {
+            root.stop-voice-drag();
+            root.dragging-voice = false;
+            root.drag-voice-room = "";
+            root.drag-voice-user = "";
+            root.voice-hovered = -1;
+        }
+    }
+    changed voice-droppable => {
+        if self.voice-droppable.length == 0 && self.dragging-voice {
+            self.cancel-voice-drag();
+        }
+    }
     // Where the pointer is in the window while dragging, the place it's
     // over, and whether a voice channel or a category is dragged, which
     // dims the rows it can't drop among. Each step of scrolling counts,
@@ -1078,9 +1144,11 @@ export component RoomList inherits Rectangle {
     // Near the list's top or bottom, it scrolls while dragging.
     Timer {
         interval: 16ms;
-        running: root.arranging > 0 && (root.drag-y < list.absolute-position.y + 40px || root.drag-y > list.absolute-position.y + list.height - 40px);
+        running: (root.arranging > 0 && (root.drag-y < list.absolute-position.y + 40px || root.drag-y > list.absolute-position.y + list.height - 40px))
+            || (root.dragging-voice && (root.drag-voice-y < list.absolute-position.y + 40px || root.drag-voice-y > list.absolute-position.y + list.height - 40px));
         triggered => {
-            if root.drag-y < list.absolute-position.y + 40px {
+            let cur-y = root.dragging-voice ? root.drag-voice-y : root.drag-y;
+            if cur-y < list.absolute-position.y + 40px {
                 list.content-y = min(0px, list.content-y + 8px);
             } else {
                 list.content-y = max(list.visible-height - list.content-height, list.content-y - 8px);
@@ -1233,6 +1301,15 @@ export component RoomList inherits Rectangle {
                         if self.over { root.hovered = room.place; }
                         else if root.hovered == room.place { root.hovered = 0; }
                     }
+                    property <bool> voice-hover-check: root.dragging-voice && room.voice && root.scrolled >= 0
+                        && root.drag-voice-y >= self.absolute-position.y - 2px && root.drag-voice-y < self.absolute-position.y + self.height + self.people
+                        && root.drag-voice-x >= list.absolute-position.x && root.drag-voice-x < list.absolute-position.x + list.width;
+                    changed voice-hover-check => {
+                        if self.voice-hover-check { root.voice-hovered = index; }
+                        else if root.voice-hovered == index { root.voice-hovered = -1; }
+                    }
+                    voice-drop-target: root.dragging-voice && room.voice && root.voice-droppable.length > index && root.voice-droppable[index];
+                    voice-drop-hovered: root.voice-hovered == index && root.voice-droppable.length > index && root.voice-droppable[index];
                     if root.aimed(room.place): DropLine {
                         x: 8px; width: parent.width - 8px;
                         y: room.place < root.arranging ? -3px : parent.height + parent.people - 1px;
@@ -1253,7 +1330,8 @@ export component RoomList inherits Rectangle {
                         height: 30px; border-radius: 4px;
                         background: person-touch.has-hover ? Theme.hover : transparent;
                         animate background { duration: 90ms; }
-                        opacity: person.elsewhere && !person-touch.has-hover ? 0.5 : 1;
+                        opacity: (root.dragging-voice && root.drag-voice-user == person.id && root.drag-voice-room == room.id) ? 0.35 : person.elsewhere && !person-touch.has-hover ? 0.5 : 1;
+                        animate opacity { duration: (Looks.better-animations ? 120ms : 0ms); }
                         accessible-role: button;
                         accessible-label: person.elsewhere ? person.name + ", connected on another client" : person.name;
                         accessible-description: "Show their profile";
@@ -1261,13 +1339,42 @@ export component RoomList inherits Rectangle {
                             root.open-voice-profile(person, self.absolute-position.x, self.absolute-position.y, self.width, self.height);
                         }
                         person-touch := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
+                            property <length> press-x;
+                            property <length> press-y;
+                            property <bool> tracking-press;
+                            mouse-cursor: root.dragging-voice && root.drag-voice-user == person.id ? MouseCursor.grabbing : MouseCursor.pointer;
                             clicked => {
-                                root.open-voice-profile(person, parent.absolute-position.x, parent.absolute-position.y, parent.width, parent.height);
+                                if !root.dragging-voice {
+                                    root.open-voice-profile(person, parent.absolute-position.x, parent.absolute-position.y, parent.width, parent.height);
+                                }
                             }
                             pointer-event(event) => {
                                 if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                    self.tracking-press = false;
                                     root.open-voice-menu(room.id, person, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                }
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    self.press-x = self.mouse-x;
+                                    self.press-y = self.mouse-y;
+                                    self.tracking-press = true;
+                                }
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                    self.tracking-press = false;
+                                    if root.dragging-voice {
+                                        root.finish-voice-drag();
+                                    }
+                                }
+                            }
+                            moved => {
+                                if self.pressed && self.tracking-press && !root.dragging-voice {
+                                    if abs(self.mouse-x - self.press-x) > 6px || abs(self.mouse-y - self.press-y) > 6px {
+                                        if !root.begin-voice-drag(room.id, person, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, self.press-x, self.press-y) {
+                                            self.tracking-press = false;
+                                        }
+                                    }
+                                }
+                                if root.dragging-voice && root.drag-voice-user == person.id {
+                                    root.update-voice-drag(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                                 }
                             }
                             changed has-hover => {
@@ -1324,19 +1431,50 @@ export component RoomList inherits Rectangle {
                         height: 30px; border-radius: 4px;
                         background: participant-touch.has-hover ? Theme.hover : transparent;
                         animate background { duration: 90ms; }
+                        opacity: (root.dragging-voice && root.drag-voice-user == person.id && root.drag-voice-room == root.voice-channel) ? 0.35 : 1;
+                        animate opacity { duration: (Looks.better-animations ? 120ms : 0ms); }
                         accessible-role: button; accessible-label: person.name;
                         accessible-description: "Show their profile";
                         accessible-action-default => {
                             root.open-voice-profile(person, self.absolute-position.x, self.absolute-position.y, self.width, self.height);
                         }
                         participant-touch := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
+                            property <length> press-x;
+                            property <length> press-y;
+                            property <bool> tracking-press;
+                            mouse-cursor: root.dragging-voice && root.drag-voice-user == person.id ? MouseCursor.grabbing : MouseCursor.pointer;
                             clicked => {
-                                root.open-voice-profile(person, parent.absolute-position.x, parent.absolute-position.y, parent.width, parent.height);
+                                if !root.dragging-voice {
+                                    root.open-voice-profile(person, parent.absolute-position.x, parent.absolute-position.y, parent.width, parent.height);
+                                }
                             }
                             pointer-event(event) => {
                                 if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                                    self.tracking-press = false;
                                     root.open-voice-menu(root.voice-channel, person, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                }
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                    self.press-x = self.mouse-x;
+                                    self.press-y = self.mouse-y;
+                                    self.tracking-press = true;
+                                }
+                                if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                    self.tracking-press = false;
+                                    if root.dragging-voice {
+                                        root.finish-voice-drag();
+                                    }
+                                }
+                            }
+                            moved => {
+                                if self.pressed && self.tracking-press && !root.dragging-voice {
+                                    if abs(self.mouse-x - self.press-x) > 6px || abs(self.mouse-y - self.press-y) > 6px {
+                                        if !root.begin-voice-drag(root.voice-channel, person, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, self.press-x, self.press-y) {
+                                            self.tracking-press = false;
+                                        }
+                                    }
+                                }
+                                if root.dragging-voice && root.drag-voice-user == person.id {
+                                    root.update-voice-drag(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                                 }
                             }
                         }
@@ -1401,6 +1539,56 @@ export component RoomList inherits Rectangle {
             Text {
                 text: root.dragged-row.name; color: Theme.text; font-size: 16px; font-weight: 500;
                 vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+            }
+        }
+    }
+    // Tracking layer covering the room list during participant drag
+    if root.dragging-voice: TouchArea {
+        z: 90;
+        mouse-cursor: (root.voice-hovered >= 0 && root.voice-droppable.length > root.voice-hovered && root.voice-droppable[root.voice-hovered]) ? MouseCursor.grabbing : MouseCursor.not-allowed;
+        moved => {
+            root.update-voice-drag(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+        }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                root.finish-voice-drag();
+            }
+        }
+    }
+    // Lightweight drag preview following the pointer
+    if root.dragging-voice: Rectangle {
+        x: max(4px, min(root.width - self.width - 4px, root.drag-voice-x - root.absolute-position.x - root.voice-grab-x));
+        y: root.drag-voice-y - root.absolute-position.y - root.voice-grab-y;
+        width: min(220px, root.width - 16px);
+        height: 32px;
+        border-radius: 6px;
+        background: Theme.menu;
+        border-width: 1.5px;
+        border-color: Theme.accent;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #00000099;
+        z: 100;
+        opacity: 0.95;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 8px;
+            Middle {
+                Avatar {
+                    size: 22px;
+                    initial: root.drag-voice-person.initial;
+                    tint: root.drag-voice-person.tint;
+                    picture: root.drag-voice-person.picture;
+                }
+            }
+            Text {
+                text: root.drag-voice-person.name;
+                font-size: 14px;
+                font-weight: 600;
+                color: root.drag-voice-person.has-color ? root.drag-voice-person.color : Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
             }
         }
     }
