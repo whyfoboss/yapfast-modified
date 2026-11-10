@@ -151,22 +151,25 @@ export global Badges {
 }
 
 // How popups and overlays open, as Discord's modals do: the card grows subtly
-// from 95% as it fades in, and returns as it fades out when it closes.
+// from 92% as it fades in and lifts 10px, and returns as it fades out when it closes.
 export global Popup {
     /// The card fades as it grows, on the GPU. Skia Software draws a
     /// fading card into a layer as large as what changed, which is the
     /// whole window under a dimmed backdrop, so there the card only grows.
     in property <bool> fade: true;
-    out property <duration> duration-enter: 145ms;
-    out property <duration> duration-exit: 105ms;
-    out property <duration> duration: 145ms;
-    out property <duration> menu-enter: 85ms;
-    out property <duration> tooltip-enter: 80ms;
-    out property <duration> popover-enter: 110ms;
+    out property <duration> duration-enter: 200ms;
+    out property <duration> duration-exit: 135ms;
+    out property <duration> duration: 200ms;
+    out property <duration> menu-enter: 120ms;
+    out property <duration> tooltip-enter: 100ms;
+    out property <duration> popover-enter: 160ms;
+    out property <duration> hover-enter: 160ms;
+    out property <duration> hover-exit: 130ms;
     /// The card's size and opacity for how far it's open, from 0 to 1.
-    public pure function scale(amount: float) -> float { 0.95 + 0.05 * amount }
-    public pure function menu-scale(amount: float) -> float { 0.97 + 0.03 * amount }
-    public pure function popover-scale(amount: float) -> float { 0.97 + 0.03 * amount }
+    public pure function scale(amount: float) -> float { 0.92 + 0.08 * amount }
+    public pure function lift(amount: float) -> length { (1.0 - amount) * 10px }
+    public pure function menu-scale(amount: float) -> float { 0.93 + 0.07 * amount }
+    public pure function popover-scale(amount: float) -> float { 0.95 + 0.05 * amount }
     public pure function opacity(amount: float) -> float { root.fade ? amount : (amount > 0 ? 1 : 0) }
 }
 

@@ -36,7 +36,6 @@ export component AccountPopover inherits Rectangle {
     property <float> enter-amount: 0;
     animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
     opacity: 0.2 + 0.8 * self.enter-amount;
-    transform-scale: Popup.popover-scale(self.enter-amount);
     property <string> presence-label: root.status == "idle" ? "Idle" : root.status == "dnd" ? "Do Not Disturb" : root.status == "invisible" ? "Invisible" : "Online";
     background: root.themed
         ? @linear-gradient(180deg, root.profile.theme-primary.mix(#000000, 0.4) 0%, root.profile.theme-secondary.mix(#000000, 0.4) 100%)
@@ -49,7 +48,6 @@ export component AccountPopover inherits Rectangle {
     ScrollView {
         content-height: content.preferred-height;
         content := VerticalLayout {
-            y: (1.0 - root.enter-amount) * 6px;
             padding: 8px; spacing: 8px;
             Rectangle {
                 background: Theme.raised; border-radius: 8px;

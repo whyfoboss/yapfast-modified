@@ -1197,6 +1197,7 @@ export component ContextMenu inherits Rectangle {
         main-panel := Rectangle {
             opacity: 0.2 + 0.8 * root.enter-amount;
             transform-scale: Popup.menu-scale(root.enter-amount);
+            transform-origin: { x: root.flip ? root.menu-width : 0px, y: 0px };
             x: root.flip ? root.content-width - root.menu-width : 0px; y: root.lift;
             width: root.menu-width; height: root.main-height;
             background: Theme.menu; border-color: Theme.menu-line; border-width: 1px; border-radius: 8px;
@@ -1242,7 +1243,6 @@ export component ContextMenu inherits Rectangle {
             changed visible => { self.sub-enter = self.visible ? 1 : 0; }
             animate sub-enter { duration: Popup.menu-enter; easing: ease-out; }
             opacity: 0.2 + 0.8 * self.sub-enter;
-            transform-scale: Popup.menu-scale(self.sub-enter);
             x: root.flip ? root.widest - root.submenu-width : root.menu-width + 4px;
             y: root.lift + root.sub-top;
             width: root.submenu-width; height: root.sub-height;
@@ -1359,7 +1359,6 @@ export component QuickDeviceMenu inherits Rectangle {
     init => { self.enter-amount = 1; }
     animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
     opacity: 0.2 + 0.8 * self.enter-amount;
-    transform-scale: Popup.popover-scale(self.enter-amount);
     /// "Output" or "Input".
     in property <string> kind;
     in property <[string]> devices;

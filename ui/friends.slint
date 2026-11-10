@@ -173,6 +173,8 @@ export component FriendItem inherits Rectangle {
     property <bool> has-activity: root.friend.activity != "" || root.friend.activity-emoji != "";
     property <string> status: root.friend.presence == "dnd" ? "Do Not Disturb" : root.friend.presence == "idle" ? "Idle" : root.friend.presence == "online" || root.friend.presence == "mobile" ? "Online" : "Offline";
     property <brush> surface: pointer.has-hover ? Theme.hover : Theme.chat;
+    property <length> hover-shift: pointer.has-hover ? 6px : 0px;
+    animate hover-shift { duration: pointer.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
     height: 62px; border-radius: 8px;
     background: pointer.has-hover ? Theme.hover : transparent;
     accessible-role: button;
@@ -201,7 +203,10 @@ export component FriendItem inherits Rectangle {
             }
             VerticalLayout {
                 alignment: center; spacing: 1px; horizontal-stretch: 1;
-                Text { text: root.friend.name; color: Theme.text; font-size: 16px; font-weight: 700; overflow: elide; }
+                HorizontalLayout {
+                    padding-left: root.hover-shift;
+                    Text { text: root.friend.name; color: Theme.text; font-size: 16px; font-weight: 700; overflow: elide; }
+                }
                 // The voice channel they're in, as in Discord's Active Now: in
                 // full in place of "Online", or as a speaker before their status.
                 if root.in-voice && !root.has-activity: HorizontalLayout {

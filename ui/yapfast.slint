@@ -2017,7 +2017,7 @@ export component YapfastWindow inherits Window {
         }
     }
     // The status menu opens above the account panel, along its left edge.
-    property <bool> account-status-expanded;
+    in-out property <bool> account-status-expanded;
     function open-status-menu() {
         root.account-status-expanded = false;
         root.menu-x = account-panel.absolute-position.x + (ClientStyle.enabled ? 0px : 8px);
@@ -2037,6 +2037,7 @@ export component YapfastWindow inherits Window {
             animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
             opacity: 0.2 + 0.8 * self.enter-amount;
             transform-scale: Popup.popover-scale(self.enter-amount);
+            transform-origin: { x: 0px, y: self.height };
             background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
             drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
             plus-content := VerticalLayout {
@@ -4260,7 +4261,7 @@ export component YapfastWindow inherits Window {
             x: root.profile-at-pointer
                 ? root.beside(root.anchor-x, root.anchor-width, self.width)
                 : root.width - ClientStyle.members-width - 8px - self.width;
-            y: max(root.title-height + 8px, min(root.height - self.height - 8px, (root.profile-at-pointer ? root.anchor-y - 8px : root.profile-y - 16px)));
+            y: max(root.title-height + 8px, min(root.height - self.height - 8px, (root.profile-at-pointer ? root.anchor-y - 8px : root.profile-y - 16px))) + Popup.lift(profile-motion.amount);
             data: root.profile;
             enlarge => { root.enlarge-profile(); }
             close => { root.close-profile(); }
@@ -4290,7 +4291,7 @@ export component YapfastWindow inherits Window {
             opacity: Popup.opacity(large-profile-motion.amount); transform-scale: Popup.scale(large-profile-motion.amount);
             large: true;
             width: min(600px, root.width - 64px); limit: root.height - 64px;
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + Popup.lift(large-profile-motion.amount);
             data: root.profile;
             close => { root.close-profile(); }
             befriend => { root.befriend(root.profile.id); }
@@ -4319,7 +4320,7 @@ export component YapfastWindow inherits Window {
             opacity: Popup.opacity(server-card-motion.amount); transform-scale: Popup.scale(server-card-motion.amount);
             width: 300px;
             x: root.beside(root.anchor-x, root.anchor-width, self.width);
-            y: max(root.title-height + 8px, min(root.height - self.height - 8px, root.anchor-y - 8px));
+            y: max(root.title-height + 8px, min(root.height - self.height - 8px, root.anchor-y - 8px)) + Popup.lift(server-card-motion.amount);
             server: root.server-card;
             open => {
                 root.server-card-open = false;

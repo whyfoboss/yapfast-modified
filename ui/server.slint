@@ -1550,7 +1550,7 @@ export component ProfileEditorDialog inherits Rectangle {
         opacity: Popup.opacity(root.motion); transform-scale: Popup.scale(root.motion);
         width: min(600px, root.width - 48px);
         height: min(card-content.preferred-height, root.height - 48px);
-        y: max(24px, min((root.height - self.height) / 2, root.height - 24px - self.height));
+        y: max(24px, min((root.height - self.height) / 2, root.height - 24px - self.height)) + Popup.lift(root.motion);
         background: root.themed ? @linear-gradient(180deg, root.card-top, root.card-bottom) : Theme.sidebar;
         border-color: Theme.edge; border-width: 1px; border-radius: 12px;
         drop-shadow-blur: 32px; drop-shadow-color: #00000066; drop-shadow-offset-y: 12px;

@@ -9993,21 +9993,40 @@ fn better_animations_phase_a_core_motion_and_overlays() {
     i_slint_backend_testing::init_no_event_loop();
     let window = YapfastWindow::new().unwrap();
     let popup = window.global::<Popup>();
-    // Verify subtle 0.95 -> 1.0 modal scale (replacing 0.80 -> 1.0).
-    assert!((popup.invoke_scale(0.0) - 0.95).abs() < 1e-4);
+    // Verify expressive 0.92 -> 1.0 modal scale with 10px lift.
+    assert!((popup.invoke_scale(0.0) - 0.92).abs() < 1e-4);
     assert!((popup.invoke_scale(1.0) - 1.0).abs() < 1e-4);
-    assert!((popup.invoke_scale(0.5) - 0.975).abs() < 1e-4);
+    assert!((popup.invoke_lift(0.0) - 10.0).abs() < 1e-4);
+    assert!((popup.invoke_lift(1.0) - 0.0).abs() < 1e-4);
 
-    // Verify modal entry (145ms) and exit (105ms) durations.
-    assert_eq!(popup.get_duration_enter(), 145);
-    assert_eq!(popup.get_duration_exit(), 105);
+    // Verify modal entry (200ms) and exit (135ms) durations.
+    assert_eq!(popup.get_duration_enter(), 200);
+    assert_eq!(popup.get_duration_exit(), 135);
 
-    // Verify context menu, tooltip, and popover durations and scale ranges.
-    assert_eq!(popup.get_menu_enter(), 85);
-    assert_eq!(popup.get_tooltip_enter(), 80);
-    assert_eq!(popup.get_popover_enter(), 110);
-    assert!((popup.invoke_menu_scale(0.0) - 0.97).abs() < 1e-4);
+    // Verify context menu, tooltip, popover, and hover durations and scale ranges.
+    assert_eq!(popup.get_menu_enter(), 120);
+    assert_eq!(popup.get_tooltip_enter(), 100);
+    assert_eq!(popup.get_popover_enter(), 160);
+    assert_eq!(popup.get_hover_enter(), 160);
+    assert_eq!(popup.get_hover_exit(), 130);
+    assert!((popup.invoke_menu_scale(0.0) - 0.93).abs() < 1e-4);
     assert!((popup.invoke_menu_scale(1.0) - 1.0).abs() < 1e-4);
-    assert!((popup.invoke_popover_scale(0.0) - 0.97).abs() < 1e-4);
+    assert!((popup.invoke_popover_scale(0.0) - 0.95).abs() < 1e-4);
     assert!((popup.invoke_popover_scale(1.0) - 1.0).abs() < 1e-4);
+
+    // Verify status menu toggle stability without conflicting scale transforms.
+    window.set_account_status_expanded(false);
+    assert!(!window.get_account_status_expanded());
+    window.set_account_status_expanded(true);
+    assert!(window.get_account_status_expanded());
+}
+
+#[test]
+fn better_animations_hover_interaction_durations_and_shift() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = YapfastWindow::new().unwrap();
+    let popup = window.global::<Popup>();
+    // Verify hover enter (160ms) and hover exit (130ms) durations for channels and users.
+    assert_eq!(popup.get_hover_enter(), 160);
+    assert_eq!(popup.get_hover_exit(), 130);
 }
