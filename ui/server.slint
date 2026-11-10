@@ -1882,11 +1882,25 @@ export component ProfileEditorDialog inherits Rectangle {
                                     HorizontalLayout {
                                         spacing: 24px; alignment: start;
                                         if root.prompt.preview.created != "": VerticalLayout {
-                                            Text { text: root.prompt.preview.created; color: Theme.text; font-size: root.prompt.main ? 15px : 14px; font-weight: root.prompt.main ? 400 : 500; }
+                                            TextInput {
+                                                text: root.prompt.preview.created; color: Theme.text; font-size: root.prompt.main ? 15px : 14px; font-weight: root.prompt.main ? 400 : 500;
+                                                read-only: true; single-line: true;
+                                                text-cursor-width: 0px;
+                                                selection-background-color: Theme.accent.with-alpha(0.35);
+                                                selection-foreground-color: Theme.text;
+                                                accessible-label: "Discord account creation date";
+                                            }
                                             if !root.prompt.main: Text { text: "On Discord"; color: Theme.muted; font-size: 12px; }
                                         }
                                         if root.prompt.preview.joined != "": VerticalLayout {
-                                            Text { text: root.prompt.preview.joined; color: Theme.text; font-size: 14px; font-weight: 500; }
+                                            TextInput {
+                                                text: root.prompt.preview.joined; color: Theme.text; font-size: 14px; font-weight: 500;
+                                                read-only: true; single-line: true;
+                                                text-cursor-width: 0px;
+                                                selection-background-color: Theme.accent.with-alpha(0.35);
+                                                selection-foreground-color: Theme.text;
+                                                accessible-label: "Server join date";
+                                            }
                                             Text { text: "In this server"; color: Theme.muted; font-size: 12px; }
                                         }
                                     }

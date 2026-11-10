@@ -100,11 +100,23 @@ pub(super) fn menu(adapter: &Adapter, id: &str, person: bool) -> Menu {
     } else {
         app.menu_choices(id)
     };
-    // Discord's menus have an icon on Copy ID alone; a person's also take its
-    // order. A call's and a thread's keep theirs.
+    // Discord's menus have an icon on Copy ID alone, and on Copy Username / Display Name;
+    // a person's also take its order. A call's and a thread's keep theirs.
     let plain = thread.is_none() && in_voice.is_none();
-    if plain && person {
-        discord_order(&mut choices);
+    if in_voice.is_some() {
+        if let Some(pos) = choices.iter().position(|c| *c == MenuChoice::CopyId) {
+            choices.insert(pos, MenuChoice::CopyDisplayName);
+            choices.insert(pos, MenuChoice::CopyUsername);
+        } else {
+            choices.push(MenuChoice::CopyUsername);
+            choices.push(MenuChoice::CopyDisplayName);
+        }
+    } else if person {
+        choices.push(MenuChoice::CopyUsername);
+        choices.push(MenuChoice::CopyDisplayName);
+        if plain {
+            discord_order(&mut choices);
+        }
     }
     let id = match (in_voice, thread) {
         (Some((_, user)), _) => user,
@@ -181,6 +193,8 @@ pub(super) fn menu(adapter: &Adapter, id: &str, person: bool) -> Menu {
                 | MenuChoice::ShowAllChannels
                 | MenuChoice::HideMuted => 2,
                 MenuChoice::CopyLink
+                | MenuChoice::CopyUsername
+                | MenuChoice::CopyDisplayName
                 | MenuChoice::CopyId
                 | MenuChoice::JoinThread
                 | MenuChoice::LeaveThread
@@ -213,8 +227,12 @@ pub(super) fn menu(adapter: &Adapter, id: &str, person: bool) -> Menu {
                 MenuChoice::DeleteChannel | MenuChoice::LeaveServer | MenuChoice::LeaveGroup => 7,
                 _ => 0,
             };
-            // Discord's person menu has an icon on Copy ID alone.
-            if plain && choice != MenuChoice::CopyId {
+            // Discord's person menu has an icon on Copy ID alone, and on Copy Username / Display Name.
+            if plain
+                && choice != MenuChoice::CopyId
+                && choice != MenuChoice::CopyUsername
+                && choice != MenuChoice::CopyDisplayName
+            {
                 icon = &blank;
             }
             let separated = group.replace(starts).is_some_and(|last| last != starts);
@@ -381,6 +399,8 @@ fn label(icons: &Icons, choice: MenuChoice, in_call: bool) -> (&'static str, &sl
         MenuChoice::Mute => ("Mute", &icons.mute),
         MenuChoice::Unmute => ("Unmute", &icons.unmute),
         MenuChoice::CopyLink => ("Copy link", &icons.copy),
+        MenuChoice::CopyUsername => ("Copy Username", &icons.copy),
+        MenuChoice::CopyDisplayName => ("Copy Display Name", &icons.copy),
         MenuChoice::CopyId => ("Copy ID", &icons.id),
         MenuChoice::Mention => ("Mention", &icons.mention),
         MenuChoice::ServerNickname => ("Change nickname", &icons.rename),
@@ -451,8 +471,10 @@ fn discord_rank(choice: MenuChoice) -> u8 {
         MenuChoice::Block | MenuChoice::Unblock => 14,
         MenuChoice::ServerNickname => 20,
         MenuChoice::Roles => 21,
-        MenuChoice::CopyId => 100,
         MenuChoice::CopyLink => 99,
+        MenuChoice::CopyUsername => 100,
+        MenuChoice::CopyDisplayName => 101,
+        MenuChoice::CopyId => 102,
         _ => 50,
     }
 }
@@ -806,6 +828,52 @@ pub(super) fn toggle(window: &YapfastWindow, id: &str) -> Option<bool> {
         .find_map(flip)
 }
 
+fn user_handle_and_name(adapter: &Adapter, target: &str, place: Option<&str>) -> (String, String) {
+    let state = &adapter.app.state;
+    if let Some(profile_view) = &state.profile
+        && profile_view.profile.id == target
+    {
+        let handle = if profile_view.profile.handle.is_empty() {
+            profile_view.profile.id.clone()
+        } else {
+            profile_view.profile.handle.clone()
+        };
+        return (handle, profile_view.profile.name.clone());
+    }
+    #[cfg(feature = "discord")]
+    if let Some(names) = &state.discord_names {
+        let read = names.read();
+        let username = read.username(target).map(str::to_owned);
+        let name = place
+            .and_then(|guild| read.name(guild, target))
+            .or_else(|| read.user_name(target))
+            .map(str::to_owned);
+        if let (Some(u), Some(n)) = (username.clone(), name.clone()) {
+            return (u, n);
+        }
+        if let Some(u) = username {
+            return (u.clone(), name.unwrap_or(u));
+        }
+        if let Some(n) = name {
+            return (n.clone(), n);
+        }
+    }
+    if let Some(person) = state.person(target) {
+        let username = person.username.clone().unwrap_or_else(|| {
+            if target.starts_with('@') {
+                target.to_owned()
+            } else {
+                person.name.clone()
+            }
+        });
+        return (username, person.name);
+    }
+    if let Some(friend) = state.friends.iter().find(|f| f.id == target) {
+        return (friend.id.clone(), friend.name.clone());
+    }
+    (target.to_owned(), target.to_owned())
+}
+
 /// Carries out the choice a menu reports by its row's id.
 pub(super) fn choose(
     adapter: &mut Adapter,
@@ -977,6 +1045,16 @@ pub(super) fn choose(
             window.invoke_copy_text(network_id(&target).into());
             None
         }
+        MenuChoice::CopyUsername => {
+            let (username, _) = user_handle_and_name(adapter, &target, place.as_deref());
+            window.invoke_copy_text(username.into());
+            None
+        }
+        MenuChoice::CopyDisplayName => {
+            let (_, display_name) = user_handle_and_name(adapter, &target, place.as_deref());
+            window.invoke_copy_text(display_name.into());
+            None
+        }
         MenuChoice::Mention => {
             adapter.action(window, Action::MentionPerson(target));
             let end = adapter.app.state.draft().len();
@@ -1135,7 +1213,7 @@ pub(super) fn server_change(
     }
 }
 
-const CHOICES: [MenuChoice; 65] = [
+const CHOICES: [MenuChoice; 67] = [
     MenuChoice::MarkRead,
     MenuChoice::JoinVoice,
     MenuChoice::OpenChat,
@@ -1162,6 +1240,8 @@ const CHOICES: [MenuChoice; 65] = [
     MenuChoice::Unmute,
     MenuChoice::CopyLink,
     MenuChoice::CopyId,
+    MenuChoice::CopyUsername,
+    MenuChoice::CopyDisplayName,
     MenuChoice::Mention,
     MenuChoice::ServerNickname,
     MenuChoice::Roles,
@@ -1231,6 +1311,8 @@ fn choice_id(choice: MenuChoice) -> &'static str {
         MenuChoice::Unmute => "unmute",
         MenuChoice::CopyLink => "copy-link",
         MenuChoice::CopyId => "copy-id",
+        MenuChoice::CopyUsername => "copy-username",
+        MenuChoice::CopyDisplayName => "copy-display-name",
         MenuChoice::Mention => "mention",
         MenuChoice::ServerNickname => "server-nickname",
         MenuChoice::Roles => "roles",
@@ -1342,5 +1424,27 @@ mod order_tests {
         let mut choices = vec![MenuChoice::CopyId, MenuChoice::Profile];
         discord_order(&mut choices);
         assert_eq!(choices, [MenuChoice::Profile, MenuChoice::CopyId]);
+    }
+
+    #[test]
+    fn copy_options_follow_discords_order() {
+        let mut choices = vec![
+            MenuChoice::CopyId,
+            MenuChoice::CopyDisplayName,
+            MenuChoice::Profile,
+            MenuChoice::CopyUsername,
+            MenuChoice::CopyLink,
+        ];
+        discord_order(&mut choices);
+        assert_eq!(
+            choices,
+            [
+                MenuChoice::Profile,
+                MenuChoice::CopyLink,
+                MenuChoice::CopyUsername,
+                MenuChoice::CopyDisplayName,
+                MenuChoice::CopyId,
+            ]
+        );
     }
 }

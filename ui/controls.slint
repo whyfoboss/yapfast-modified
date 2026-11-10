@@ -690,6 +690,7 @@ export component StatusText inherits HorizontalLayout {
     in property <length> font-size: 13px;
     in property <int> font-weight: 400;
     in property <TextWrap> wrap: no-wrap;
+    in property <bool> selectable: false;
     /// What they're doing, as a small icon before the words: 1 a controller,
     /// 2 a music note, 3 a screen, 4 a camera, 5 a trophy; 0 for none.
     in property <int> icon;
@@ -727,9 +728,17 @@ export component StatusText inherits HorizontalLayout {
             image-fit: contain; accessible-role: none;
         }
     }
-    if root.text != "": Text {
+    if root.text != "" && !root.selectable: Text {
         text: root.text; color: root.color; font-size: root.font-size; font-weight: root.font-weight;
         wrap: root.wrap; overflow: elide; horizontal-stretch: 1;
+    }
+    if root.text != "" && root.selectable: TextInput {
+        text: root.text; color: root.color; font-size: root.font-size; font-weight: root.font-weight;
+        wrap: root.wrap; horizontal-stretch: 1;
+        read-only: true; single-line: false;
+        text-cursor-width: 0px;
+        selection-background-color: Theme.accent.with-alpha(0.35);
+        selection-foreground-color: Theme.text;
     }
 }
 

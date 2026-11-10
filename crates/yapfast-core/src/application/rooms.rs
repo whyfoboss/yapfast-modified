@@ -48,6 +48,10 @@ pub enum MenuChoice {
     CopyLink,
     /// Copy its id as its network knows it.
     CopyId,
+    /// Copy their username.
+    CopyUsername,
+    /// Copy their display name.
+    CopyDisplayName,
     // A Discord server member's; see `members.rs`.
     /// Mention them in the open channel's composer.
     Mention,

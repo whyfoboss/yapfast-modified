@@ -990,6 +990,7 @@ export component ProfileCard inherits Rectangle {
                                     width: parent.width; height: parent.height;
                                     text: root.data.activity; emoji-url: root.data.activity-emoji;
                                     color: Theme.text; font-size: 14px; wrap: word-wrap;
+                                    selectable: true;
                                 }
                             }
                         }
@@ -1016,6 +1017,7 @@ export component ProfileCard inherits Rectangle {
                                     width: parent.width; height: parent.height;
                                     text: root.data.activity; emoji-url: root.data.activity-emoji;
                                     color: Theme.text; font-size: 13px; wrap: word-wrap;
+                                    selectable: true;
                                 }
                             }
                         }
@@ -1053,20 +1055,46 @@ export component ProfileCard inherits Rectangle {
                                 selection-foreground-color: Theme.text;
                                 accessible-label: "Name";
                             }
-                            if root.data.name-style.length > 0: StyledName {
-                                text: root.data.name; styles: root.data.name-style; ink: root.data.name-has-color ? root.data.name-color : Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
-                                if !root.large && !root.preview: TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.enlarge(); } }
+                            if root.data.name-style.length > 0: Rectangle {
+                                height: styled-name.preferred-height;
+                                styled-name := StyledName {
+                                    width: 100%; height: 100%;
+                                    text: root.data.name; styles: root.data.name-style; ink: root.data.name-has-color ? root.data.name-color : Theme.text; font-size: root.large ? 26px : 20px; font-weight: 700;
+                                }
+                                TextInput {
+                                    width: 100%; height: 100%;
+                                    text: root.data.name; font-size: root.large ? 26px : 20px; font-weight: 700;
+                                    color: transparent;
+                                    read-only: true; single-line: true;
+                                    text-cursor-width: 0px;
+                                    selection-background-color: Theme.accent.with-alpha(0.35);
+                                    selection-foreground-color: Theme.text;
+                                    accessible-label: "Name";
+                                }
                             }
-                            if root.data.handle != "" || root.data.tag != "" || root.data.badges.length > 0: HorizontalLayout {
+                            if root.data.handle != "" || root.data.pronouns != "" || root.data.tag != "" || root.data.badges.length > 0: HorizontalLayout {
                                 spacing: 6px; alignment: start;
                                 if root.data.handle != "": TextInput {
-                                    text: root.data.handle + (root.data.pronouns != "" ? " \u{2022} " + root.data.pronouns : "");
+                                    text: root.data.handle;
                                     color: Theme.secondary; font-size: 14px; font-weight: 400; vertical-alignment: center;
                                     read-only: true; single-line: true;
                                     text-cursor-width: 0px;
                                     selection-background-color: Theme.accent.with-alpha(0.35);
                                     selection-foreground-color: Theme.text;
                                     accessible-label: "Username";
+                                }
+                                if root.data.handle != "" && root.data.pronouns != "": Text {
+                                    text: "\u{2022}";
+                                    color: Theme.secondary; font-size: 14px; vertical-alignment: center;
+                                }
+                                if root.data.pronouns != "": TextInput {
+                                    text: root.data.pronouns;
+                                    color: Theme.secondary; font-size: 14px; font-weight: 400; vertical-alignment: center;
+                                    read-only: true; single-line: true;
+                                    text-cursor-width: 0px;
+                                    selection-background-color: Theme.accent.with-alpha(0.35);
+                                    selection-foreground-color: Theme.text;
+                                    accessible-label: "Pronouns";
                                 }
                                 if root.data.tag != "": Middle { ServerTagChip { text: root.data.tag; badge: root.data.tag-badge; font-weight: 400; chip-height: 24px; pad: 8px; radius: 8px; fill: Theme.overlay.with-alpha(0.08); outline: Theme.overlay.with-alpha(0.03); outline-width: 1px; } }
                                 if root.data.badges.length > 0: HorizontalLayout {
@@ -1177,6 +1205,9 @@ export component ProfileCard inherits Rectangle {
                                         text: root.data.bio; default-color: Theme.text; link-color: Theme.link;
                                         default-font-size: root.full ? 14px : 13px;
                                         max-lines: root.full ? 0 : 3;
+                                        selectable: true;
+                                        selection-background-color: Theme.accent.with-alpha(0.35);
+                                        selection-foreground-color: Theme.text;
                                         link-clicked(link) => { root.open-link(link); }
                                     }
                                 }
@@ -1208,11 +1239,25 @@ export component ProfileCard inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 24px; alignment: start;
                                 if root.data.created != "": VerticalLayout {
-                                    Text { text: root.data.created; color: Theme.text; font-size: 14px; font-weight: 600; }
+                                    TextInput {
+                                        text: root.data.created; color: Theme.text; font-size: 14px; font-weight: 600;
+                                        read-only: true; single-line: true;
+                                        text-cursor-width: 0px;
+                                        selection-background-color: Theme.accent.with-alpha(0.35);
+                                        selection-foreground-color: Theme.text;
+                                        accessible-label: "Discord account creation date";
+                                    }
                                     Text { text: "On Discord"; color: Theme.muted; font-size: 12px; }
                                 }
                                 if root.data.joined != "": VerticalLayout {
-                                    Text { text: root.data.joined; color: Theme.text; font-size: 14px; font-weight: 600; }
+                                    TextInput {
+                                        text: root.data.joined; color: Theme.text; font-size: 14px; font-weight: 600;
+                                        read-only: true; single-line: true;
+                                        text-cursor-width: 0px;
+                                        selection-background-color: Theme.accent.with-alpha(0.35);
+                                        selection-foreground-color: Theme.text;
+                                        accessible-label: "Server join date";
+                                    }
                                     Text { text: "In this server"; color: Theme.muted; font-size: 12px; }
                                 }
                             }
