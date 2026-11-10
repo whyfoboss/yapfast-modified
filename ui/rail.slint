@@ -1242,7 +1242,9 @@ export component RoomList inherits Rectangle {
                 // only shows the call Yapfast is in, below.
                 if room.voice && room.id != root.voice-channel && room.people.length > 0: VerticalLayout {
                     padding-left: 32px; padding-bottom: 4px; spacing: 0px;
-                    for person in room.people: Rectangle {
+                    for person in room.people: remote-participant-row := Rectangle {
+                        property <length> hover-shift: person-touch.has-hover ? 6px : 0px;
+                        animate hover-shift { duration: person-touch.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
                         // A click opens their profile beside the row and a right
                         // click their menu, as in Discord; their LIVE tag watches
                         // their stream. This account in the call on another
@@ -1280,10 +1282,14 @@ export component RoomList inherits Rectangle {
                         HorizontalLayout {
                             spacing: 8px; padding-left: 4px; padding-right: 8px;
                             Middle { Avatar { size: 22px; initial: person.initial; tint: person.tint; picture: person.picture; } }
-                            Text {
-                                text: person.name; font-size: 15px; font-weight: 500;
-                                color: person.has-color ? person.color : Theme.secondary;
-                                vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+                            HorizontalLayout {
+                                padding-left: remote-participant-row.hover-shift;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: person.name; font-size: 15px; font-weight: 500;
+                                    color: person.has-color ? person.color : Theme.secondary;
+                                    vertical-alignment: center; overflow: elide;
+                                }
                             }
                             if person.video && !person.elsewhere: Image {
                                 source: @image-url("icons/video.svg"); width: 16px; image-fit: contain;

@@ -2059,9 +2059,10 @@ export component YapfastWindow inherits Window {
         }
     }
     status-menu := PopupWindow {
-        width: ClientStyle.enabled ? 300px : 248px; height: status-menu-content.preferred-height;
+        width: ClientStyle.enabled ? 300px : 248px;
+        height: min(max(120px, root.menu-y - 12px), status-menu-content.preferred-height);
         x: max(8px, min(root.width - self.width - 8px, root.menu-x));
-        y: max(8px, root.menu-y - self.height - 4px);
+        y: max(8px, root.menu-y - min(max(120px, root.menu-y - 12px), status-menu-content.preferred-height) - 4px);
         close-policy: PopupClosePolicy.close-on-click-outside;
         status-menu-content := VerticalLayout {
             if ClientStyle.enabled: AccountPopover {
