@@ -8,6 +8,7 @@ import { ActionButton, IconButton, Avatar, SensitivitySlider, VolumeSlider, Text
 import { DiscordLinkPanel } from "discord.slint";
 import { ChannelRow } from "rail.slint";
 import { Soundboard, SoundRow } from "voice.slint";
+import { ActivityCard, ActivityRow } from "people.slint";
 
 // Settings: a section's title, a group's heading, a switch with what it does, and
 // a row of exclusive choices with the current one raised.
@@ -370,6 +371,7 @@ export component SettingsScreen inherits Rectangle {
     callback close;
     callback edit-profile;
     callback refresh-devices;
+    callback refresh-game-activity;
     property <[SettingsRow]> with-discord: [
         { heading: true, text: "SETTINGS" },
         { text: "My account", icon: @image-url("icons/user.svg"), id: 0 },
@@ -392,6 +394,7 @@ export component SettingsScreen inherits Rectangle {
         { text: "Notifications", icon: @image-url("icons/bell.svg"), id: 3 },
         { text: "Sounds", icon: @image-url("icons/volume-2.svg"), id: 5 },
         { text: "Plugins", icon: @image-url("icons/puzzle.svg"), id: 9 },
+        { text: "Game activity", icon: @image-url("icons/play.svg"), id: 8 },
         { text: "Advanced", icon: @image-url("icons/settings.svg"), id: 6 },
     ];
     SettingsCard {
@@ -415,6 +418,7 @@ export component SettingsScreen inherits Rectangle {
             chose(id) => {
                 root.settings-section = id;
                 if id == 1 { root.refresh-devices(); }
+                if id == 8 { root.refresh-game-activity(); }
             }
             close => { root.close(); }
             @children
@@ -1386,19 +1390,43 @@ export component DiscordLinkSettings inherits VerticalLayout {
 // A detected game's local name and executable.
 export struct GameExecutable { executable: string, text: string }
 
-// Settings: detected games and Rich Presence.
+/// A detected or configured application for activity sharing.
+export struct DetectedAppRow {
+    id: string,
+    name: string,
+    executable: string,
+    running: bool,
+    enabled: bool,
+    is-primary: bool,
+    priority: int,
+}
+
+// Settings: detected games, per-app toggles, deterministic preview and Rich Presence.
 export component GameActivitySettings inherits VerticalLayout {
     /// The Discord account shares the game it plays, as its settings say.
     in property <bool> shown;
     in property <bool> linked;
+    in property <bool> preview;
     in property <[GameExecutable]> executables;
+    in property <[DetectedAppRow]> detected-apps;
+    in property <ActivityRow> preview-activity;
+    in property <bool> has-preview-activity;
+    in property <string> preview-status: "ACTIVE (LOCAL)";
+    in property <int> active-scenario: 0;
+
     callback toggled(bool);
     callback save(int, string, string) -> bool;
     callback remove(int);
+    callback toggle-app(string, bool);
+    callback set-primary-app(string);
+    callback remove-app(string);
+    callback select-scenario(int);
+
     private property <string> executable-draft;
     private property <string> text-draft;
     private property <bool> invalid-game;
     private property <int> editing-game: -1;
+
     spacing: 16px;
     SettingsTitle { text: "Game activity"; }
     SettingsSwitch {
@@ -1406,10 +1434,149 @@ export component GameActivitySettings inherits VerticalLayout {
         description: "Yapfast looks for games among the programs running, and on Linux takes the Rich Presence games send. Your Discord account keeps this setting, so it's the same in Discord's apps.";
         checked: root.shown;
         controlled: true;
-        enabled: root.linked;
-        locked-tip: "Link a Discord account first.";
+        enabled: root.linked || root.preview;
+        locked-tip: root.linked || root.preview ? "" : "Link a Discord account first.";
         toggled(shown) => { root.toggled(shown); }
     }
+
+    SettingsHeading { text: "RICH PRESENCE PREVIEW"; }
+    if !root.shown: Rectangle {
+        background: Theme.raised;
+        border-radius: 8px;
+        HorizontalLayout {
+            padding: 12px; spacing: 8px;
+            Middle {
+                Image { source: @image-url("icons/triangle-alert.svg"); width: 16px; height: 16px; colorize: Theme.secondary; }
+            }
+            Text { text: "Activity sharing is paused because 'Share the game you play' is turned off."; color: Theme.muted; font-size: 13px; vertical-alignment: center; }
+        }
+    }
+    if root.shown && root.has-preview-activity: Rectangle {
+        background: Theme.raised;
+        border-radius: 8px;
+        VerticalLayout {
+            padding: 12px; spacing: 10px;
+            HorizontalLayout {
+                spacing: 8px;
+                Middle {
+                    Rectangle {
+                        width: 8px; height: 8px; border-radius: 4px;
+                        background: root.active-scenario > 0 ? #f0b232 : #43b581;
+                    }
+                }
+                Text { text: root.preview-status; color: Theme.muted; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
+            }
+            ActivityCard {
+                activity: root.preview-activity;
+            }
+        }
+    }
+    if root.shown && !root.has-preview-activity: Rectangle {
+        background: Theme.raised;
+        border-radius: 8px;
+        HorizontalLayout {
+            padding: 12px; spacing: 8px;
+            Text { text: "No game or media activity currently active."; color: Theme.muted; font-size: 13px; }
+        }
+    }
+
+    if root.preview: VerticalLayout {
+        spacing: 8px;
+        SettingsHeading { text: "PREVIEW TEST SCENARIOS"; }
+        Label { text: "Select a deterministic scenario to preview Rich Presence states, or Live Auto for real system detection."; }
+        VerticalLayout {
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 6px;
+                ActionButton { text: "Live Auto"; small: true; primary: root.active-scenario == 0; clicked => { root.select-scenario(0); } }
+                ActionButton { text: "1: Minecraft"; small: true; primary: root.active-scenario == 1; clicked => { root.select-scenario(1); } }
+                ActionButton { text: "2: 3 Games"; small: true; primary: root.active-scenario == 2; clicked => { root.select-scenario(2); } }
+                ActionButton { text: "3: Selective"; small: true; primary: root.active-scenario == 3; clicked => { root.select-scenario(3); } }
+                ActionButton { text: "4: Disabled"; small: true; primary: root.active-scenario == 4; clicked => { root.select-scenario(4); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                ActionButton { text: "5: Music Play"; small: true; primary: root.active-scenario == 5; clicked => { root.select-scenario(5); } }
+                ActionButton { text: "6: Music Pause"; small: true; primary: root.active-scenario == 6; clicked => { root.select-scenario(6); } }
+                ActionButton { text: "7: Game + Music"; small: true; primary: root.active-scenario == 7; clicked => { root.select-scenario(7); } }
+                ActionButton { text: "8: Party 2/5"; small: true; primary: root.active-scenario == 8; clicked => { root.select-scenario(8); } }
+                ActionButton { text: "9: Missing Art"; small: true; primary: root.active-scenario == 9; clicked => { root.select-scenario(9); } }
+                ActionButton { text: "10: None"; small: true; primary: root.active-scenario == 10; clicked => { root.select-scenario(10); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+    }
+
+    SettingsHeading { text: "DETECTED APPLICATIONS"; }
+    Label { text: "Choose which games share your activity. When multiple games run, Yapfast shows your primary game or highest priority."; }
+    if root.detected-apps.length == 0: Rectangle {
+        background: Theme.raised;
+        border-radius: 6px;
+        HorizontalLayout {
+            padding: 12px;
+            Text { text: "No games currently detected. Launch a game or add a custom executable below."; color: Theme.muted; font-size: 13px; }
+        }
+    }
+    for app in root.detected-apps: Rectangle {
+        background: Theme.raised;
+        border-radius: 6px;
+        HorizontalLayout {
+            padding: 10px; spacing: 12px;
+            Middle {
+                Rectangle {
+                    width: 8px; height: 8px; border-radius: 4px;
+                    background: app.running ? #43b581 : Theme.muted;
+                }
+            }
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                alignment: center;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: app.name; color: Theme.text; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+                    if app.is-primary: Rectangle {
+                        background: #5865f2; border-radius: 3px; height: 16px;
+                        HorizontalLayout {
+                            padding-left: 5px; padding-right: 5px;
+                            Text { text: "PRIMARY"; color: #ffffff; font-size: 9px; font-weight: 700; vertical-alignment: center; }
+                        }
+                    }
+                }
+                Text { text: app.executable; color: Theme.muted; font-size: 12px; }
+            }
+            if !app.is-primary: Middle {
+                ActionButton {
+                    text: "Make Primary";
+                    small: true;
+                    ghost: true;
+                    clicked => { root.set-primary-app(app.id); }
+                }
+            }
+            Middle {
+                app-touch := TouchArea {
+                    width: 44px; height: 24px;
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-app(app.id, !app.enabled); }
+                    SettingsToggle {
+                        checked: app.enabled;
+                        enabled: true;
+                        hovered: app-touch.has-hover;
+                    }
+                }
+            }
+            Middle {
+                ActionButton {
+                    text: "Remove";
+                    small: true;
+                    danger: true;
+                    clicked => { root.remove-app(app.id); }
+                }
+            }
+        }
+    }
+
     SettingsHeading { text: "CUSTOM GAMES"; }
     Label { text: "Name a game by its executable, a file name or a full path, and what to show after Playing. These come before the games Yapfast knows, but a game's Rich Presence comes first."; }
     for game[index] in root.executables: VerticalLayout {

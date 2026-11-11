@@ -822,8 +822,39 @@ game's name, its application id and when it started go to Discord.
 Rich Presence comes first, then the custom games, Discord's list and Steam.
 A custom game is an executable and the name to show after Playing: a file
 name matches the executable in any folder, a full path only there, and
-Windows and Wine paths ignore case. Custom games are this device's, kept in
-`layout.json`, and a change rescans at once.
+Windows and Wine paths ignore case. Custom games and per-application sharing
+rules are this device's, kept in `layout.json` (`game_activity_rules`, with
+migration from legacy `game_executables`), and a change rescans at once.
+
+### Rich Presence preview and multi-game management
+
+Settings → Game activity includes an interactive Rich Presence Preview,
+using the production `ActivityCard` widget. It renders the currently selected
+activity identically to user profile cards, with elapsed timers, party sizes,
+rich metadata, and a live music progress bar.
+
+- **Per-Application Controls:** Each detected or custom game in "Detected
+  Applications" has an individual enable/disable toggle, a running status dot,
+  and a "Make Primary" button to prioritize it over other running titles.
+- **Deterministic Selection & Fallback:** When multiple games run simultaneously,
+  Yapfast deterministically selects the user's primary application if running,
+  then the highest-priority enabled game, falling back to earlier started
+  games or active media sessions (SMTC / Spotify). Disabling running games
+  smoothly transfers focus to the next permitted candidate.
+- **Preview Test Scenarios:** A toolbar provides 10 deterministic test states
+  (Minecraft, 3 Games, Selective Disable, All Disabled, Music Playing, Music
+  Paused, Game + Music, Party 2/5, Missing Art, No Activity) and a "Live Auto"
+  button for instant verification without needing third-party processes.
+- **Windows SMTC Media Sessions:** On Windows, native WinRT media session tracking
+  (`Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager`)
+  detects playing audio across compatible media players and browsers (Spotify,
+  SoundCloud, Apple Music, Edge, Chrome), subscribing to track, timeline, and
+  playback status events with zero polling overhead.
+- **Discord Account Safety:** Yapfast strictly preserves Discord account safety.
+  Rich media sessions and custom multi-app presences are displayed locally in
+  Yapfast and Fake Discord environments; outbound Gateway presence publishes
+  only recognized game activities through standard safe endpoints without
+  unsupported IPC automation or self-bot presence spoofing.
 
 Discord's list comes from
 `https://cdn.discordapp.com/detectables/games-v1.json`, about 4 MB, as

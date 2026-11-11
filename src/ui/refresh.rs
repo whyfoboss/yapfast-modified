@@ -1312,7 +1312,7 @@ impl Adapter {
             _ => false,
         };
         if !same {
-            let data = own.as_ref().map_or_else(ProfileData::default, |own| {
+            let mut data = own.as_ref().map_or_else(ProfileData::default, |own| {
                 let view = ProfileView {
                     profile: yapfast_core::chat::Profile::clone(&own.profile),
                     ..Default::default()
@@ -1324,6 +1324,14 @@ impl Adapter {
                     self.layout.role_colors_everywhere,
                 )
             });
+            #[cfg(feature = "discord")]
+            if let Some(activity) = self.activity_manager.to_discord_activity(games::now_ms()) {
+                let mut rows: Vec<ActivityRow> = data.activities.iter().collect();
+                if rows.is_empty() {
+                    rows.push(profile::activity_row(&activity));
+                    data.activities = ModelRc::new(VecModel::from(rows));
+                }
+            }
             window.set_account_profile(data);
         }
         self.account_profile_shown = own;
@@ -1382,12 +1390,19 @@ impl Adapter {
             .into(),
         );
         window.set_has_custom_status(state.custom_status.is_some());
-        window.set_show_game(state.discord_show_game);
+        if state.discord_user.is_some() {
+            window.set_show_game(state.discord_show_game);
+        } else {
+            window.set_show_game(self.activity_manager.global_sharing_enabled);
+        }
         let playing = state.discord_playing.as_ref();
         window.set_game_activity_name(playing.map_or("", |playing| &playing.name).into());
         window.set_discord_status(state.discord_presence.as_deref().unwrap_or("online").into());
         window.set_storage(state.storage.unwrap_or_default().into());
         window.set_notice(state.notice.as_deref().unwrap_or_default().into());
+        if window.get_settings_open() && window.get_settings_section() == 8 {
+            games::refresh_game_activity(self, window);
+        }
     }
 
     /// The rows of the inbox popout's open tab, from what the client already
@@ -4680,7 +4695,7 @@ impl Adapter {
 
     /// The open profile card, and the profile beside a one-to-one DM, with
     /// what's known so far.
-    fn show_profile(&mut self, window: &YapfastWindow) {
+    pub(super) fn show_profile(&mut self, window: &YapfastWindow) {
         let state = &self.app.state;
         window.set_profile_open(state.profile.is_some());
         window.set_panel_profile_shown(state.panel_profile.is_some());
@@ -4722,12 +4737,22 @@ impl Adapter {
         } else {
             view.profile.id.clone().into()
         });
-        let data = profile_data_with_role_colors(
+        let mut data = profile_data_with_role_colors(
             &mut self.pictures,
             state,
             view,
             self.layout.role_colors_everywhere,
         );
+        #[cfg(feature = "discord")]
+        if state.relation(&view.profile.id) == Relation::Me
+            && let Some(activity) = self.activity_manager.to_discord_activity(games::now_ms())
+        {
+            let mut rows: Vec<ActivityRow> = data.activities.iter().collect();
+            if rows.is_empty() {
+                rows.push(profile::activity_row(&activity));
+                data.activities = ModelRc::new(VecModel::from(rows));
+            }
+        }
         if let Some(data) = changed_profile(&window.get_profile(), data) {
             window.set_profile(data);
         }

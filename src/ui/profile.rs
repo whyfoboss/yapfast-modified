@@ -250,7 +250,7 @@ pub(super) fn activity_rows(activities: &yapfast_core::chat::Activities) -> Mode
 }
 
 #[cfg(feature = "discord")]
-fn activity_row(activity: &yapfast_core::chat::Activity) -> ActivityRow {
+pub(super) fn activity_row(activity: &yapfast_core::chat::Activity) -> ActivityRow {
     let seconds = |ms: Option<u64>| {
         ms.map_or(0, |ms| {
             i32::try_from((ms / 1000).saturating_sub(ACTIVITY_EPOCH)).unwrap_or(0)
@@ -325,7 +325,11 @@ impl Adapter {
                 .iter()
                 .any(|row| row.start > 0 || row.end > 0)
         };
-        let shown = (self.app.state.profile.is_some() && timed(window.get_profile()))
+        let preview_timed = window.get_settings_open()
+            && window.get_settings_section() == 8
+            && window.get_has_game_activity_preview();
+        let shown = preview_timed
+            || (self.app.state.profile.is_some() && timed(window.get_profile()))
             || (self.app.state.panel_profile.is_some() && timed(window.get_panel_profile()));
         if !shown {
             self.activity_clock.stop();

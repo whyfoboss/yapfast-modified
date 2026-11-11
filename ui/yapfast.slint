@@ -48,8 +48,8 @@ import { PersonRow, CallLink, CallLinkCard, LinkTouch, SignalIcon, VoiceDock, St
 import { ServerRow, RoomRow, StatusDot, ServerRail, ServerHeader, RoomList } from "rail.slint";
 import { StagedFile, StagedTile, Composer, MentionRow, MentionList, EmojiSuggestions, RequestBar } from "composer.slint";
 import { EmojiCell, EmojiRow, EmojiTile, EmojiSection, RailSection, EmojiCard, EmojiCardView, MessageStickerCard, MessageStickerCardView, MessageRow, ReactionToggle, EmojiButton, EmojiPicker, MessageMenu, MessageGallery, MessageStickers, FileCard, MessageContent, EmbedView, BotTag, NoConversation, ConversationStart, HistoryEdge, UnreadBar, PresentBar, ImageViewer, VideoViewer, VideoPlayer, Polls } from "messages.slint";
-import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable, PluginsSettings } from "settings.slint";
-import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ServerCard, RoleCard } from "people.slint";
+import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable, DetectedAppRow, PluginsSettings } from "settings.slint";
+import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ServerCard, RoleCard, ActivityRow } from "people.slint";
 import { RequestRow, FriendRow, FriendsScreen, HeaderTab, RequestsScreen, AddFriendDialog } from "friends.slint";
 import { ContactRow, PlaceRow, ReactionPill, ReactorRow, StatusDialog, NewDmDialog, ForwardDialog, QuickSwitcher, ReactionsDialog, StatusMenu, PersonPrompt, PersonDialog, LeavingDialog, PollAnswerDraft, PollDialog } from "dialogs.slint";
 import { InvitePrompt, InviteDialog, JoinPrompt, JoinDialog, EventPrompt, EventDialog, GiftPrompt, GiftDialog, OAuthPrompt, OAuthDialog, ChannelPrompt, ChannelDialog, ProfileEditorPrompt, ProfileEditorDialog } from "server.slint";
@@ -83,6 +83,7 @@ export { ContactRow, PlaceRow, ReactionPill, ReactorRow, PollAnswerDraft } from 
 export { FoundRow, PickRow } from "header.slint";
 export { EditHistoryRow } from "history.slint";
 export { GifTile, GifFavorites } from "gifs.slint";
+export { GameExecutable, DetectedAppRow } from "settings.slint";
 
 export component YapfastWindow inherits Window {
     /// "Yapfast", or "(3) Yapfast" with mentions and DMs waiting, as a browser
@@ -488,6 +489,16 @@ export component YapfastWindow inherits Window {
     callback show-game-toggled(bool);
     callback save-game-executable(int, string, string) -> bool;
     callback remove-game-executable(int);
+    in property <[DetectedAppRow]> detected-apps;
+    in property <ActivityRow> game-activity-preview;
+    in property <bool> has-game-activity-preview;
+    in property <string> game-activity-preview-status: "ACTIVE (LOCAL)";
+    in-out property <int> active-simulated-scenario: 0;
+    callback toggle-app-activity(string, bool);
+    callback set-primary-app-activity(string);
+    callback remove-app-activity(string);
+    callback select-simulated-scenario(int);
+    callback refresh-game-activity;
     in-out property <bool> hide-blocked;
     callback hide-blocked-toggled(bool);
     /// Server usernames show their highest role's colour.
@@ -4165,6 +4176,7 @@ export component YapfastWindow inherits Window {
         discord-build: root.discord-build; preview: root.preview;
         close => { root.settings-open = false; }
         refresh-devices => { root.refresh-devices(); }
+        refresh-game-activity => { root.refresh-game-activity(); }
         if root.settings-section == 0: AccountSettings {
             account-name: root.account-name; account-status: root.account-status; account-status-emoji: root.account-status-emoji;
             account-initial: root.account-initial; account-tint: root.account-tint; account-picture: root.account-picture;
@@ -4256,10 +4268,19 @@ export component YapfastWindow inherits Window {
             restart => { root.restart(); }
         }
         if root.settings-section == 8: GameActivitySettings {
-            shown: root.show-game; linked: root.discord-linked; executables: root.game-executables;
+            shown: root.show-game; linked: root.discord-linked; preview: root.preview; executables: root.game-executables;
+            detected-apps: root.detected-apps;
+            preview-activity: root.game-activity-preview;
+            has-preview-activity: root.has-game-activity-preview;
+            preview-status: root.game-activity-preview-status;
+            active-scenario: root.active-simulated-scenario;
             toggled(shown) => { root.show-game-toggled(shown); }
             save(index, executable, text) => { return root.save-game-executable(index, executable, text); }
             remove(index) => { root.remove-game-executable(index); }
+            toggle-app(id, enabled) => { root.toggle-app-activity(id, enabled); }
+            set-primary-app(id) => { root.set-primary-app-activity(id); }
+            remove-app(id) => { root.remove-app-activity(id); }
+            select-scenario(index) => { root.select-simulated-scenario(index); }
         }
         if root.settings-section == 4 && !root.discord-linked: DiscordLinkSettings {
             link-phase: root.link-phase; link-code: root.link-code; link-name: root.link-name; link-note: root.link-note;

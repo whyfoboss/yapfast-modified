@@ -13993,3 +13993,506 @@ fn task8_dont_show_typing_indicator_behavior() {
     layout.dont_show_typing = Some(false);
     assert!(!layout.dont_show_typing());
 }
+
+#[test]
+fn task9_game_activity_settings_section_and_scenarios() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    window.set_preview(true);
+    window.set_settings_open(true);
+    window.set_settings_section(8);
+    assert_eq!(window.get_settings_section(), 8);
+
+    // Initial state: scenario 0 (live auto)
+    assert_eq!(window.get_active_simulated_scenario(), 0);
+
+    // Scenario 1: Minecraft
+    window.invoke_select_simulated_scenario(1);
+    assert_eq!(window.get_active_simulated_scenario(), 1);
+    assert!(window.get_has_game_activity_preview());
+    let p = window.get_game_activity_preview();
+    assert_eq!(p.name.as_str(), "Minecraft");
+    assert_eq!(p.heading.as_str(), "PLAYING");
+    assert_eq!(p.details.as_str(), "Exploring Caves");
+    assert_eq!(p.state.as_str(), "Survival Mode");
+
+    // Scenario 2: 3 Games (VALORANT, Minecraft, Subnautica) - VALORANT highest priority
+    window.invoke_select_simulated_scenario(2);
+    assert_eq!(window.get_active_simulated_scenario(), 2);
+    assert!(window.get_has_game_activity_preview());
+    assert_eq!(window.get_game_activity_preview().name.as_str(), "VALORANT");
+
+    // Scenario 4: All Games Disabled
+    window.invoke_select_simulated_scenario(4);
+    assert_eq!(window.get_active_simulated_scenario(), 4);
+    assert!(!window.get_has_game_activity_preview());
+
+    // Scenario 5: Music Playing
+    window.invoke_select_simulated_scenario(5);
+    assert_eq!(window.get_active_simulated_scenario(), 5);
+    assert!(window.get_has_game_activity_preview());
+    let p = window.get_game_activity_preview();
+    assert_eq!(p.name.as_str(), "Starboy");
+    assert_eq!(p.heading.as_str(), "LISTENING TO SPOTIFY");
+    assert_eq!(p.details.as_str(), "by The Weeknd");
+    assert_eq!(p.state.as_str(), "on Starboy");
+    assert!(p.start > 0 && p.end > p.start);
+
+    // Scenario 6: Music Paused
+    window.invoke_select_simulated_scenario(6);
+    assert_eq!(window.get_active_simulated_scenario(), 6);
+    assert!(window.get_has_game_activity_preview());
+    let p = window.get_game_activity_preview();
+    assert_eq!(p.name.as_str(), "Blinding Lights");
+    assert_eq!(p.heading.as_str(), "LISTENING TO SPOTIFY");
+
+    // Scenario 8: Rich Presence Party (2 of 5)
+    window.invoke_select_simulated_scenario(8);
+    assert_eq!(window.get_active_simulated_scenario(), 8);
+    assert!(window.get_has_game_activity_preview());
+    let p = window.get_game_activity_preview();
+    assert_eq!(p.name.as_str(), "Rocket League");
+    assert_eq!(p.state.as_str(), "In Lobby (2 of 5)");
+
+    // Scenario 9: Missing Artwork
+    window.invoke_select_simulated_scenario(9);
+    assert_eq!(window.get_active_simulated_scenario(), 9);
+    assert!(window.get_has_game_activity_preview());
+    let p = window.get_game_activity_preview();
+    assert_eq!(p.name.as_str(), "My Indie Game");
+    assert_eq!(p.large_url.as_str(), "");
+
+    // Scenario 10: No Activity
+    window.invoke_select_simulated_scenario(10);
+    assert_eq!(window.get_active_simulated_scenario(), 10);
+    assert!(!window.get_has_game_activity_preview());
+
+    // Return to Live Auto
+    window.invoke_select_simulated_scenario(0);
+    assert_eq!(window.get_active_simulated_scenario(), 0);
+}
+
+#[test]
+fn task9_multi_game_selective_disable_and_priority_fallback() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    window.set_preview(true);
+    window.set_settings_open(true);
+    window.set_settings_section(8);
+
+    // Load 3 games scenario
+    window.invoke_select_simulated_scenario(2);
+    assert_eq!(window.get_game_activity_preview().name.as_str(), "VALORANT");
+
+    // User disables VALORANT
+    window.invoke_toggle_app_activity("valorant.exe".into(), false);
+    // Minecraft should now be selected
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Minecraft"
+    );
+
+    // User disables Minecraft
+    window.invoke_toggle_app_activity("minecraft.exe".into(), false);
+    // Subnautica should now be selected
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Subnautica"
+    );
+
+    // Re-enable VALORANT (priority 10 > priority 0) -> VALORANT becomes selected again
+    window.invoke_toggle_app_activity("valorant.exe".into(), true);
+    assert_eq!(window.get_game_activity_preview().name.as_str(), "VALORANT");
+
+    // Now set Subnautica as primary/preferred app -> Subnautica must win over VALORANT!
+    window.invoke_set_primary_app_activity("subnautica.exe".into());
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Subnautica"
+    );
+
+    // Clear primary -> VALORANT wins again
+    window.invoke_set_primary_app_activity("subnautica.exe".into());
+    assert_eq!(window.get_game_activity_preview().name.as_str(), "VALORANT");
+}
+
+#[test]
+fn task9_global_sharing_toggle_suppresses_activity() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    window.set_preview(true);
+    window.set_settings_open(true);
+    window.set_settings_section(8);
+
+    // Scenario 1: Minecraft active
+    window.invoke_select_simulated_scenario(1);
+    assert!(window.get_has_game_activity_preview());
+
+    // Turn off global sharing switch
+    window.invoke_show_game_toggled(false);
+    assert!(!window.get_has_game_activity_preview());
+
+    // Turn back on
+    window.invoke_show_game_toggled(true);
+    assert!(window.get_has_game_activity_preview());
+}
+
+#[test]
+fn task9_legacy_game_executables_migration_and_persistence() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout_path = directory.path().join("layout.json");
+
+    // Legacy layout with game_executables
+    std::fs::write(
+        &layout_path,
+        br#"{"game_executables": [["factorio.exe", "Factorio"]]}"#,
+    )
+    .unwrap();
+    let layout = Layout::read(directory.path());
+    assert_eq!(layout.game_activity_rules.len(), 1);
+    assert_eq!(layout.game_activity_rules[0].executable, "factorio.exe");
+    assert_eq!(layout.game_activity_rules[0].name, "Factorio");
+    assert!(layout.game_activity_rules[0].enabled);
+
+    // Window UI integration test for saving and removing custom games
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    // Save a new game executable
+    assert!(window.invoke_save_game_executable(-1, "doom.exe".into(), "DOOM".into()));
+    {
+        let ad = adapter.borrow();
+        assert!(
+            ad.layout
+                .game_activity_rules
+                .iter()
+                .any(|r| r.executable == "doom.exe")
+        );
+    }
+
+    // Remove game executable
+    window.invoke_remove_app_activity("doom.exe".into());
+    {
+        let ad = adapter.borrow();
+        assert!(
+            !ad.layout
+                .game_activity_rules
+                .iter()
+                .any(|r| r.executable == "doom.exe")
+        );
+    }
+}
+
+#[test]
+fn task9_own_profile_displays_active_rich_presence() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    // Set scenario 1 (Minecraft)
+    window.invoke_select_simulated_scenario(1);
+
+    // Setup Discord user "42" as own user
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.discord_user = Some("42".into());
+        let view = ProfileView {
+            profile: yapfast_core::chat::Profile {
+                id: "42".into(),
+                name: "MyUser".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ad.app.state.profile = Some(view);
+        ad.show_profile(&window);
+    }
+
+    let profile = window.get_profile();
+    assert_eq!(profile.id.as_str(), "42");
+    assert_eq!(profile.activities.row_count(), 1);
+    assert_eq!(
+        profile.activities.row_data(0).unwrap().name.as_str(),
+        "Minecraft"
+    );
+}
+
+#[test]
+fn task9_game_activity_visible_and_navigable_in_preview_mode() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    // Enter preview mode without Discord link
+    window.set_preview(true);
+    window.set_discord_linked(false);
+    adapter.borrow_mut().action(&window, Action::Preview);
+
+    // Open settings and switch to Game Activity (section 8)
+    window.set_settings_open(true);
+    window.set_settings_section(8);
+    window.invoke_refresh_game_activity();
+    assert_eq!(window.get_settings_section(), 8);
+
+    // Verify scenario selection works in preview mode
+    window.invoke_select_simulated_scenario(1);
+    assert_eq!(window.get_active_simulated_scenario(), 1);
+    assert!(window.get_has_game_activity_preview());
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Minecraft"
+    );
+
+    // Verify global sharing toggle suppresses and re-enables preview in preview mode
+    window.invoke_show_game_toggled(false);
+    assert!(!window.get_has_game_activity_preview());
+    window.invoke_show_game_toggled(true);
+    assert!(window.get_has_game_activity_preview());
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Minecraft"
+    );
+}
+
+#[test]
+fn task9_live_media_session_updates_game_activity_and_profile() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    let now = 100_000;
+
+    // Set live media track from SoundCloud
+    let track = yapfast_core::activity::MediaTrack {
+        title: "Bass Cannon".into(),
+        artist: "Excision".into(),
+        album: "X Rated".into(),
+        duration_ms: 210_000,
+        position_ms: 30_000,
+        is_playing: true,
+        thumbnail_url: None,
+        url: None,
+        source: Some("SoundCloud".into()),
+    };
+    adapter
+        .borrow_mut()
+        .activity_manager
+        .set_media_track(Some(track));
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+
+    // 1. Verify Game Activity preview
+    assert!(window.get_has_game_activity_preview());
+    let preview = window.get_game_activity_preview();
+    assert_eq!(preview.name.as_str(), "Bass Cannon");
+    assert_eq!(preview.heading.as_str(), "LISTENING TO BASS CANNON");
+    assert_eq!(preview.details.as_str(), "by Excision");
+    assert_eq!(preview.state.as_str(), "on X Rated");
+
+    // 2. Verify own profile card shows the media activity
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.discord_user = Some("user_media".into());
+        ad.app.state.discord_show_game = true;
+        let view = ProfileView {
+            profile: yapfast_core::chat::Profile {
+                id: "user_media".into(),
+                name: "MediaUser".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ad.app.state.profile = Some(view);
+        ad.show_profile(&window);
+    }
+    let profile = window.get_profile();
+    assert_eq!(profile.activities.row_count(), 1);
+    assert_eq!(
+        profile.activities.row_data(0).unwrap().name.as_str(),
+        "Bass Cannon"
+    );
+
+    // 3. Game starts -> Game takes precedence over music
+    let game = yapfast_core::activity::AppIdentity {
+        id: "factorio.exe".into(),
+        display_name: "Factorio".into(),
+        icon_url: None,
+        running: true,
+        enabled: true,
+        priority: 0,
+        started_ms: Some(now),
+        details: None,
+        state: None,
+        party: None,
+        large_image: None,
+        large_text: None,
+        small_image: None,
+        small_text: None,
+    };
+    adapter
+        .borrow_mut()
+        .activity_manager
+        .update_detected_processes(vec![game], now);
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+    assert_eq!(window.get_game_activity_preview().name.as_str(), "Factorio");
+
+    // 4. Game exits -> Music restored
+    adapter
+        .borrow_mut()
+        .activity_manager
+        .update_detected_processes(vec![], now);
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Bass Cannon"
+    );
+
+    // 5. Music paused -> suppressed in live mode
+    let mut paused = adapter
+        .borrow()
+        .activity_manager
+        .active_media
+        .clone()
+        .unwrap();
+    paused.is_playing = false;
+    adapter
+        .borrow_mut()
+        .activity_manager
+        .set_media_track(Some(paused));
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+    assert!(!window.get_has_game_activity_preview());
+}
+
+#[test]
+fn task9_discord_rpc_playing_syncs_to_detected_apps_and_priority_fallback() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    // 1. Inbound Discord RPC registers application as running
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.discord_user = Some("user_rpc".into());
+        ad.app.state.discord_show_game = true;
+        ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
+            name: "SoundCloud".into(),
+            started_ms: Some(50_000),
+        });
+        games::refresh_game_activity(&mut ad, &window);
+    }
+
+    assert!(window.get_has_game_activity_preview());
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "SoundCloud"
+    );
+
+    let apps = window.get_detected_apps();
+    assert_eq!(apps.row_count(), 1);
+    let app0 = apps.row_data(0).unwrap();
+    assert_eq!(app0.name.as_str(), "SoundCloud");
+    assert!(app0.running);
+    assert!(app0.enabled);
+
+    // 2. Toggle off via UI callback disables it
+    window.invoke_toggle_app_activity("soundcloud".into(), false);
+    assert!(!window.get_has_game_activity_preview());
+
+    let apps = window.get_detected_apps();
+    let app0 = apps.row_data(0).unwrap();
+    assert!(!app0.enabled);
+
+    // 3. Toggle back on
+    window.invoke_toggle_app_activity("soundcloud".into(), true);
+    assert!(window.get_has_game_activity_preview());
+
+    // 4. Inbound RPC switches to VS Code
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
+            name: "Visual Studio Code".into(),
+            started_ms: Some(60_000),
+        });
+        games::refresh_game_activity(&mut ad, &window);
+    }
+
+    assert_eq!(
+        window.get_game_activity_preview().name.as_str(),
+        "Visual Studio Code"
+    );
+    let apps = window.get_detected_apps();
+    assert_eq!(apps.row_count(), 2);
+
+    // 5. Inbound RPC disconnects
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.discord_playing = None;
+        games::refresh_game_activity(&mut ad, &window);
+    }
+    assert!(!window.get_has_game_activity_preview());
+    let apps = window.get_detected_apps();
+    for i in 0..apps.row_count() {
+        assert!(!apps.row_data(i).unwrap().running);
+    }
+}

@@ -1196,6 +1196,15 @@ struct Layout {
     /// Games this device names itself: an executable, by file name or full
     /// path, and the game to show for it.
     game_executables: Vec<(String, String)>,
+    /// Configured rules for game activity detection and sharing.
+    #[serde(default)]
+    pub game_activity_rules: Vec<yapfast_core::activity::GameActivityRule>,
+    /// Preferred application ID (executable name lowercased) to prioritize when multiple games run.
+    #[serde(default)]
+    pub preferred_activity_id: Option<String>,
+    /// Active simulated scenario index (1..=10) for testing / Fake Discord preview; None = live detection.
+    #[serde(default)]
+    pub active_simulated_scenario: Option<i32>,
     /// Messages from people this account blocked don't show at all.
     hide_blocked: bool,
     /// Server usernames take their highest role's colour, rather than the
@@ -1456,6 +1465,21 @@ impl Layout {
         }
         if layout.dont_show_typing.is_none() {
             layout.dont_show_typing = layout.share_typing.take().map(|shared| !shared);
+        }
+        if layout.game_activity_rules.is_empty() && !layout.game_executables.is_empty() {
+            layout.game_activity_rules = layout
+                .game_executables
+                .iter()
+                .map(
+                    |(executable, name)| yapfast_core::activity::GameActivityRule {
+                        executable: executable.clone(),
+                        name: name.clone(),
+                        enabled: true,
+                        priority: 0,
+                        custom_name: Some(name.clone()),
+                    },
+                )
+                .collect();
         }
         theme::tidy(&mut layout.custom_themes);
         layout
@@ -2005,6 +2029,7 @@ struct Adapter {
     runtime: Arc<BackgroundRuntime>,
     root: PathBuf,
     layout: Layout,
+    pub activity_manager: yapfast_core::activity::ActivityManager,
     /// The rows of the emoji picker's grid that may hold pictures it drew, first
     /// and last: see `fill_shown_glyphs`.
     emoji_rows_filled: (usize, usize),
@@ -2377,6 +2402,20 @@ impl Adapter {
         app.dispatch(Action::HideNameplates(!layout.nameplates.unwrap_or(true)));
         app.dispatch(Action::SetPinned(layout.pinned.clone()));
         let notifier = crate::notify::Notifier::start(open_from_notification, &root);
+        let mut activity_manager = yapfast_core::activity::ActivityManager::new();
+        for rule in &layout.game_activity_rules {
+            activity_manager.set_rule(
+                &rule.executable,
+                rule.enabled,
+                rule.priority,
+                rule.custom_name.clone(),
+            );
+        }
+        activity_manager.set_preferred_app(layout.preferred_activity_id.clone());
+        if let Some(idx) = layout.active_simulated_scenario {
+            activity_manager
+                .set_simulated_scenario(yapfast_core::activity::SimulatedScenario::from_index(idx));
+        }
         Ok(Rc::new_cyclic(|weak| {
             RefCell::new(Self {
                 events: None,
@@ -2384,6 +2423,7 @@ impl Adapter {
                 runtime,
                 root,
                 layout,
+                activity_manager,
                 emoji_rows_filled: (0, 0),
                 emoji_grid: Default::default(),
                 app,
