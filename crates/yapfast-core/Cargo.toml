@@ -101,6 +101,9 @@ libpulse-simple-binding = { version = "2", default-features = false }
 # Yapfast's own sound goes through WASAPI. Slint's wgpu already builds this
 # version of the crate for Windows.
 windows = { version = "0.62", features = [
+    "Foundation",
+    "Media_Control",
+    "Storage_Streams",
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",

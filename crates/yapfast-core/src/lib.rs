@@ -11,6 +11,7 @@ use anyhow::Context;
 #[cfg(feature = "discord")]
 pub use yapfast_discord;
 
+pub mod activity;
 pub mod application;
 mod audio_io;
 pub mod backend;

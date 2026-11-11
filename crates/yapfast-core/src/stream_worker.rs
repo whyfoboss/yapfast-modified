@@ -1130,9 +1130,15 @@ impl Capture {
             CaptureError, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
         };
         let portal = portal_picks();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let kind = match source {
             // The system's screen sharing dialog picks a screen or window.
             _ if portal => DesktopCaptureSourceType::Generic,
+            Source::Window(_) => DesktopCaptureSourceType::Window,
+            _ => DesktopCaptureSourceType::Screen,
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let kind = match source {
             Source::Window(_) => DesktopCaptureSourceType::Window,
             _ => DesktopCaptureSourceType::Screen,
         };
