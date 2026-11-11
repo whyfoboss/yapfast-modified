@@ -1279,7 +1279,14 @@ struct Layout {
     /// Those whose soundboard sounds this account doesn't hear, from the
     /// same menu.
     soundboard_muted_people: std::collections::BTreeSet<String>,
-    /// Others see when this account is typing; on unless turned off.
+    /// Whether the server rail shows the compact "read all" button.
+    #[serde(default)]
+    read_all_notifications_button: bool,
+    /// Others do not see when this account is typing.
+    #[serde(default)]
+    dont_show_typing: Option<bool>,
+    /// Old typing setting; kept for migration when reading old layouts, not serialized.
+    #[serde(default, skip_serializing)]
     share_typing: Option<bool>,
     /// Desktop notifications, and whether they say what messages say; on unless
     /// turned off.
@@ -1433,6 +1440,10 @@ impl Layout {
             .min(yapfast_core::push_to_talk::MOST_RELEASE_DELAY)
     }
 
+    pub fn dont_show_typing(&self) -> bool {
+        self.dont_show_typing.unwrap_or(false)
+    }
+
     fn read(root: &std::path::Path) -> Self {
         let mut layout: Self = std::fs::read(root.join(LAYOUT))
             .ok()
@@ -1442,6 +1453,9 @@ impl Layout {
             layout.adjust_each_sound = true;
             layout.each_sound.insert(Sound::Message, 0);
             layout.each_sound.insert(Sound::Mention, 0);
+        }
+        if layout.dont_show_typing.is_none() {
+            layout.dont_show_typing = layout.share_typing.take().map(|shared| !shared);
         }
         theme::tidy(&mut layout.custom_themes);
         layout
@@ -1607,7 +1621,8 @@ impl Layout {
         for person in &self.soundboard_muted_people {
             yapfast_core::volume::mute_soundboard(person, true);
         }
-        window.set_share_typing(self.share_typing.unwrap_or(true));
+        window.set_dont_show_typing(self.dont_show_typing());
+        window.set_read_all_notifications_button(self.read_all_notifications_button);
         window.set_notifications(self.notifications.unwrap_or(true));
         window.set_notification_text(self.notification_text.unwrap_or(true));
         window.set_sound_set(choice(&SoundSet::ALL, self.sound_set));
@@ -2832,8 +2847,7 @@ impl Adapter {
                     }
                 }
                 Effect::Sound(sound) => self.sound(sound),
-                Effect::Backend(Command::Typing { .. })
-                    if !self.layout.share_typing.unwrap_or(true) => {}
+                Effect::Backend(Command::Typing { .. }) if self.layout.dont_show_typing() => {}
                 Effect::Backend(command) => {
                     let result = match &self.backend {
                         Some(backend) => backend.send(command),

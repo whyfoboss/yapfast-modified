@@ -20,11 +20,20 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
 - Files: `ui/settings.slint`, `src/ui.rs`, `src/ui/callbacks.rs`,
   `src/ui/appearance.rs`, `docs/chat-ui.md`.
 - `SettingsScreen` (`ui/settings.slint:356`) owns `settings-section`; 4 is
-  Discord. `SettingsFrame` (`:400`) and `SettingsNavigation` show the rail.
+  Discord, 9 is Plugins. `SettingsFrame` (`:400`) and `SettingsNavigation` show the rail.
   Rows with Discord come from `with-discord` (`:373`); without it,
   `without-discord`.
+- Plugins page: `PluginsSettings` (`ui/settings.slint:1540`) groups behavioral
+  plugins and extensions: Better Animations, Read All Notifications Button,
+  Role Colours Everywhere, Message Logger (with Clear Log), Show Hidden Channels,
+  and Don't Show When You're Typing.
+- Read All button: `ReadAllButton` (`ui/rail.slint:845`) is placed in `ServerRail`
+  below the DM item and above the server list separator. Enabled when
+  `read_all_notifications_button` is on. Dispatches `Action::ReadAllNotifications`
+  (`crates/yapfast-core/src/application/rooms.rs::mark_all_read`) marking all
+  unread guild channels and threads read while excluding DMs.
 - Discord page: `DiscordSettings` (`ui/settings.slint:1450`) with
-  `show-hidden-channels`, `sync-discord-reads`, `show-idle`, `hide-blocked`,
+  `sync-discord-reads`, `show-idle`, `hide-blocked`,
   `BlockedRow`, unlink. Account linking lives in `DiscordLinkPanel`
   (`ui/discord.slint`), used at `ui/settings.slint:1383`.
 - Persistence: `Layout` (`src/ui.rs:1130`) is the whole local settings file.

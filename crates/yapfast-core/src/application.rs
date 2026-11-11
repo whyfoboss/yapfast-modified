@@ -1442,6 +1442,8 @@ pub enum Action {
     /// Mark a listed conversation read, or every conversation of a listed
     /// server, as their menus do.
     MarkRead(String),
+    /// Mark all unread server messages across all Discord servers read.
+    ReadAllNotifications,
     /// Go to wherever a conversation is listed and open it.
     Open(String),
     /// [`Action::Open`], showing the conversation's messages: a voice
@@ -3089,6 +3091,7 @@ impl Application {
             },
             Action::SelectRoom(id) => self.select_room(id),
             Action::MarkRead(id) => self.mark_read(id),
+            Action::ReadAllNotifications => self.mark_all_read(),
             Action::EditLast => self.edit_last(),
             Action::OpenNewDm => self.open_new_dm(),
             Action::NewDmQuery(query) => {

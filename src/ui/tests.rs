@@ -13889,3 +13889,107 @@ fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
     assert_eq!(sf.row_data(3).unwrap().size().width, 100);
     assert_eq!(sf.row_data(4).unwrap().size().width, 100);
 }
+
+#[test]
+fn task8_plugins_settings_section_and_preferences() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    // Initial state: default false
+    assert!(!window.get_read_all_notifications_button());
+    assert!(!window.get_dont_show_typing());
+
+    // Navigate to Plugins section (id = 9)
+    window.set_settings_open(true);
+    window.set_settings_section(9);
+    assert_eq!(window.get_settings_section(), 9);
+
+    // Toggle Read All Notifications Button and Don't Show When You're Typing
+    window.set_read_all_notifications_button(true);
+    window.set_dont_show_typing(true);
+
+    // Invoke preferences_changed callback
+    window.invoke_preferences_changed();
+
+    // Verify values updated in layout
+    {
+        let ad = adapter.borrow();
+        assert!(ad.layout.read_all_notifications_button);
+        assert!(ad.layout.dont_show_typing());
+    }
+
+    // Verify persistence to disk
+    let reloaded = Layout::read(directory.path());
+    assert!(reloaded.read_all_notifications_button);
+    assert!(reloaded.dont_show_typing());
+}
+
+#[test]
+fn task8_legacy_share_typing_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout_path = directory.path().join("layout.json");
+
+    // Case 1: Legacy user had share_typing: false (typing suppressed)
+    // Should migrate to dont_show_typing: true
+    std::fs::write(&layout_path, br#"{"share_typing": false}"#).unwrap();
+    let layout = Layout::read(directory.path());
+    assert!(layout.dont_show_typing());
+
+    // Case 2: Legacy user had share_typing: true (typing shown)
+    // Should migrate to dont_show_typing: false
+    std::fs::write(&layout_path, br#"{"share_typing": true}"#).unwrap();
+    let layout = Layout::read(directory.path());
+    assert!(!layout.dont_show_typing());
+
+    // Case 3: Fresh user (neither key present)
+    // Should default to false (typing shown)
+    std::fs::write(&layout_path, br#"{}"#).unwrap();
+    let layout = Layout::read(directory.path());
+    assert!(!layout.dont_show_typing());
+}
+
+#[test]
+fn task8_read_all_notifications_button_action() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    adapter.borrow_mut().action(&window, Action::Preview);
+
+    // Enable read all notifications button
+    window.set_read_all_notifications_button(true);
+    assert!(window.get_read_all_notifications_button());
+
+    // Trigger read all notifications callback without error
+    window.invoke_read_all_notifications();
+}
+
+#[test]
+fn task8_dont_show_typing_indicator_behavior() {
+    let mut layout = Layout::default();
+    // Default: typing indicator is not suppressed (dont_show_typing is false)
+    assert!(!layout.dont_show_typing());
+
+    // Enabled: typing indicator is suppressed (dont_show_typing is true)
+    layout.dont_show_typing = Some(true);
+    assert!(layout.dont_show_typing());
+
+    // Explicitly disabled: typing indicator is not suppressed
+    layout.dont_show_typing = Some(false);
+    assert!(!layout.dont_show_typing());
+}

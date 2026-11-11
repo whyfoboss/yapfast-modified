@@ -378,6 +378,7 @@ export component SettingsScreen inherits Rectangle {
         { text: "Messages", icon: @image-url("icons/message-circle.svg"), id: 2 },
         { text: "Notifications", icon: @image-url("icons/bell.svg"), id: 3 },
         { text: "Sounds", icon: @image-url("icons/volume-2.svg"), id: 5 },
+        { text: "Plugins", icon: @image-url("icons/puzzle.svg"), id: 9 },
         { text: "Discord", icon: @image-url("icons/discord.svg"), id: 4 },
         { text: "Game activity", icon: @image-url("icons/play.svg"), id: 8 },
         { text: "Advanced", icon: @image-url("icons/settings.svg"), id: 6 },
@@ -390,6 +391,7 @@ export component SettingsScreen inherits Rectangle {
         { text: "Messages", icon: @image-url("icons/message-circle.svg"), id: 2 },
         { text: "Notifications", icon: @image-url("icons/bell.svg"), id: 3 },
         { text: "Sounds", icon: @image-url("icons/volume-2.svg"), id: 5 },
+        { text: "Plugins", icon: @image-url("icons/puzzle.svg"), id: 9 },
         { text: "Advanced", icon: @image-url("icons/settings.svg"), id: 6 },
     ];
     SettingsCard {
@@ -401,7 +403,8 @@ export component SettingsScreen inherits Rectangle {
             page-title: root.settings-section == 0 ? "My Account" : root.settings-section == 1 ? "Voice & Video"
                 : root.settings-section == 2 ? "Messages" : root.settings-section == 3 ? "Notifications"
                 : root.settings-section == 4 ? "Discord" : root.settings-section == 5 ? "Sounds"
-                : root.settings-section == 6 ? "Advanced" : root.settings-section == 7 ? "Appearance" : "Game Activity";
+                : root.settings-section == 6 ? "Advanced" : root.settings-section == 7 ? "Appearance"
+                : root.settings-section == 9 ? "Plugins" : "Game Activity";
             account-name: root.account-name; account-initial: root.account-initial;
             account-tint: root.account-tint; account-picture: root.account-picture;
             with-discord: root.discord-build && !root.preview;
@@ -1014,16 +1017,6 @@ export component AppearanceSettings inherits VerticalLayout {
             toggled => { root.preferences-changed(); }
         }
     }
-    if !root.editor: VerticalLayout {
-        spacing: 12px;
-        SettingsHeading { text: "ANIMATIONS"; }
-        SettingsSwitch {
-            text: "Better Animations";
-            description: "Smooth transitions, animated menus, popups, tooltips, and hover motion.";
-            checked <=> Looks.better-animations;
-            toggled => { root.preferences-changed(); }
-        }
-    }
     if root.editor: form := VerticalLayout {
         property <bool> confirming;
         spacing: 16px;
@@ -1099,7 +1092,6 @@ export component MessageSettings inherits VerticalLayout {
     in-out property <bool> link-previews;
     in-out property <bool> collapse-long;
     in-out property <bool> boost-gems;
-    in-out property <bool> share-typing;
     /// When animations play: 0 while Yapfast has the focus, 1 always, 2 never.
     in-out property <int> animate;
     in-out property <bool> reply-ping;
@@ -1185,13 +1177,6 @@ export component MessageSettings inherits VerticalLayout {
         text: "Show boost gems";
         description: "A gem by the name of each member boosting their Discord server, in the member list.";
         checked <=> root.boost-gems;
-        toggled => { root.preferences-changed(); }
-    }
-    SettingsSwitch {
-        text: "Let others see when you're typing";
-        description: (root.matrix && root.discord ? "Discord and Matrix show" : root.matrix ? "Matrix shows" : "Discord shows")
-            + " \"typing...\" while you write. Others still show here when they type.";
-        checked <=> root.share-typing;
         toggled => { root.preferences-changed(); }
     }
     SettingsSwitch {
@@ -1459,13 +1444,9 @@ export struct BlockedRow { id: string, name: string, username: string, avatar-ur
 // Settings: Discord account and channel behavior.
 export component DiscordSettings inherits VerticalLayout {
     in property <bool> matrix-build;
-    in property <bool> show-hidden-channels;
     in property <bool> sync-discord-reads;
     in property <bool> show-idle;
     in property <bool> hide-blocked;
-    in property <bool> role-colors-everywhere;
-    in property <bool> message-logger;
-    private property <bool> confirm-clear-logger: false;
     /// Those the account blocked, by name.
     in property <[BlockedRow]> blocked;
     callback unlink-discord;
@@ -1474,12 +1455,8 @@ export component DiscordSettings inherits VerticalLayout {
     /// How many of them show; Discord's list shows five more at a time.
     private property <int> blocked-shown: 5;
     callback hide-blocked-toggled(bool);
-    callback show-hidden-channels-toggled(bool);
     callback sync-discord-reads-toggled(bool);
     callback show-idle-toggled(bool);
-    callback role-colors-everywhere-toggled(bool);
-    callback message-logger-toggled(bool);
-    callback clear-logger;
     spacing: 16px;
     SettingsTitle { text: "Discord"; }
     if root.matrix-build: HorizontalLayout {
@@ -1489,12 +1466,6 @@ export component DiscordSettings inherits VerticalLayout {
             text: "Unlink Discord"; icon: @image-url("icons/log-out.svg"); danger: true;
             clicked => { root.unlink-discord(); }
         }
-    }
-    SettingsSwitch {
-        text: "Show channels you can't access";
-        description: "They appear locked. Server admins hid them on purpose.";
-        checked: root.show-hidden-channels;
-        toggled(shown) => { root.show-hidden-channels-toggled(shown); }
     }
     SettingsSwitch {
         text: "Mark messages read on Discord";
@@ -1507,44 +1478,6 @@ export component DiscordSettings inherits VerticalLayout {
         description: "After 10 minutes without using Yapfast, as in Discord. Either way, your phone gets notifications while you're away.";
         checked: root.show-idle;
         toggled(shown) => { root.show-idle-toggled(shown); }
-    }
-    SettingsSwitch {
-        text: "Role colours everywhere";
-        description: "Use each member's highest role colour for their name in servers: messages, member lists, mentions, replies, search, voice and profiles.";
-        checked: root.role-colors-everywhere;
-        toggled(on) => { root.role-colors-everywhere-toggled(on); }
-    }
-    SettingsSwitch {
-        text: "Message logger";
-        description: "Retain deleted messages in subtle red and keep up to five previous versions of edited messages in memory. No message contents are ever written to disk.";
-        checked: root.message-logger;
-        toggled(on) => { root.message-logger-toggled(on); }
-    }
-    if root.message-logger: HorizontalLayout {
-        padding-left: 16px; padding-bottom: 4px; spacing: 8px; alignment: start;
-        if !root.confirm-clear-logger: ActionButton {
-            text: "Clear Log";
-            small: true;
-            clicked => { root.confirm-clear-logger = true; }
-        }
-        if root.confirm-clear-logger: HorizontalLayout {
-            spacing: 8px;
-            ActionButton {
-                text: "Confirm Clear";
-                danger: true;
-                small: true;
-                clicked => {
-                    root.confirm-clear-logger = false;
-                    root.clear-logger();
-                }
-            }
-            ActionButton {
-                text: "Cancel";
-                ghost: true;
-                small: true;
-                clicked => { root.confirm-clear-logger = false; }
-            }
-        }
     }
     SettingsSwitch {
         text: "Hide messages from people you blocked";
@@ -1598,5 +1531,97 @@ export component DiscordSettings inherits VerticalLayout {
                 clicked => { root.blocked-shown += 5; }
             }
         }
+    }
+}
+
+// Settings: plugins and behavioral extensions.
+export component PluginsSettings inherits VerticalLayout {
+    in-out property <bool> read-all-notifications-button;
+    in-out property <bool> dont-show-typing;
+    in property <bool> role-colors-everywhere;
+    callback role-colors-everywhere-toggled(bool);
+    in property <bool> message-logger;
+    callback message-logger-toggled(bool);
+    callback clear-logger;
+    in property <bool> show-hidden-channels;
+    callback show-hidden-channels-toggled(bool);
+    callback preferences-changed;
+    private property <bool> confirm-clear-logger: false;
+
+    spacing: 16px;
+    SettingsTitle { text: "Plugins"; }
+
+    // 1. Better Animations
+    SettingsSwitch {
+        text: "Better Animations";
+        description: "Smooth transitions, animated menus, popups, tooltips, and hover motion.";
+        checked <=> Looks.better-animations;
+        toggled => { root.preferences-changed(); }
+    }
+
+    // 2. Read All Notifications Button
+    SettingsSwitch {
+        text: "Read All Notifications Button";
+        description: "Show a compact read all button in the server rail to quickly clear all server notifications.";
+        checked <=> root.read-all-notifications-button;
+        toggled => { root.preferences-changed(); }
+    }
+
+    // 3. Role Colours Everywhere
+    SettingsSwitch {
+        text: "Role colours everywhere";
+        description: "Use each member's highest role colour for their name in servers: messages, member lists, mentions, replies, search, voice and profiles.";
+        checked: root.role-colors-everywhere;
+        toggled(on) => { root.role-colors-everywhere-toggled(on); }
+    }
+
+    // 4. Message Logger
+    SettingsSwitch {
+        text: "Message logger";
+        description: "Retain deleted messages in subtle red and keep up to five previous versions of edited messages in memory. No message contents are ever written to disk.";
+        checked: root.message-logger;
+        toggled(on) => { root.message-logger-toggled(on); }
+    }
+    if root.message-logger: HorizontalLayout {
+        padding-left: 16px; padding-bottom: 4px; spacing: 8px; alignment: start;
+        if !root.confirm-clear-logger: ActionButton {
+            text: "Clear Log";
+            small: true;
+            clicked => { root.confirm-clear-logger = true; }
+        }
+        if root.confirm-clear-logger: HorizontalLayout {
+            spacing: 8px;
+            ActionButton {
+                text: "Confirm Clear";
+                danger: true;
+                small: true;
+                clicked => {
+                    root.confirm-clear-logger = false;
+                    root.clear-logger();
+                }
+            }
+            ActionButton {
+                text: "Cancel";
+                ghost: true;
+                small: true;
+                clicked => { root.confirm-clear-logger = false; }
+            }
+        }
+    }
+
+    // 5. Show Hidden Channels
+    SettingsSwitch {
+        text: "Show Hidden Channels";
+        description: "Show channels you do not have permission to view as locked channels.";
+        checked: root.show-hidden-channels;
+        toggled(shown) => { root.show-hidden-channels-toggled(shown); }
+    }
+
+    // 6. Don't Show When You're Typing
+    SettingsSwitch {
+        text: "Don't Show When You're Typing";
+        description: "Prevent Discord from showing \"typing...\" to others while you write. Others still show here when they type.";
+        checked <=> root.dont-show-typing;
+        toggled => { root.preferences-changed(); }
     }
 }

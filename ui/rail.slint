@@ -842,6 +842,33 @@ export component ServerHeader inherits Rectangle {
     }
 }
 
+component ReadAllButton inherits Rectangle {
+    callback clicked;
+    width: 54px;
+    height: 22px;
+    border-radius: 4px;
+    background: area.has-hover ? Theme.hover : Theme.raised;
+    animate background { duration: Theme.quick; }
+    accessible-role: button;
+    accessible-label: "Read all";
+    accessible-action-default => { root.clicked(); }
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: "read all";
+        font-size: 11px;
+        font-weight: 600;
+        color: area.has-hover ? Theme.text : Theme.muted;
+        animate color { duration: Theme.quick; }
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 // The server rail: the DM home, the DMs with unread messages, then each server.
 export component ServerRail inherits Rectangle {
     in property <bool> dms-selected;
@@ -851,6 +878,8 @@ export component ServerRail inherits Rectangle {
     in property <[ServerRow]> servers;
     /// Without Matrix every server is Discord's, so names don't say so.
     in property <bool> matrix-build: true;
+    in property <bool> read-all-enabled: false;
+    callback read-all;
     callback navigate-dms;
     callback navigate-server(string);
     callback toggle-folder(string);
@@ -872,6 +901,12 @@ export component ServerRail inherits Rectangle {
             tip: "Direct messages";
             selected: root.dms-selected; unread: root.dms-unread; badge: root.dms-badge;
             clicked => { root.navigate-dms(); }
+        }
+        if root.read-all-enabled: HorizontalLayout {
+            alignment: center;
+            ReadAllButton {
+                clicked => { root.read-all(); }
+            }
         }
         if ClientStyle.enabled: Rectangle {
             height: 1px;

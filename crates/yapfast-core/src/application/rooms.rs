@@ -678,6 +678,24 @@ impl Application {
             .collect()
     }
 
+    /// Marks all unread channels across all accessible Discord servers read.
+    pub(super) fn mark_all_read(&mut self) -> Vec<Effect> {
+        let sync = self.state.sync_discord_reads;
+        let rooms: Vec<String> = self
+            .state
+            .servers
+            .iter()
+            .filter(|server| server.discord)
+            .flat_map(|server| self.state.unread_channels(&server.id))
+            .filter(|room| !room.direct && !room.locked)
+            .map(|room| room.id.clone())
+            .collect();
+        rooms
+            .into_iter()
+            .map(|room| Effect::Backend(Command::MarkRead { room, sync }))
+            .collect()
+    }
+
     /// Pins a listed DM to the top of the DM list, or unpins it.
     pub(super) fn pin(&mut self, room: String, pinned: bool) -> Vec<Effect> {
         let choice = if pinned {

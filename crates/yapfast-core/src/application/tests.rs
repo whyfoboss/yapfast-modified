@@ -12161,3 +12161,80 @@ fn a_profile_without_a_wishlist_has_an_empty_one() {
         chat::Wishlist::Loaded(Vec::new())
     );
 }
+
+#[test]
+fn read_all_notifications_marks_every_server_channel_and_thread_read_excluding_dms() {
+    let mut app = connected();
+    let mut rooms = owned(&app.state.rooms);
+    // Unread DM
+    rooms
+        .iter_mut()
+        .find(|room| room.id == "dm")
+        .unwrap()
+        .unread = 5;
+    // Unread server channels
+    rooms
+        .iter_mut()
+        .find(|room| room.id == "general")
+        .unwrap()
+        .unread = 4;
+    rooms
+        .iter_mut()
+        .find(|room| room.id == "games")
+        .unwrap()
+        .mentions = 2;
+    // Add a second Discord server with a thread and a locked channel
+    let mut servers = owned(&app.state.servers);
+    servers[0].discord = true;
+    servers.push(ChatServer {
+        id: "work".into(),
+        name: "Work".into(),
+        channels: vec!["dev".into(), "thread-1".into(), "secret".into()],
+        discord: true,
+        ..servers[0].clone()
+    });
+    rooms.push(ChatRoom {
+        unread: 3,
+        ..preview_room("dev", "dev", false, 3)
+    });
+    rooms.push(ChatRoom {
+        mentions: 1,
+        ..preview_room("thread-1", "thread-1", false, 3)
+    });
+    rooms.push(ChatRoom {
+        unread: 7,
+        locked: true,
+        ..preview_room("secret", "secret", false, 3)
+    });
+    app.apply(Event::Rooms(RoomIndex { rooms, servers }));
+
+    let marked = |effects: Vec<Effect>| -> Vec<String> {
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Backend(Command::MarkRead { room, .. }) => Some(room),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let effects = app.dispatch(Action::ReadAllNotifications);
+    let mut marked_rooms = marked(effects);
+    marked_rooms.sort();
+    // Must include general, games, dev, thread-1.
+    // Must NOT include "dm" (direct message) or "secret" (locked channel).
+    assert_eq!(marked_rooms, ["dev", "games", "general", "thread-1"]);
+
+    // Calling again when nothing is unread (or after everything is marked) does nothing gracefully.
+    let mut rooms = owned(&app.state.rooms);
+    for room in &mut rooms {
+        if room.id != "dm" {
+            room.unread = 0;
+            room.mentions = 0;
+        }
+    }
+    let servers = owned(&app.state.servers);
+    app.apply(Event::Rooms(RoomIndex { rooms, servers }));
+    let empty_effects = app.dispatch(Action::ReadAllNotifications);
+    assert!(marked(empty_effects).is_empty());
+}

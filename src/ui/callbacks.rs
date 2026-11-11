@@ -782,6 +782,17 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         });
     }
     {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_read_all_notifications(move || {
+            if let Some(window) = weak.upgrade() {
+                state
+                    .borrow_mut()
+                    .action(&window, Action::ReadAllNotifications);
+            }
+        });
+    }
+    {
         let adapter = adapter.clone();
         let weak = window.as_weak();
         window.on_send(move || {
@@ -2180,7 +2191,8 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         layout.microphone_volume = Some(window.get_microphone_volume().clamp(0, 200) as u8);
         layout.speaker_volume = Some(window.get_speaker_volume().clamp(0, 200) as u8);
         play_call_volumes(&window);
-        layout.share_typing = Some(window.get_share_typing());
+        layout.dont_show_typing = Some(window.get_dont_show_typing());
+        layout.read_all_notifications_button = window.get_read_all_notifications_button();
         layout.notifications = Some(window.get_notifications());
         layout.notification_text = Some(window.get_notification_text());
         layout.flash_taskbar = Some(window.get_flash_taskbar());
