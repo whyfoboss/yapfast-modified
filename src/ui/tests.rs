@@ -13296,3 +13296,596 @@ fn task7_stream_flicker_elimination_close_secondary_stream_synchronous_teardown_
     assert!(!updated_participants.row_data(2).unwrap().watched);
     assert_eq!(window.get_watched_stream_count(), 1);
 }
+
+#[test]
+fn task7_voice_rejoin_same_channel_immediately_after_disconnect() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    window.invoke_explore_preview();
+    let voice_id = adapter
+        .borrow()
+        .app
+        .state
+        .rooms
+        .iter()
+        .find(|room| room.voice)
+        .unwrap()
+        .id
+        .clone();
+
+    // 1. Join voice room
+    window.invoke_select_room(voice_id.clone().into());
+    assert!(adapter.borrow().app.state.voice.active());
+    assert_eq!(
+        adapter.borrow().app.state.voice.room.as_deref(),
+        Some(voice_id.as_str())
+    );
+
+    // 2. Select voice room again to show call on stage
+    window.invoke_select_room(voice_id.clone().into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some(voice_id.as_str())
+    );
+
+    // 3. Leave voice
+    window.invoke_leave_voice();
+    assert!(!adapter.borrow().app.state.voice.active());
+    // Room remains selected on screen
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some(voice_id.as_str())
+    );
+
+    // 4. Immediately click the same voice channel in sidebar to rejoin
+    window.invoke_select_room(voice_id.clone().into());
+
+    // Rejoin must succeed without needing intermediate navigation to another room!
+    assert!(adapter.borrow().app.state.voice.active());
+    assert_eq!(
+        adapter.borrow().app.state.voice.room.as_deref(),
+        Some(voice_id.as_str())
+    );
+
+    // 5. Subsequent click while already in call does not trigger redundant disconnect or leave
+    window.invoke_select_room(voice_id.clone().into());
+    assert!(adapter.borrow().app.state.voice.active());
+    assert_eq!(
+        adapter.borrow().app.state.voice.room.as_deref(),
+        Some(voice_id.as_str())
+    );
+}
+
+#[test]
+fn task7_participant_card_hover_and_loading_stability_on_stream_switch() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    let mk_person = |id: &str, name: &str, streaming: bool| yapfast_core::voice::Participant {
+        id: id.into(),
+        user: name.into(),
+        person: id.into(),
+        local: false,
+        muted: false,
+        deafened: false,
+        server_muted: false,
+        server_deafened: false,
+        speaking: false,
+        connected: true,
+        problem: None,
+        avatar: None,
+        color: None,
+        streaming,
+        video: None,
+    };
+
+    let mut bob_buffer = slint::SharedPixelBuffer::new(64, 36);
+    bob_buffer.make_mut_bytes().fill(255);
+    let bob_frame = slint::Image::from_rgb8(bob_buffer);
+
+    let mut carol_buffer = slint::SharedPixelBuffer::new(80, 45);
+    carol_buffer.make_mut_bytes().fill(200);
+    let carol_frame = slint::Image::from_rgb8(carol_buffer);
+
+    // Initial state: Bob is being watched in Focus Mode, Carol is an unwatched live streamer in strip
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.phase = yapfast_core::voice::Phase::Connected;
+        ad.app.state.voice.room = Some("lounge".into());
+        ad.app.state.voice.participants = vec![
+            mk_person("alice", "Alice", false),
+            mk_person("bob", "Bob", true),
+            mk_person("carol", "Carol", true),
+        ];
+        ad.app.state.voice.watching = vec![yapfast_core::voice::Watching {
+            user: "bob".into(),
+            name: "Bob".into(),
+            opening: false,
+            frames: None,
+            viewers: vec![],
+        }];
+        ad.call_focus = Some(crate::ui::tiles::Focus::Stream("bob".into()));
+        ad.show_stage(&window);
+        ad.show_voice(&window);
+        ad.models.stream_frames.set_row_data(1, bob_frame.clone());
+        window.set_watch_frame(bob_frame);
+    }
+
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(window.get_watched_stream_count(), 1);
+
+    // 1. User clicks "Watch stream" on Carol
+    window.invoke_watch_stream("carol".into());
+
+    // Carol is now the designated watch user
+    assert_eq!(window.get_watch_user(), "carol");
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("carol".into()))
+    );
+
+    // watch_frame is cleared immediately so Bob's old frame does not linger on Carol's stage
+    assert_eq!(window.get_watch_frame().size().width, 0);
+
+    // In single watched stream mode, Carol is now the active watched stream, and Bob
+    // has seamlessly transitioned back to an unwatched participant in the strip.
+    // 2. Carol's decoded frame arrives
+    adapter
+        .borrow()
+        .models
+        .stream_frames
+        .set_row_data(2, carol_frame.clone());
+    window.set_watch_frame(carol_frame);
+
+    assert_eq!(window.get_watch_frame().size().width, 80);
+
+    // Backend confirms watching Carol
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.watching = vec![yapfast_core::voice::Watching {
+            user: "carol".into(),
+            name: "Carol".into(),
+            opening: false,
+            frames: None,
+            viewers: vec![],
+        }];
+        ad.show_stage(&window);
+        ad.show_voice(&window);
+    }
+
+    let participants = window.get_participants();
+    let p_bob = participants.row_data(1).unwrap();
+    let p_carol = participants.row_data(2).unwrap();
+    assert!(!p_bob.watched);
+    assert!(p_carol.watched);
+}
+
+#[test]
+fn task7_ui_stability_on_add_stream_preserves_card_labels_and_controls() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    let mk_person = |id: &str, name: &str, streaming: bool| yapfast_core::voice::Participant {
+        id: id.into(),
+        user: name.into(),
+        person: id.into(),
+        local: false,
+        muted: false,
+        deafened: false,
+        server_muted: false,
+        server_deafened: false,
+        speaking: false,
+        connected: true,
+        problem: None,
+        avatar: None,
+        color: None,
+        streaming,
+        video: None,
+    };
+
+    let mut bob_buffer = slint::SharedPixelBuffer::new(64, 36);
+    bob_buffer.make_mut_bytes().fill(255);
+    let bob_frame = slint::Image::from_rgb8(bob_buffer);
+
+    // Initial setup: Alice, Bob (streaming, watched in Focus), Carol (streaming, in strip), Dave (non-streamer)
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.phase = yapfast_core::voice::Phase::Connected;
+        ad.app.state.voice.room = Some("stage".into());
+        ad.app.state.voice.participants = vec![
+            mk_person("alice", "Alice", false),
+            mk_person("bob", "Bob", true),
+            mk_person("carol", "Carol", true),
+            mk_person("dave", "Dave", false),
+        ];
+        ad.app.state.voice.watching = vec![yapfast_core::voice::Watching {
+            user: "bob".into(),
+            name: "Bob".into(),
+            opening: false,
+            frames: None,
+            viewers: vec![],
+        }];
+        ad.call_focus = Some(crate::ui::tiles::Focus::Stream("bob".into()));
+        ad.show_voice(&window);
+        ad.models.stream_frames.set_row_data(1, bob_frame.clone());
+        window.set_watch_frame(bob_frame);
+    }
+
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(window.get_watched_stream_count(), 1);
+
+    let initial_parts = window.get_participants();
+    assert_eq!(initial_parts.row_count(), 4);
+    assert_eq!(initial_parts.row_data(0).unwrap().name, "Alice");
+    assert_eq!(initial_parts.row_data(1).unwrap().name, "Bob");
+    assert_eq!(initial_parts.row_data(2).unwrap().name, "Carol");
+    assert_eq!(initial_parts.row_data(3).unwrap().name, "Dave");
+    assert!(!initial_parts.row_data(0).unwrap().watched);
+    assert!(initial_parts.row_data(1).unwrap().watched);
+    assert!(!initial_parts.row_data(2).unwrap().watched);
+    assert!(!initial_parts.row_data(3).unwrap().watched);
+
+    // User clicks Add Stream [Eye +] on Carol
+    window.invoke_add_stream("carol".into());
+
+    // 1. Bob must remain firmly focused without visual disruption
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("bob".into()))
+    );
+
+    // 2. Bob's stream frame must not be cleared
+    assert_eq!(
+        adapter
+            .borrow()
+            .models
+            .stream_frames
+            .row_data(1)
+            .unwrap()
+            .size()
+            .width,
+        64
+    );
+
+    // Backend confirms watching both Bob and Carol
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.watching = vec![
+            yapfast_core::voice::Watching {
+                user: "bob".into(),
+                name: "Bob".into(),
+                opening: false,
+                frames: None,
+                viewers: vec![],
+            },
+            yapfast_core::voice::Watching {
+                user: "carol".into(),
+                name: "Carol".into(),
+                opening: false,
+                frames: None,
+                viewers: vec![],
+            },
+        ];
+        ad.show_voice(&window);
+    }
+
+    // 3. Watched stream count updates to 2
+    assert_eq!(window.get_watched_stream_count(), 2);
+
+    // 4. Participants model preserves all labels, names, and correct watched status
+    let updated_parts = window.get_participants();
+    assert_eq!(updated_parts.row_count(), 4);
+    assert_eq!(updated_parts.row_data(0).unwrap().name, "Alice");
+    assert_eq!(updated_parts.row_data(1).unwrap().name, "Bob");
+    assert_eq!(updated_parts.row_data(2).unwrap().name, "Carol");
+    assert_eq!(updated_parts.row_data(3).unwrap().name, "Dave");
+    assert!(!updated_parts.row_data(0).unwrap().watched);
+    assert!(updated_parts.row_data(1).unwrap().watched);
+    assert!(updated_parts.row_data(2).unwrap().watched);
+    assert!(!updated_parts.row_data(3).unwrap().watched);
+}
+
+#[test]
+fn task7_no_connecting_flash_on_add_stream_preserves_avatar_and_stability() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    let mk_person = |id: &str, name: &str, streaming: bool| yapfast_core::voice::Participant {
+        id: id.into(),
+        user: name.into(),
+        person: id.into(),
+        local: false,
+        muted: false,
+        deafened: false,
+        server_muted: false,
+        server_deafened: false,
+        speaking: false,
+        connected: true,
+        problem: None,
+        avatar: None,
+        color: None,
+        streaming,
+        video: None,
+    };
+
+    let mut bob_buffer = slint::SharedPixelBuffer::new(64, 36);
+    bob_buffer.make_mut_bytes().fill(255);
+    let bob_frame = slint::Image::from_rgb8(bob_buffer);
+
+    let mut eve_buffer = slint::SharedPixelBuffer::new(80, 45);
+    eve_buffer.make_mut_bytes().fill(180);
+    let eve_frame = slint::Image::from_rgb8(eve_buffer);
+
+    // Initial setup: Bob is watched in Focus Mode, Eve is an unwatched live streamer in strip
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.phase = yapfast_core::voice::Phase::Connected;
+        ad.app.state.voice.room = Some("lounge".into());
+        ad.app.state.voice.participants =
+            vec![mk_person("bob", "Bob", true), mk_person("eve", "Eve", true)];
+        ad.app.state.voice.watching = vec![yapfast_core::voice::Watching {
+            user: "bob".into(),
+            name: "Bob".into(),
+            opening: false,
+            frames: None,
+            viewers: vec![],
+        }];
+        ad.call_focus = Some(crate::ui::tiles::Focus::Stream("bob".into()));
+        ad.show_voice(&window);
+        ad.models.stream_frames.set_row_data(0, bob_frame.clone());
+        window.set_watch_frame(bob_frame);
+    }
+
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(window.get_watched_stream_count(), 1);
+
+    // User clicks Add Stream on Eve
+    window.invoke_add_stream("eve".into());
+
+    // 1. Eve is added to watching, but has no decoded frame yet (State B)
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.watching = vec![
+            yapfast_core::voice::Watching {
+                user: "bob".into(),
+                name: "Bob".into(),
+                opening: false,
+                frames: None,
+                viewers: vec![],
+            },
+            yapfast_core::voice::Watching {
+                user: "eve".into(),
+                name: "Eve".into(),
+                opening: false,
+                frames: None,
+                viewers: vec![],
+            },
+        ];
+        ad.show_voice(&window);
+    }
+
+    // 2. Eve's frame in stream_frames is initially empty (0 width)
+    let stream_frames = adapter.borrow().models.stream_frames.clone();
+    assert_eq!(stream_frames.row_data(1).unwrap().size().width, 0);
+
+    // 3. Eve's participant card preserves normal name without temporary Connecting... text,
+    // and stream_ready is false in State B so presentation stays strictly in participant/avatar state
+    let parts = window.get_participants();
+    let p_eve = parts.row_data(1).unwrap();
+    assert_eq!(p_eve.name, "Eve");
+    assert_eq!(p_eve.status, "Listening");
+    assert!(p_eve.watched);
+    assert!(!p_eve.stream_ready);
+
+    // 4. Bob remains primary watch user and keeps playing undisturbed
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("bob".into()))
+    );
+
+    // 5. When Eve's first decoded video frame arrives (State C):
+    adapter
+        .borrow()
+        .models
+        .stream_frames
+        .set_row_data(1, eve_frame.clone());
+    adapter.borrow_mut().show_voice(&window);
+
+    // Eve now has a valid decoded frame (width 80) and stream_ready is true
+    assert_eq!(
+        adapter
+            .borrow()
+            .models
+            .stream_frames
+            .row_data(1)
+            .unwrap()
+            .size()
+            .width,
+        80
+    );
+    assert!(window.get_participants().row_data(1).unwrap().stream_ready);
+}
+
+#[test]
+fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    let mk_person = |id: &str, name: &str, streaming: bool| yapfast_core::voice::Participant {
+        id: id.into(),
+        user: name.into(),
+        local: false,
+        streaming,
+        video: None,
+        connected: true,
+        muted: false,
+        deafened: false,
+        speaking: false,
+        problem: None,
+        avatar: None,
+        color: None,
+        person: id.into(),
+        server_muted: false,
+        server_deafened: false,
+    };
+    let mk_watch = |id: &str, name: &str| yapfast_core::voice::Watching {
+        user: id.into(),
+        name: name.into(),
+        opening: false,
+        frames: None,
+        viewers: vec![],
+    };
+
+    let mk_frame = |w: u32, h: u32| {
+        slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
+            &vec![200u8; (w * h * 4) as usize],
+            w,
+            h,
+        ))
+    };
+
+    // 1. Setup 4 streams active in Stream Stage
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.phase = yapfast_core::voice::Phase::Connected;
+        ad.app.state.voice.room = Some("stream_stage".into());
+        ad.app.state.voice.participants = vec![
+            mk_person("alice", "Alice", false),
+            mk_person("bob", "Bob", true),
+            mk_person("carol", "Carol", true),
+            mk_person("dave", "Dave", true),
+            mk_person("eve", "Eve", true),
+        ];
+        ad.app.state.voice.watching = vec![
+            mk_watch("bob", "Bob"),
+            mk_watch("carol", "Carol"),
+            mk_watch("dave", "Dave"),
+            mk_watch("eve", "Eve"),
+        ];
+        ad.call_focus = Some(crate::ui::tiles::Focus::Stream("bob".into()));
+        ad.show_stage(&window);
+        ad.show_voice(&window);
+
+        // Populate valid stream frames for all 4 broadcasters
+        ad.models.stream_frames.set_row_data(1, mk_frame(100, 100)); // Bob
+        ad.models.stream_frames.set_row_data(2, mk_frame(100, 100)); // Carol
+        ad.models.stream_frames.set_row_data(3, mk_frame(100, 100)); // Dave
+        ad.models.stream_frames.set_row_data(4, mk_frame(100, 100)); // Eve
+    }
+
+    // Switch to Grid Mode
+    window.set_voice_grid_mode(true);
+    window.invoke_set_layout_mode(false);
+    assert!(window.get_voice_grid_mode());
+    assert_eq!(window.get_watched_stream_count(), 4);
+    assert_eq!(window.get_focused_active(), 0); // Bob
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("bob".into()))
+    );
+    assert!(!window.get_stage_full());
+
+    // 2. Click Bob's tile again (slot 1) -> Already focused, deduplication keeps state untouched
+    window.invoke_focus_tile(1);
+    assert_eq!(window.get_focused_active(), 0);
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("bob".into()))
+    );
+    assert!(!window.get_stage_full());
+
+    // 3. Repeated clicks on focused tile must NEVER trigger stage_full
+    for _ in 0..5 {
+        window.invoke_focus_tile(1);
+    }
+    assert!(!window.get_stage_full());
+
+    // 4. Click Carol's tile (slot 2) -> switches focus safely to Carol
+    window.invoke_focus_tile(2);
+    assert_eq!(window.get_focused_active(), 1);
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("carol".into()))
+    );
+    assert_eq!(window.get_watch_user(), "carol");
+    assert!(!window.get_stage_full());
+
+    // 5. Repeated clicks on Carol do not change focus or enter stage_full
+    for _ in 0..5 {
+        window.invoke_focus_tile(2);
+    }
+    assert_eq!(window.get_focused_active(), 1);
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("carol".into()))
+    );
+    assert!(!window.get_stage_full());
+
+    // 6. Click Dave (slot 3) and Eve (slot 4)
+    window.invoke_focus_tile(3);
+    assert_eq!(window.get_focused_active(), 2);
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("dave".into()))
+    );
+    assert!(!window.get_stage_full());
+
+    window.invoke_focus_tile(4);
+    assert_eq!(window.get_focused_active(), 3);
+    assert_eq!(
+        adapter.borrow().call_focus,
+        Some(crate::ui::tiles::Focus::Stream("eve".into()))
+    );
+    assert!(!window.get_stage_full());
+
+    // 7. Verify all 4 stream frames remain intact and actively playing
+    let sf = adapter.borrow().models.stream_frames.clone();
+    assert_eq!(sf.row_count(), 5);
+    assert_eq!(sf.row_data(1).unwrap().size().width, 100);
+    assert_eq!(sf.row_data(2).unwrap().size().width, 100);
+    assert_eq!(sf.row_data(3).unwrap().size().width, 100);
+    assert_eq!(sf.row_data(4).unwrap().size().width, 100);
+}

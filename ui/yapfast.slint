@@ -952,7 +952,7 @@ export component YapfastWindow inherits Window {
     /// Presentation mode for multi-stream: Grid Mode vs Focus Mode.
     in-out property <bool> voice-grid-mode: false;
     /// The large tile fills the screen, over the whole window.
-    property <bool> stage-full;
+    in-out property <bool> stage-full: false;
     changed call-focus => { if root.call-focus < 0 { root.stage-full = false; } }
     changed stage-full => { root.full-screen = root.stage-full; }
     /// Whose stream is watched: their participant id.

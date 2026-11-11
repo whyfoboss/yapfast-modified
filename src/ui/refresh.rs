@@ -4073,6 +4073,7 @@ impl Adapter {
     /// The call: the voice dock, sharing and watching a screen, a DM's call,
     /// ringing, and the devices.
     pub(super) fn show_voice(&mut self, window: &YapfastWindow) {
+        self.show_stage(window);
         self.ring();
         let role_colors = self.layout.role_colors_everywhere;
         // The server of a call shows it on the rail, so the rail follows a
@@ -4314,6 +4315,7 @@ impl Adapter {
         );
         window.set_voice_error(voice.error.as_deref().unwrap_or_default().into());
         window.set_voice_warning(voice.warning.as_deref().unwrap_or_default().into());
+        let stream_frames = &self.models.stream_frames;
         update_model(
             &self.models.participants,
             if voice.active() {
@@ -4324,6 +4326,21 @@ impl Adapter {
                     .map(|person| {
                         let watching_pos = voice.watching.iter().position(|w| w.user == person.id);
                         let watched = watching_pos.is_some();
+                        let stream_ready = if watched {
+                            voice
+                                .participants
+                                .iter()
+                                .position(|p| p.id == person.id)
+                                .is_some_and(|pos| {
+                                    pos < stream_frames.row_count()
+                                        && stream_frames
+                                            .row_data(pos)
+                                            .as_ref()
+                                            .is_some_and(|img| img.size().width > 0)
+                                })
+                        } else {
+                            false
+                        };
                         let watched_index = watching_pos.map_or(-1, |i| i as i32);
                         let unwatched_index = if watched {
                             -1
@@ -4391,6 +4408,7 @@ impl Adapter {
                             watched_index,
                             unwatched_index,
                             stream_status,
+                            stream_ready,
                         }
                     })
                     .collect()
@@ -4444,11 +4462,23 @@ impl Adapter {
         };
         for (index, person) in voice.participants.iter().take(count).enumerate() {
             let moved = self.frame_ids.get(index) != Some(&person.id);
-            if (person.video.is_none() || moved) && index < frames.row_count() {
+            if (person.video.is_none() || moved)
+                && index < frames.row_count()
+                && frames
+                    .row_data(index)
+                    .as_ref()
+                    .is_some_and(|img| img.size().width > 0)
+            {
                 frames.set_row_data(index, slint::Image::default());
             }
             let is_watched = voice.watching.iter().any(|w| w.user == person.id);
-            if (!is_watched || moved) && index < stream_frames.row_count() {
+            if (!is_watched || moved)
+                && index < stream_frames.row_count()
+                && stream_frames
+                    .row_data(index)
+                    .as_ref()
+                    .is_some_and(|img| img.size().width > 0)
+            {
                 stream_frames.set_row_data(index, slint::Image::default());
             }
         }
@@ -4470,7 +4500,6 @@ impl Adapter {
         while stream_frames.row_count() < count {
             stream_frames.push(slint::Image::default());
         }
-        self.show_stage(window);
         self.show_soundboard(window);
         self.show_soundboard_settings(window);
         let state = &self.app.state;

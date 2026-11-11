@@ -19,10 +19,11 @@ Yapfast calls only your own shows. Clicking a voice channel joins it and leaves
 what's on screen as it was, as Discord's client does: the call shows in the
 dock, and clicking the channel again, or the channel's line in the dock, opens
 it. A voice channel whose chat mentions you opens on its chat as it joins, as
-in Discord, and one you can't join opens without joining. Clicking another one
-during a call opens a dialog that asks before leaving the current one, and
-confirming joins it the same way. Coming back to a server that had a voice
-channel selected shows it without joining.
+in Discord, and one you can't join opens without joining. After disconnecting,
+clicking the voice channel immediately reconnects to it without requiring
+intermediate navigation. Clicking another one during a call opens a dialog that
+asks before leaving the current one, and confirming joins it the same way. Coming
+back to a server that had a voice channel selected shows it without joining.
 
 The native LiveKit audio engine captures and plays audio through system
 devices. Settings › Voice & video selects the microphone and speakers too.
@@ -100,11 +101,22 @@ without restarting decoder processes.
 Stream overlay controls (viewer count, eye icon, viewer avatars, close stream X
 button, and streamer nickname chip) appear only on hover with smooth fade
 animations (120ms in, 150ms out) when Better Animations is enabled, and zero
-flicker over buttons. Audio routes dynamically: only the focused stream is
+flicker over buttons. Close and viewer controls are neatly anchored to the
+top-right corner of each stream tile (inset 10px from the tile's upper and right
+edges) across Focus and Grid modes. Audio routes dynamically: only the focused stream is
 audible (`Control::Hear(true)`), while background streams render video silently
 (`Control::Hear(false)`). Toggling deafen silences all streams. Closing a stream
 releases its dedicated worker process and memory immediately, dynamically
-adjusting the grid layout.
+adjusting the grid layout. Stream replacement and additive stream subscription
+maintain video presentation stability without intermediate blank frames or
+unnecessary layout recalculations. Participant cards decouple logical subscription
+from visual presentation: when adding a stream, the card remains visually identical
+to a normal participant card (showing avatar, username, and live indicator, without
+premature viewer counters or close overlays) until its first valid decoded video frame
+arrives, at which point it transitions atomically directly into the complete video
+thumbnail presentation. Participant labels, name chips, and action overlays maintain
+persistent hover enclosure and zero-flicker transitions during stream additions and
+layout updates.
 
 Rust keeps which tile is large (`tiles::Focus`), by whose it is, so
 it stays as people come and go. The grid tells Rust its columns, tile size,

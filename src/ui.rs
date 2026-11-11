@@ -2947,8 +2947,15 @@ impl Adapter {
     }
 
     pub(super) fn select_room_transition(&mut self, window: &YapfastWindow, id: String) {
+        let is_voice = self.app.state.rooms.iter().any(|r| {
+            r.id == id && (r.voice || (r.direct && r.capabilities.dm_calls && !r.request))
+        });
+        let in_call =
+            self.app.state.voice.active() && self.app.state.voice.room.as_deref() == Some(&id);
+
         if self.nav_transition.phase == NavPhase::Idle
             && self.app.state.selected.as_deref() == Some(&id)
+            && (!is_voice || in_call)
         {
             return;
         }
@@ -2963,8 +2970,9 @@ impl Adapter {
         let effects = self.app.dispatch(Action::SelectRoom(id.clone()));
         self.execute(effects);
 
-        if self.app.state.selected.as_deref() != Some(&id) {
-            // Voice channel join/leave without text chat navigation
+        if self.app.state.selected.as_deref() != Some(&id) || outgoing == id {
+            // Voice channel join/leave without text chat navigation,
+            // or rejoining the currently selected voice room in place.
             self.refresh(window);
             return;
         }

@@ -739,6 +739,7 @@ pub(crate) async fn call(
                                         stopped.stop(discord, state);
                                     }
                                     state.error = None;
+                                    tracing::info!("[STREAM-DIAG] Watch request created for: {}", user);
                                     let watch = Watch::start(discord, guild, &channel, &user, state);
                                     focused_stream = Some(user.clone());
                                     watches.push(watch);
@@ -754,6 +755,7 @@ pub(crate) async fn call(
                             if user != me && !is_watching {
                                 if watches.len() < MAX_STREAMS {
                                     state.error = None;
+                                    tracing::info!("[STREAM-DIAG] Watch request created for: {}", user);
                                     let watch = Watch::start(discord, guild, &channel, &user, state);
                                     if focused_stream.is_none() {
                                         focused_stream = watches.first().map(|w| w.user.clone()).or(Some(user.clone()));

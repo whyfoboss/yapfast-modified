@@ -27,6 +27,8 @@ export struct PersonRow {
     unwatched-index: int,
     /// Status message for this participant's stream.
     stream-status: string,
+    /// Whether this participant's stream has decoded its first valid video frame.
+    stream-ready: bool,
 }
 
 // Marks someone sharing their screen, as Discord's red LIVE tag does.
@@ -675,7 +677,7 @@ component StageTile inherits Rectangle {
     /// Whether this tile is broadcasting and unwatched (can show stream action buttons on hover)
     in property <bool> can-watch: false;
     in property <bool> is-strip: false;
-    in property <bool> top-right-avoid: false;
+    in property <bool> is-multi-grid: false;
     callback clicked;
     callback right-clicked(length, length);
     callback stop;
@@ -686,113 +688,114 @@ component StageTile inherits Rectangle {
     border-radius: root.full ? 0px : (root.is-strip ? 8px : 12px); clip: true;
     accessible-role: button; accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
-    property <bool> tile-hovered: touch.has-hover || (root.stop-label != "" && stop-btn.hovered) || (root.focused && fs-btn.hovered) || (root.viewers.length > 0 && stack.hovered) || (root.can-watch && (eye-touch.has-hover || watch-touch.has-hover));
+    property <bool> tile-hovered: touch.has-hover || (root.stop-label != "" && stop-btn.hovered) || (root.focused && !root.is-multi-grid && fs-btn.hovered) || (root.viewers.length > 0 && stack.hovered) || (root.can-watch && (eye-touch.has-hover || watch-touch.has-hover));
 
-    // Main touch area at the back for clicking the tile itself
+    // TouchArea encompasses the tile, children, and overlay controls
     touch := TouchArea {
+        width: parent.width; height: parent.height;
         mouse-cursor: root.focused ? MouseCursor.default : MouseCursor.pointer;
         clicked => { root.clicked(); }
-        double-clicked => { if root.focused { root.full-screen(!root.full); } }
+        double-clicked => { if root.focused && !root.is-multi-grid { root.full-screen(!root.full); } }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                 root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
-    }
 
-    @children
+        @children
 
-    // Overlay stream controls, hidden by default and smoothly fading in on hover.
-    controls-overlay := Rectangle {
-        width: parent.width; height: parent.height;
-        opacity: root.tile-hovered ? 1.0 : 0.0;
-        visible: self.opacity > 0.01;
-        animate opacity {
-            duration: Looks.better-animations ? (root.tile-hovered ? 120ms : 150ms) : 0ms;
-            easing: ease-out;
-        }
-
-        // Dark hover scrim for unwatched stream tiles
-        scrim := Rectangle {
-            visible: root.can-watch;
+        // Overlay stream controls, hidden by default and smoothly fading in on hover.
+        controls-overlay := Rectangle {
             width: parent.width; height: parent.height;
-            background: #000000a6;
-        }
+            opacity: root.tile-hovered ? 1.0 : 0.0;
+            visible: self.opacity > 0.01;
+            animate opacity {
+                duration: Looks.better-animations ? (root.tile-hovered ? 120ms : 150ms) : 0ms;
+                easing: ease-out;
+            }
 
-        stack := ViewerStack {
-            x: parent.width - self.width - ((root.focused || root.top-right-avoid) ? (root.stop-label != "" ? 122px : 88px) : (root.stop-label != "" ? 44px : 8px)); y: 8px;
-            viewers: root.viewers; names: root.viewer-names;
-        }
-        stop-btn := IconButton {
-            visible: root.stop-label != ""; enabled: root.stop-label != "";
-            x: parent.width - self.width - ((root.focused || root.top-right-avoid) ? 88px : 8px); y: 8px; height: self.size;
-            icon: @image-url("icons/x.svg"); label: root.stop-label; tint: #ffffff;
-            fill: #000000a6; radius: 14px; size: 28px; glyph: 14px;
-            clicked => { root.stop(); }
-        }
-        fs-btn := IconButton {
-            visible: root.focused; enabled: root.focused;
-            x: parent.width - self.width - 10px; y: parent.height - self.size - 10px; height: self.size;
-            icon: root.full ? @image-url("icons/minimize.svg") : @image-url("icons/maximize.svg");
-            label: root.full ? "Exit full screen" : "Full screen"; tint: #ffffff;
-            fill: #000000a6; radius: 16px;
-            clicked => { root.full-screen(!root.full); }
-        }
+            // Dark hover scrim for unwatched stream tiles
+            scrim := Rectangle {
+                visible: root.can-watch;
+                width: parent.width; height: parent.height;
+                background: #000000a6;
+            }
 
-        // Discord-style Stream Action Button Group: [ Eye + ] [ Watch stream ]
-        action-group := HorizontalLayout {
-            visible: root.can-watch;
-            alignment: center;
-            y: (parent.height - self.height) / 2 - 3px;
-            height: 28px;
-            spacing: 6px;
+            stop-btn := IconButton {
+                visible: root.stop-label != ""; enabled: root.stop-label != "";
+                x: parent.width - self.width - 10px; y: 8px; height: self.size;
+                icon: @image-url("icons/x.svg"); label: root.stop-label; tint: #ffffff;
+                fill: #000000a6; radius: 14px; size: 28px; glyph: 14px;
+                clicked => { root.stop(); }
+            }
+            stack := ViewerStack {
+                x: root.stop-label != "" ? (stop-btn.x - self.width - 6px) : (parent.width - self.width - 10px); y: 7px;
+                viewers: root.viewers; names: root.viewer-names;
+            }
+            fs-btn := IconButton {
+                visible: root.focused && !root.is-multi-grid; enabled: root.focused && !root.is-multi-grid;
+                x: parent.width - self.width - 10px; y: parent.height - self.size - 10px; height: self.size;
+                icon: root.full ? @image-url("icons/minimize.svg") : @image-url("icons/maximize.svg");
+                label: root.full ? "Exit full screen" : "Full screen"; tint: #ffffff;
+                fill: #000000a6; radius: 16px;
+                clicked => { root.full-screen(!root.full); }
+            }
 
-            // [ Eye + ] button (Add stream / Multi-stream viewing)
-            eye-btn := Rectangle {
-                width: 28px; height: 28px; border-radius: 6px;
-                background: eye-touch.has-hover ? #35373c : #2b2d31;
-                border-width: 1px; border-color: eye-touch.has-hover ? #4e5058 : #3f4147;
-                animate background { duration: Looks.better-animations ? 100ms : 0ms; }
-                Image {
-                    x: 6px; y: 6px; width: 16px; height: 16px;
-                    source: @image-url("icons/eye-plus.svg");
-                    colorize: eye-touch.has-hover ? #ffffff : #dbdee1;
-                }
-                eye-touch := TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => {
-                        Tip.text = "";
-                        root.add-stream();
+            // Discord-style Stream Action Button Group: [ Eye + ] [ Watch stream ]
+            action-group := HorizontalLayout {
+                visible: root.can-watch;
+                alignment: center;
+                y: (parent.height - self.height) / 2 - 3px;
+                height: 28px;
+                spacing: 6px;
+
+                // [ Eye + ] button (Add stream / Multi-stream viewing)
+                eye-btn := Rectangle {
+                    width: 28px; height: 28px; border-radius: 6px;
+                    background: eye-touch.has-hover ? #35373c : #2b2d31;
+                    border-width: 1px; border-color: eye-touch.has-hover ? #4e5058 : #3f4147;
+                    animate background { duration: Looks.better-animations ? 100ms : 0ms; }
+                    Image {
+                        x: 6px; y: 6px; width: 16px; height: 16px;
+                        source: @image-url("icons/eye-plus.svg");
+                        colorize: eye-touch.has-hover ? #ffffff : #dbdee1;
                     }
-                    changed has-hover => {
-                        if self.has-hover {
-                            Tip.text = "Watch multiple streams";
-                            Tip.side = 0;
-                            Tip.x = eye-btn.absolute-position.x + eye-btn.width / 2;
-                            Tip.y = eye-btn.absolute-position.y;
-                        } else if Tip.text == "Watch multiple streams" {
+                    eye-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
                             Tip.text = "";
+                            root.add-stream();
+                        }
+                        changed has-hover => {
+                            if self.has-hover {
+                                Tip.text = "Watch multiple streams";
+                                Tip.side = 0;
+                                Tip.x = eye-btn.absolute-position.x + eye-btn.width / 2;
+                                Tip.y = eye-btn.absolute-position.y;
+                            } else if Tip.text == "Watch multiple streams" {
+                                Tip.text = "";
+                            }
                         }
                     }
                 }
-            }
 
-            // [ Watch Stream ] button (Replace currently focused stream)
-            watch-btn := Rectangle {
-                height: 28px; border-radius: 6px;
-                background: watch-touch.has-hover ? Theme.danger-hover : Theme.danger;
-                animate background { duration: Looks.better-animations ? 100ms : 0ms; }
-                HorizontalLayout {
-                    padding-left: 10px; padding-right: 10px;
-                    watch-label := Text {
-                        text: "Watch stream"; color: #ffffff; font-size: 12px; font-weight: 700; vertical-alignment: center;
+                // [ Watch Stream ] button (Replace currently focused stream)
+                watch-btn := Rectangle {
+                    height: 28px; border-radius: 6px;
+                    background: watch-touch.has-hover ? Theme.danger-hover : Theme.danger;
+                    animate background { duration: Looks.better-animations ? 100ms : 0ms; }
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px;
+                        watch-label := Text {
+                            text: "Watch stream"; color: #ffffff; font-size: 12px; font-weight: 700; vertical-alignment: center;
+                        }
                     }
-                }
-                watch-touch := TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => {
-                        Tip.text = "";
-                        root.watch-stream();
+                    watch-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            Tip.text = "";
+                            root.watch-stream();
+                        }
                     }
                 }
             }
@@ -822,7 +825,7 @@ component TileChip inherits Rectangle {
     opacity: !root.hover-only ? 1.0 : (root.hovered ? 1.0 : 0.0);
     visible: !root.hover-only || root.hovered || self.opacity > 0.01;
     animate opacity {
-        duration: Looks.better-animations ? (root.hovered ? 120ms : 150ms) : 0ms;
+        duration: (!root.hover-only || !Looks.better-animations) ? 0ms : (root.hovered ? 120ms : 150ms);
         easing: ease-out;
     }
     chip := HorizontalLayout {
@@ -849,12 +852,6 @@ component StreamPicture inherits Rectangle {
     in property <image> frame;
     in property <string> status;
     Image { width: parent.width; height: parent.height; source: root.frame; image-fit: contain; }
-    // The stage is black in every theme, so its note is a fixed grey.
-    if root.frame.width == 0: Text {
-        x: 16px; width: parent.width - 32px; height: parent.height;
-        text: root.status; color: #b5b8c1; font-size: 14px;
-        horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap;
-    }
 }
 
 // The call's participants as tiles in a grid. A click on one shows it large,
@@ -1029,7 +1026,7 @@ export component ParticipantGrid inherits Flickable {
 
     property <length> tile-width: root.has-active-streams ? self.g4-w : self.normal-tile-width;
     property <length> tile-height: root.has-active-streams ? self.g4-h : self.normal-tile-height;
-    property <int> columns: root.has-active-streams ? (self.active-count <= 2 ? self.active-count : 2) : self.normal-columns;
+    property <int> columns: root.has-active-streams ? (root.is-focus-mode ? 1 : (self.active-count <= 2 ? self.active-count : 2)) : self.normal-columns;
     property <length> first-row: root.has-active-streams ? self.top-inset : self.normal-first-row;
     property <length> focus-width: self.focus-w;
     property <length> focus-height: self.focus-h;
@@ -1134,18 +1131,20 @@ export component ParticipantGrid inherits Flickable {
         y: root.tile-y-pos(self.slot, self.is-large, self.in-strip, self.active-slot);
         width: root.tile-w-size(self.is-large, self.in-strip, self.active-slot);
         height: root.tile-h-size(self.is-large, self.in-strip, self.active-slot);
-        visible: !root.full || self.is-large;
+        visible: !root.full || self.is-large || (root.is-multi-grid && !self.in-strip);
         focused: root.is-focus-mode ? self.is-large : (root.focused-active == 0);
         full: root.full;
-        top-right-avoid: root.is-focus-mode && self.is-large;
+        is-multi-grid: root.is-multi-grid;
         background: #000000;
         label: "Your screen, " + root.share-status;
         viewers: root.share-viewers; viewer-names: root.share-viewer-names;
         clicked => {
             if root.is-focus-mode {
                 if !self.is-large { root.focus-tile(0); }
-            } else if root.active-count == 3 {
-                root.grid-lead = self.active-slot;
+            } else if root.is-multi-grid {
+                if root.focused-active != 0 {
+                    root.focus-tile(0);
+                }
             }
         }
         full-screen(on) => { root.full-screen(on); }
@@ -1167,9 +1166,15 @@ export component ParticipantGrid inherits Flickable {
         property <int> slot: position + (root.sharing ? 1 : 0);
         property <PersonRow> person: root.participants[index];
         property <bool> watched: self.person.watched || (self.person.id == root.watch-user && root.has-active-streams);
+        property <image> stream-pic: (root.is-focus-mode && (stream.is-large || stream.focused) && stream.person.id == root.watch-user && root.watch-frame.width > 0)
+            ? root.watch-frame
+            : (root.stream-frames.length > index && root.stream-frames[index].width > 0
+                ? root.stream-frames[index]
+                : @image-url(""));
+        property <bool> video-ready: self.watched && self.person.stream-ready;
         property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
-        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
-        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : self.person.unwatched-index;
+        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.video-ready) : (root.focusing && !self.is-large);
+        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : (self.person.unwatched-index >= 0 ? self.person.unwatched-index : (self.slot < root.large-slot ? self.slot : (self.slot - 1)));
         property <int> active-slot: (root.sharing ? 1 : 0) + self.person.watched-index;
         property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
         property <bool> is-active: true;
@@ -1177,42 +1182,46 @@ export component ParticipantGrid inherits Flickable {
         y: self.is-active ? root.tile-y-pos(self.slot, self.is-large, self.in-strip, self.active-slot) : -1000px;
         width: self.is-active ? root.tile-w-size(self.is-large, self.in-strip, self.active-slot) : 0px;
         height: self.is-active ? root.tile-h-size(self.is-large, self.in-strip, self.active-slot) : 0px;
-        visible: self.is-active && (!root.full || self.is-large);
+        visible: self.is-active && (!root.full || self.is-large || (root.is-multi-grid && !self.in-strip));
         focused: root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active);
         full: root.full;
-        top-right-avoid: self.is-top-right;
         is-strip: self.in-strip;
-        background: #000000;
-        label: self.watched ? self.person.name + "'s screen" : "Watch " + self.person.name + "'s stream";
-        viewers: self.watched ? root.watch-viewers : [];
-        viewer-names: self.watched ? root.watch-viewer-names : "";
-        stop-label: self.watched ? "Stop watching" : "";
-        can-watch: !self.watched;
+        is-multi-grid: root.is-multi-grid;
+        background: self.video-ready ? #000000 : Theme.raised;
+        label: self.video-ready ? self.person.name + "'s screen" : "Watch " + self.person.name + "'s stream";
+        viewers: self.video-ready ? root.watch-viewers : [];
+        viewer-names: self.video-ready ? root.watch-viewer-names : "";
+        stop-label: self.video-ready ? "Stop watching" : "";
+        can-watch: !self.video-ready;
         watch-stream => { root.watch-stream(self.person.id); }
         add-stream => { root.add-stream(self.person.id); }
         clicked => {
             if !self.watched {
                 root.watch-stream(self.person.id);
-            } else if root.is-focus-mode {
-                if !self.is-large { root.focus-tile(self.slot); }
-            } else if root.is-multi-grid {
-                root.focus-tile(self.slot);
+            } else if self.watched && !self.video-ready {
+                root.stop-watching(self.person.id);
+            } else if self.video-ready {
+                if root.is-focus-mode {
+                    if !self.is-large { root.focus-tile(self.slot); }
+                } else if root.is-multi-grid {
+                    if self.active-slot != root.focused-active {
+                        root.focus-tile(self.slot);
+                    }
+                }
             }
         }
         right-clicked(x, y) => { root.open-volume(self.person, x, y); }
         stop => { root.stop-watching(self.person.id); }
         full-screen(on) => { root.full-screen(on); }
-        if stream.watched: StreamPicture {
-            frame: root.stream-frames.length > index && root.stream-frames[index].width > 0
-                ? root.stream-frames[index]
-                : ((stream.is-large || stream.focused) && stream.person.id == root.watch-user ? root.watch-frame : @image-url(""));
+        if stream.video-ready: StreamPicture {
+            frame: stream.stream-pic;
             status: stream.person.stream-status != "" ? stream.person.stream-status : root.watch-status;
         }
-        if !stream.watched: VerticalLayout {
+        if !stream.video-ready: VerticalLayout {
             alignment: center; spacing: 10px;
             Image { height: 30px; source: @image-url("icons/screen-share.svg"); image-fit: contain; colorize: #b5b8c1; }
         }
-        if !stream.watched: Rectangle {
+        if !stream.video-ready: Rectangle {
             x: 8px; y: 8px;
             width: stream-live-badge.preferred-width + 8px; height: 16px; border-radius: 3px;
             background: Theme.danger;
@@ -1224,7 +1233,8 @@ export component ParticipantGrid inherits Flickable {
         TileChip {
             tile-width: parent.width; tile-height: parent.height; name: stream.person.name; live: stream.is-large;
             name-color: stream.person.has-color ? stream.person.color : #ffffff;
-            hover-only: stream.watched;
+            note: "";
+            hover-only: stream.video-ready;
             hovered: stream.has-hover;
             Image { source: @image-url("icons/screen-share.svg"); width: 14px; image-fit: contain; colorize: #ffffff; }
         }
@@ -1235,9 +1245,15 @@ export component ParticipantGrid inherits Flickable {
         property <bool> filmed: self.frame.width > 0;
         property <bool> streams-here: person.live && !person.local && !person.video;
         property <bool> watched: self.streams-here && (person.watched || (person.id == root.watch-user && root.has-active-streams));
+        property <image> stream-pic: (root.is-focus-mode && (tile.is-large || tile.focused) && person.id == root.watch-user && root.watch-frame.width > 0)
+            ? root.watch-frame
+            : (root.stream-frames.length > position && root.stream-frames[position].width > 0
+                ? root.stream-frames[position]
+                : @image-url(""));
+        property <bool> video-ready: self.watched && person.stream-ready;
         property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
-        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
-        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : person.unwatched-index;
+        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.video-ready) : (root.focusing && !self.is-large);
+        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : (person.unwatched-index >= 0 ? person.unwatched-index : (self.slot < root.large-slot ? self.slot : (self.slot - 1)));
         property <int> active-slot: (root.sharing ? 1 : 0) + person.watched-index;
         property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
         property <bool> is-active: true;
@@ -1245,27 +1261,31 @@ export component ParticipantGrid inherits Flickable {
         y: self.is-active ? root.tile-y-pos(self.slot, self.is-large, self.in-strip, self.active-slot) : -1000px;
         width: self.is-active ? root.tile-w-size(self.is-large, self.in-strip, self.active-slot) : 0px;
         height: self.is-active ? root.tile-h-size(self.is-large, self.in-strip, self.active-slot) : 0px;
-        visible: self.is-active && (!root.full || self.is-large);
+        visible: self.is-active && (!root.full || self.is-large || (root.is-multi-grid && !self.in-strip));
         focused: root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active);
         full: root.full;
-        top-right-avoid: self.is-top-right;
         is-strip: self.in-strip;
-        background: self.filmed || self.watched ? #000000 : Theme.raised;
+        is-multi-grid: root.is-multi-grid;
+        background: self.filmed || self.video-ready ? #000000 : Theme.raised;
         label: person.name + ", " + person.status + (person.video ? ", camera on" : "");
-        viewers: self.watched ? root.watch-viewers : [];
-        viewer-names: self.watched ? root.watch-viewer-names : "";
-        stop-label: self.watched ? "Stop watching" : "";
-        can-watch: self.streams-here && !self.watched;
+        viewers: self.video-ready ? root.watch-viewers : [];
+        viewer-names: self.video-ready ? root.watch-viewer-names : "";
+        stop-label: self.video-ready ? "Stop watching" : "";
+        can-watch: self.streams-here && !self.video-ready;
         watch-stream => { root.watch-stream(person.id); }
         add-stream => { root.add-stream(person.id); }
         clicked => {
             if self.streams-here && !self.watched {
                 root.watch-stream(person.id);
-            } else if self.watched {
+            } else if self.watched && !self.video-ready {
+                root.stop-watching(person.id);
+            } else if self.video-ready {
                 if root.is-focus-mode {
                     if !self.is-large { root.focus-tile(self.slot); }
                 } else if root.is-multi-grid {
-                    root.focus-tile(self.slot);
+                    if self.active-slot != root.focused-active {
+                        root.focus-tile(self.slot);
+                    }
                 }
             } else if !self.streams-here && !self.watched {
                 root.show-voice-person(root.voice-channel, person.id);
@@ -1276,20 +1296,18 @@ export component ParticipantGrid inherits Flickable {
         full-screen(on) => { root.full-screen(on); }
 
         if tile.filmed: Image { width: tile.width; height: tile.height; source: tile.frame; image-fit: contain; }
-        if tile.watched: StreamPicture {
-            frame: root.stream-frames.length > position && root.stream-frames[position].width > 0
-                ? root.stream-frames[position]
-                : ((tile.is-large || tile.focused) && person.id == root.watch-user ? root.watch-frame : @image-url(""));
+        if tile.video-ready: StreamPicture {
+            frame: tile.stream-pic;
             status: person.stream-status != "" ? person.stream-status : root.watch-status;
         }
-        if !tile.filmed && !tile.watched: Avatar {
+        if !tile.filmed && !tile.video-ready: Avatar {
             size: root.is-focus-mode && tile.is-large ? min(96px, min(parent.height * 0.35, parent.width * 0.35)) : min(48px, min(parent.height * 0.5, parent.width * 0.5));
             initial: person.initial; tint: person.tint; picture: person.picture;
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 4px;
             opacity: person.connected ? 1 : 0.5;
         }
-        // Small crisp red LIVE badge at top-left for unwatched broadcasting tiles
-        if tile.streams-here && !tile.watched: Rectangle {
+        // Small crisp red LIVE badge at top-left for unwatched broadcasting tiles, or watched tiles waiting for frames
+        if tile.streams-here && !tile.video-ready: Rectangle {
             x: 8px; y: 8px;
             width: live-badge.preferred-width + 8px; height: 16px; border-radius: 3px;
             background: Theme.danger;
@@ -1313,7 +1331,7 @@ export component ParticipantGrid inherits Flickable {
             name: person.name; live: tile.is-large && person.live && (person.local || !person.video);
             name-color: person.has-color ? person.color : #ffffff;
             note: person.status != "Muted" && person.status != "Deafened" && person.status != "Speaking" && person.status != "Listening" ? person.status : "";
-            hover-only: tile.watched;
+            hover-only: tile.video-ready;
             hovered: tile.has-hover;
             if person.muted && !person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
             if person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
@@ -1322,7 +1340,7 @@ export component ParticipantGrid inherits Flickable {
     // Layout switcher (Focus / Grid) when streams are being watched: compact vertical stack at top-right
     if root.has-active-streams && !root.full: Rectangle {
         x: root.width - self.width - 12px;
-        y: 8px;
+        y: 44px;
         width: 74px;
         height: 52px;
         z: 10;

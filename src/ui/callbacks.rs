@@ -3193,7 +3193,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         if let Some(window) = weak.upgrade() {
             let mut adapter = state.borrow_mut();
             let new_user = id.to_string();
-            // Clear watch_frame so stale frames from the previous stream do not linger or flash
+            // Clear watch_frame so stale frames from the previous stream do not linger
             window.set_watch_frame(slint::Image::default());
             // If replacing, clear the replaced stream's frame from stream_frames
             if let Some(super::tiles::Focus::Stream(old_user)) = &adapter.call_focus
@@ -3211,10 +3211,15 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                     .models
                     .stream_frames
                     .set_row_data(old_pos, slint::Image::default());
+                if let Some(mut row) = adapter.models.participants.row_data(old_pos) {
+                    row.stream_ready = false;
+                    row.watched = false;
+                    adapter.models.participants.set_row_data(old_pos, row);
+                }
             }
-            adapter.call_focus = Some(super::tiles::Focus::Stream(new_user));
+            adapter.call_focus = Some(super::tiles::Focus::Stream(new_user.clone()));
+            window.set_watch_user(new_user.into());
             adapter.action(&window, Action::Voice(voice::Command::Watch(id.into())));
-            adapter.show_stage(&window);
         }
     });
     let state = adapter.clone();
@@ -3222,6 +3227,17 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     window.on_add_stream(move |id| {
         if let Some(window) = weak.upgrade() {
             let mut adapter = state.borrow_mut();
+            let is_already_watching = adapter
+                .app
+                .state
+                .voice
+                .watching
+                .iter()
+                .any(|w| w.user == id.as_str());
+            if is_already_watching {
+                return;
+            }
+            tracing::info!("[STREAM-DIAG] Add Stream clicked for: {}", id);
             // Ensure currently focused stream stays firmly focused so adding does not visually interrupt it
             if adapter.call_focus.is_none() {
                 let current_first = adapter
@@ -3273,6 +3289,11 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                         .models
                         .stream_frames
                         .set_row_data(pos, slint::Image::default());
+                    if let Some(mut row) = adapter.models.participants.row_data(pos) {
+                        row.stream_ready = false;
+                        row.watched = false;
+                        adapter.models.participants.set_row_data(pos, row);
+                    }
                 }
                 // 2. If the stopped stream was the focused stream, switch focus to another remaining watched stream
                 if matches!(&adapter.call_focus, Some(super::tiles::Focus::Stream(u)) if u == target) {
@@ -3374,6 +3395,10 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                 && let Some(frames) = watching.frames.as_ref()
                 && let Some(frame) = frames.take(image)
             {
+                let is_first_frame = index < stream_frames.row_count()
+                    && stream_frames
+                        .row_data(index)
+                        .is_none_or(|img| img.size().width == 0);
                 if index < stream_frames.row_count() {
                     stream_frames.set_row_data(index, frame.clone());
                 }
@@ -3383,6 +3408,18 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                 };
                 if is_focused {
                     window.set_watch_frame(frame);
+                }
+                if is_first_frame {
+                    tracing::info!(
+                        "[STREAM-DIAG] First valid decoded frame received for: {}",
+                        person.id
+                    );
+                    if let Some(mut row) = adapter.models.participants.row_data(index)
+                        && !row.stream_ready
+                    {
+                        row.stream_ready = true;
+                        adapter.models.participants.set_row_data(index, row);
+                    }
                 }
             }
         }
@@ -3704,7 +3741,9 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
               focus_width,
               focus_height| {
             let Some(window) = weak.upgrade() else { return };
-            let mut adapter = state.borrow_mut();
+            let Ok(mut adapter) = state.try_borrow_mut() else {
+                return;
+            };
             adapter.tiles = Some(Tiles {
                 columns: columns.max(0) as u32,
                 width,
@@ -3724,25 +3763,31 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     let weak = window.as_weak();
     window.on_focus_tile(move |slot| {
         let Some(window) = weak.upgrade() else { return };
-        let mut adapter = state.borrow_mut();
+        let Ok(mut adapter) = state.try_borrow_mut() else {
+            return;
+        };
         let adapter = &mut *adapter;
         let voice = &adapter.app.state.voice;
         let stage = Stage {
             participants: &voice.participants,
             sharing: voice.sharing.is_some(),
         };
-        adapter.call_focus = usize::try_from(slot)
+        let new_focus = usize::try_from(slot)
             .ok()
             .and_then(|slot| stage.focus_at(slot));
+        if adapter.call_focus == new_focus {
+            return;
+        }
+        adapter.call_focus = new_focus;
         adapter.show_stage(&window);
         let focus_user = match &adapter.call_focus {
             Some(super::tiles::Focus::Stream(u)) => Some(u.clone()),
             _ => None,
         };
-        adapter.action(
-            &window,
-            Action::Voice(voice::Command::FocusStream(focus_user)),
-        );
+        let effects = adapter
+            .app
+            .dispatch(Action::Voice(voice::Command::FocusStream(focus_user)));
+        adapter.execute(effects);
     });
     let state = adapter.clone();
     let weak = window.as_weak();
