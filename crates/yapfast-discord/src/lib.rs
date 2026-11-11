@@ -38,8 +38,8 @@ pub mod profile;
 pub mod profile_effect;
 pub mod ready;
 pub mod remote_auth;
-#[cfg(target_os = "linux")]
-mod rpc;
+#[cfg(any(target_os = "linux", windows, test))]
+pub(crate) mod rpc;
 pub mod rtp;
 pub mod scheduled_event;
 pub mod search;
