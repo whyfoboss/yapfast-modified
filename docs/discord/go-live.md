@@ -250,9 +250,8 @@ all watched streams are laid out in a balanced 16:9 grid (2 side-by-side, 3 bala
 4 in 2x2). Broadcaster tiles provide two actions: "Watch stream" (replaces the
 current focused stream and audio route) and an eye icon button (adds the stream
 to active viewing without replacing current streams or changing audio focus).
-Audio is dynamically routed: only the currently focused stream plays sound
-(`Control::Hear(true)`), while background streams remain visually active without
-audio (`Control::Hear(false)`). Deafen silences all streams. Each stream tile
+All watched streams play sound at their own chosen volume, independently of
+which stream is focused. Deafen silences all streams. Each stream tile
 includes an individual close control that stops only that stream; closing the
 focused stream seamlessly re-focuses on the next active stream. Yapfast's
 workers play as "Yapfast", which sharing
