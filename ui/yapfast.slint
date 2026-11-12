@@ -3154,7 +3154,11 @@ export component YapfastWindow inherits Window {
                             }
                             if root.voice-here: VerticalLayout {
                                 spacing: 0px;
-                                if !root.stage-full: ParticipantGrid {
+                                if !root.stage-full: stage-hover := TouchArea {
+                                  vertical-stretch: 1;
+                                  ParticipantGrid {
+                                    width: parent.width; height: parent.height;
+                                    stage-hovered: stage-hover.has-hover;
                                     participants: root.participants; frames: root.participant-frames;
                                     stream-frames: root.stream-frames;
                                     camera-starting: root.camera-starting; sharing: root.sharing; share-live: root.share-live;
@@ -3184,6 +3188,7 @@ export component YapfastWindow inherits Window {
                                     tiles(columns, width, height, gap, top, scrolled, shown, focused, focus-width, focus-height) => {
                                         root.call-tiles(columns, width, height, gap, top, scrolled, shown, focused, focus-width, focus-height);
                                     }
+                                  }
                                 }
                                 CallControls {
                                     muted: root.muted; deafened: root.deafened; voice-ready: root.voice-ready; voice-leaving: root.voice-leaving;

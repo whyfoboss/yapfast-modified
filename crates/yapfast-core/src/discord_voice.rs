@@ -100,11 +100,17 @@ impl Share {
         if let Some(preview) = &self.preview {
             preview.abort();
         }
+        drop(self.worker);
         if let Some(key) = &self.key {
             discord.end_stream(key);
         }
-        drop(self.worker);
         state.sharing = None;
+    }
+}
+
+fn clear_stopped_share_error(state: &mut State) {
+    if state.error.as_deref().is_some_and(|error| error.starts_with("Lost the stream connection:")) {
+        state.error = None;
     }
 }
 
@@ -717,6 +723,7 @@ pub(crate) async fn call(
                                 stopped.stop(discord, state);
                             }
                             starting = None;
+                            clear_stopped_share_error(state);
                         }
                         Some(Command::Watch(user)) => {
                             let is_watching = watches.iter().any(|w| w.user == user);

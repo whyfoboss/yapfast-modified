@@ -4171,6 +4171,13 @@ impl Adapter {
         );
         window.set_has_active_streams(!voice.watching.is_empty() || voice.sharing.is_some());
         let active_focus_user = focused_user.or(primary_watching);
+        if window.get_watch_user().as_str() != active_focus_user.unwrap_or_default() {
+            let frame = active_focus_user
+                .and_then(|user| voice.participants.iter().position(|person| person.id == user))
+                .and_then(|index| self.models.stream_frames.row_data(index))
+                .unwrap_or_default();
+            window.set_watch_frame(frame);
+        }
         window.set_watch_user(active_focus_user.unwrap_or_default().into());
         let pip = stage.pip(self.call_focus.as_ref(), primary_watching);
         window.set_pip_kind(match pip {

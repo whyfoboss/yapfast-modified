@@ -842,6 +842,7 @@ component TileChip inherits Rectangle {
     in property <length> tile-height;
     in property <bool> hover-only: false;
     in property <bool> hovered: false;
+    in property <bool> larger-compact-name: false;
     property <bool> is-compact: root.tile-height <= 110px;
     in property <bool> avatar-clearance;
     x: root.is-compact ? 6px : 10px;
@@ -863,7 +864,7 @@ component TileChip inherits Rectangle {
         @children
         Text {
             text: root.name; color: root.name-color;
-            font-size: root.is-compact ? 11px : 13px;
+            font-size: root.is-compact ? (root.larger-compact-name ? 12px : 11px) : 13px;
             font-weight: 700; vertical-alignment: center; overflow: elide;
         }
         if root.live: Middle { LivePill { } }
@@ -892,6 +893,7 @@ component StreamPicture inherits Rectangle {
 // The call's participants as tiles in a grid. A click on one shows it large,
 // with the others in rows beneath, until a click beside it.
 export component ParticipantGrid inherits Flickable {
+    in property <bool> stage-hovered;
     in property <[PersonRow]> participants;
     /// Each participant's newest camera picture, in the same order.
     in property <[image]> frames;
@@ -1397,10 +1399,24 @@ export component ParticipantGrid inherits Flickable {
             name: tile.person.name; live: tile.is-large && tile.person.live && (tile.person.local || !tile.person.video);
             name-color: tile.person.has-color ? tile.person.color : #ffffff;
             note: tile.person.status != "Muted" && tile.person.status != "Deafened" && tile.person.status != "Speaking" && tile.person.status != "Listening" ? tile.person.status : "";
-            hover-only: tile.video-ready;
-            hovered: tile.has-hover;
+            larger-compact-name: root.is-focus-mode && tile.in-strip;
+            hover-only: tile.video-ready || (root.is-focus-mode && tile.in-strip);
+            hovered: root.is-focus-mode && tile.in-strip ? root.stage-hovered : tile.has-hover;
             if tile.person.muted && !tile.person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
             if tile.person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
+        }
+        if tile.person.muted || tile.person.deafened: Rectangle {
+            x: person-chip.x; y: person-chip.y;
+            width: tile.height <= 110px ? 24px : 28px; height: person-chip.height;
+            border-radius: person-chip.border-radius; background: #000000a6;
+            opacity: 1 - person-chip.opacity;
+            visible: self.opacity > 0;
+            Image {
+                width: 12px; height: 12px;
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                source: tile.person.deafened ? @image-url("icons/headphone-off.svg") : @image-url("icons/mic-off.svg");
+                image-fit: contain; colorize: Theme.danger;
+            }
         }
     }
     // Layout switcher (Focus / Grid) when streams are being watched: compact vertical stack at top-right

@@ -2,6 +2,20 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
+fn stopping_a_share_clears_only_its_connection_error() {
+    let mut state = State {
+        error: Some("Lost the stream connection: connection reset".into()),
+        ..State::default()
+    };
+    clear_stopped_share_error(&mut state);
+    assert_eq!(state.error, None);
+
+    state.error = Some("Could not switch speakers".into());
+    clear_stopped_share_error(&mut state);
+    assert_eq!(state.error.as_deref(), Some("Could not switch speakers"));
+}
+
+#[test]
 fn a_failed_join_shows_the_step_that_failed() {
     let failed =
         anyhow::anyhow!("the voice server didn't answer address discovery, asked 5 times over 5 s");

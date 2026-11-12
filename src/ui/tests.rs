@@ -12259,7 +12259,7 @@ fn task7_stream_tick_delivers_independent_frames() {
         (writer, Arc::new(frames))
     };
     let (mut writer2, frames2) = {
-        let frames = yapfast_core::frames::Frames::create(2, 2).unwrap();
+        let frames = yapfast_core::frames::Frames::create(3, 2).unwrap();
         let writer = yapfast_core::frames::Writer::open(&frames.path().unwrap()).unwrap();
         (writer, Arc::new(frames))
     };
@@ -12269,11 +12269,7 @@ fn task7_stream_tick_delivers_independent_frames() {
             255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
         ])
     });
-    writer2.write(2, 2, |buf| {
-        buf[..16].copy_from_slice(&[
-            0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
-        ])
-    });
+    writer2.write(3, 2, |buf| buf[..24].fill(42));
 
     {
         let mut ad = adapter.borrow_mut();
@@ -12344,8 +12340,22 @@ fn task7_stream_tick_delivers_independent_frames() {
     let frame_bob = stream_frames.row_data(1).unwrap();
     assert_eq!(frame_alice.size().width, 2);
     assert_eq!(frame_alice.size().height, 2);
-    assert_eq!(frame_bob.size().width, 2);
+    assert_eq!(frame_bob.size().width, 3);
     assert_eq!(frame_bob.size().height, 2);
+    assert_eq!(window.get_watch_frame().size().width, 2);
+
+    // Both feeds are already open. Switching must use Bob's last frame even
+    // when no new frame arrives during the focus change.
+    window.invoke_focus_tile(1);
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(window.get_watch_frame().size().width, 3);
+    window.invoke_focus_tile(0);
+    assert_eq!(window.get_watch_user(), "alice");
+    assert_eq!(window.get_watch_frame().size().width, 2);
+    window.invoke_focus_tile(1);
+    writer2.write(2, 2, |buf| buf[..16].fill(84));
+    window.invoke_stream_tick();
+    assert_eq!(window.get_watch_frame().size().width, 2);
 }
 
 #[test]
