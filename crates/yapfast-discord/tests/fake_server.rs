@@ -3210,6 +3210,15 @@ async fn calls_and_goes_live() {
         "the lost packets were asked for and resent: {repairs}"
     );
     assert!(repairs["receiverReports"].as_u64() >= Some(1), "{repairs}");
+    post_control(server, "/_control/stream-codec?no-keyframes", "av1");
+    let fallback = watched.clone();
+    let frames = tokio::task::spawn_blocking(move || {
+        watch_frames(&fallback, vec![Codec::Av1, Codec::H264], 12)
+    })
+    .await
+    .unwrap();
+    assert!(frames[0].2, "fallback begins with a keyframe");
+    assert!(frames.iter().all(|frame| frame.0 == Codec::H264));
     stream_codec(server, "vp8");
     discord.end_stream(&bob_stream);
     let reason = live_where(&mut live, |event| match event {
@@ -3508,6 +3517,16 @@ async fn join_lounge(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
 async fn a_call_follows_a_move_to_another_voice_server() {
+    follows_voice_move(4014).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn a_call_follows_a_move_when_the_old_call_is_terminated() {
+    follows_voice_move(4022).await;
+}
+
+async fn follows_voice_move(close_code: u16) {
     let fixture = Fixture::start("a_call_follows_a_move_to_another_voice_server").await;
     let (discord, server, guild) = (&fixture.discord, fixture.server, &fixture.guild);
     let listener = Arc::new(Dropping::default());
@@ -3525,7 +3544,7 @@ async fn a_call_follows_a_move_to_another_voice_server() {
         .find(|found| found.name == "Create Room")
         .map(|found| found.id.clone())
         .unwrap();
-    post_control(server, &format!("/_control/voice-move?channel={to}"), "");
+    post_control(server, &format!("/_control/voice-move?channel={to}&close={close_code}"), "");
     let channel = live_where(&mut live, |event| match event {
         Live::VoiceChannel {
             guild: moved,
@@ -3548,7 +3567,7 @@ async fn a_call_follows_a_move_to_another_voice_server() {
         !listener.dropped.lock().unwrap().is_empty()
     })
     .await;
-    assert!(listener.dropped.lock().unwrap()[0].contains("4014"));
+    assert!(listener.dropped.lock().unwrap()[0].contains(&close_code.to_string()));
     // The call waited, and carries on there: Bob's tone comes through.
     timeout(WAIT, call.move_to(&moved, &to))
         .await

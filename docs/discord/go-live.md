@@ -209,7 +209,11 @@ a packet or its end marker is dropped. After loss, a decryption or decoding
 error, or a full decoder queue, playback holds the last picture and drops
 dependent frames until a keyframe arrives. The connection retries its picture
 loss indication at most every 500 ms until a keyframe reaches the decoder,
-even if no further video packets arrive. It sends a receiver report every second
+even if no further video packets arrive. AV1 recovery also recognizes a keyframe
+after decryption when it reuses the existing coded sequence. If AV1 video
+packets and audio arrive but no usable first keyframe does, the viewer retries
+the media connection once with H264 and VP8. The connection
+sends a receiver report every second
 (packets lost, the highest received, and the streamer's last sender report
 echoed). With `YAPFAST_LOG=debug` it logs what it received every 5 s (`stream
 received`): packets out of order, resent, recovered, given up on, and keyframes
@@ -229,8 +233,7 @@ call is connected; Discord drops a watch sent before. The stream's sound, Opus
 on the streamer's audio SSRC, is DAVE-decrypted as audio and played by the
 worker through `audio_io.rs` on the call's speakers (`stream_audio::Player`),
 about 100 ms queued. Short RTP gaps use Opus packet loss concealment and
-late duplicates are skipped. Being deafened silences it, which Yapfast tells the worker
-with a `hear` control. Up to 4 streams can be watched simultaneously in the same
+late duplicates are skipped. Up to 4 streams can be watched simultaneously in the same
 call. Each active stream runs an independent worker process, WebRTC socket,
 decoder and shared-memory frame buffer. The gateway manages concurrent op 20
 (`STREAM_WATCH`) and op 19 (`STREAM_DELETE`) sessions keyed by stream key. The
@@ -248,10 +251,10 @@ The strip can also show unwatched
 broadcasters with a LIVE badge and secondary watched streams. In multi-stream Grid Mode (2-4 streams),
 all watched streams are laid out in a balanced 16:9 grid (2 side-by-side, 3 balanced,
 4 in 2x2). Broadcaster tiles provide two actions: "Watch stream" (replaces the
-current focused stream and audio route) and an eye icon button (adds the stream
-to active viewing without replacing current streams or changing audio focus).
+currently focused stream) and an eye icon button (adds the stream to active
+viewing without replacing current streams).
 All watched streams play sound at their own chosen volume, independently of
-which stream is focused. Deafen silences all streams. Each stream tile
+which stream is focused. Deafen silences the call audio and leaves the watched streams audible. Each stream tile
 includes an individual close control that stops only that stream; closing the
 focused stream seamlessly re-focuses on the next active stream. Yapfast's
 workers play as "Yapfast", which sharing

@@ -108,9 +108,7 @@ button, and streamer nickname chip) appear only on hover with smooth fade
 animations (120ms in, 150ms out) when Better Animations is enabled, and zero
 flicker over buttons. Close and viewer controls are neatly anchored to the
 top-right corner of each stream tile (inset 10px from the tile's upper and right
-edges) across Focus and Grid modes. Audio routes dynamically: only the focused stream is
-audible (`Control::Hear(true)`), while background streams render video silently
-(`Control::Hear(false)`). Toggling deafen silences all streams. Closing a stream
+edges) across Focus and Grid modes. All watched streams play at their chosen volume. Deafen silences the call audio and leaves the watched streams audible. Closing a stream
 releases its dedicated worker process and memory immediately, dynamically
 adjusting the grid layout. Stream replacement and additive stream subscription
 maintain video presentation stability without intermediate blank frames or

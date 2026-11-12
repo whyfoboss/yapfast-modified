@@ -29,6 +29,8 @@ use crate::{
 
 /// How often a viewer may ask for a keyframe while frames are lost.
 const KEYFRAME_REQUESTS: Duration = Duration::from_millis(500);
+/// Give AV1 several keyframe requests before trying H264 for the first picture.
+const AV1_START_GRACE: Duration = Duration::from_secs(4);
 /// How often a streamer sends an RTCP sender report.
 const SENDER_REPORTS: Duration = Duration::from_secs(1);
 /// How often a viewer logs what it received while no picture comes through.
@@ -849,7 +851,7 @@ impl Video {
         if changed {
             self.assembler = Assembler::new(codec);
         }
-        (self.assembler.push(packet), changed)
+        (self.assembler.push_for_decryption(packet), changed)
     }
 }
 
@@ -866,7 +868,38 @@ async fn receive_stream(
     ),
     mut stopped: oneshot::Receiver<()>,
 ) -> Result<()> {
-    let mut connection = open(server, user, channel, Role::Receive, shared).await?;
+    let fallback = receive_stream_once(
+        server, user, channel, streamer_id, shared, (&frames, &sounds), &mut stopped,
+    )
+    .await?;
+    if fallback {
+        lock(&shared.offers).retain(|codec| !matches!(codec, Codec::Av1 | Codec::H265));
+        shared.keyframe.store(true, Ordering::Relaxed);
+        receive_stream_once(
+            server, user, channel, streamer_id, shared, (&frames, &sounds), &mut stopped,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Returns true when the same watch should reconnect without AV1.
+async fn receive_stream_once(
+    server: &StreamServer,
+    user: u64,
+    channel: u64,
+    streamer_id: u64,
+    shared: &Shared,
+    (frames, sounds): (
+        &channel::SyncSender<ReceivedFrame>,
+        &channel::SyncSender<ReceivedSound>,
+    ),
+    stopped: &mut oneshot::Receiver<()>,
+) -> Result<bool> {
+    let mut connection = tokio::select! {
+        _ = &mut *stopped => return Ok(false),
+        connection = open(server, user, channel, Role::Receive, shared) => connection?,
+    };
     let mut streamer = Streamer {
         codec: connection.codec,
         ..Streamer::default()
@@ -896,11 +929,16 @@ async fn receive_stream(
     let mut log = tokio::time::interval_at(Instant::now() + LOG_EVERY, LOG_EVERY);
     // Frames handed to the decoder when the log last looked.
     let mut flowing = 0;
+    let can_fallback = {
+        let offers = lock(&shared.offers);
+        offers.contains(&Codec::Av1) && offers.contains(&Codec::H264)
+    };
+    let mut av1_started = None;
     loop {
         tokio::select! {
-            _ = &mut stopped => {
+            _ = &mut *stopped => {
                 let _ = connection.ws.close(None).await;
-                return Ok(());
+                return Ok(false);
             }
             _ = heartbeat.tick() => connection.heartbeat().await?,
             message = receive(&mut connection.ws, &mut connection.seq) => {
@@ -1034,6 +1072,13 @@ async fn receive_stream(
                     received.other += 1;
                     continue;
                 }
+                if can_fallback && received.decoded == 0 {
+                    if codec == Codec::Av1 {
+                        av1_started.get_or_insert(Instant::now());
+                    } else {
+                        av1_started = None;
+                    }
+                }
                 // Keep the codec inferred at arrival across session updates and reordering.
                 held.payload_type = codec.payload_types().0;
                 received.video += 1;
@@ -1086,11 +1131,15 @@ async fn receive_stream(
                     recovering = true;
                     continue;
                 };
-                let keyframe = frame.keyframe;
+                let keyframe = frame.keyframe
+                    || (codec == Codec::Av1 && recovering && rtp::av1_recovery_keyframe(&data));
+                if codec == Codec::Av1 && recovering && !keyframe {
+                    continue;
+                }
                 let frame = ReceivedFrame {
                     codec,
                     data,
-                    keyframe: frame.keyframe,
+                    keyframe,
                 };
                 match frames.try_send(frame) {
                     Ok(()) => {
@@ -1102,7 +1151,7 @@ async fn receive_stream(
                         video.assembler.wait_for_keyframe();
                         recovering = true;
                     }
-                    Err(channel::TrySendError::Disconnected(_)) => return Ok(()),
+                    Err(channel::TrySendError::Disconnected(_)) => return Ok(false),
                 }
             }
             let missing = video.reorder.to_ask(now);
@@ -1123,6 +1172,15 @@ async fn receive_stream(
             let mut request = rtp::picture_loss(connection.ssrc, media);
             connection.transport.seal(&mut request, rtp::RTCP_CLEAR)?;
             connection.udp.send(&request).await?;
+        }
+        if received.decoded == 0
+            && received.sounds > 0
+            && av1_started.is_some_and(|started| started.elapsed() >= AV1_START_GRACE)
+        {
+            tracing::warn!(target: "yapfast_stream", unreadable = received.unreadable,
+                "AV1 supplied no usable first keyframe; retrying the stream with H264");
+            let _ = connection.ws.close(None).await;
+            return Ok(true);
         }
     }
 }

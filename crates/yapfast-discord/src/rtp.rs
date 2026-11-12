@@ -363,6 +363,34 @@ pub fn obu_elements(frame: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(elements)
 }
 
+/// A shown keyframe in a live AV1 sequence, after DAVE decryption.
+pub(crate) fn av1_recovery_keyframe(mut unit: &[u8]) -> bool {
+    while let Some(&header) = unit.first() {
+        let header_size = if header & OBU_EXTENSION != 0 { 2 } else { 1 };
+        let Some(mut payload) = unit.get(header_size..) else {
+            return false;
+        };
+        let size = if header & OBU_HAS_SIZE != 0 {
+            let Some((size, used)) = read_leb128(payload) else {
+                return false;
+            };
+            payload = &payload[used..];
+            size
+        } else {
+            payload.len()
+        };
+        let Some((obu, rest)) = payload.split_at_checked(size) else {
+            return false;
+        };
+        if matches!((header >> 3) & 0x0f, 3 | 6) {
+            // show_existing_frame = 0, frame_type = KEY_FRAME, show_frame = 1.
+            return obu.first().is_some_and(|byte| byte & 0xf0 == 0x10);
+        }
+        unit = rest;
+    }
+    false
+}
+
 /// AV1 payloads as AOM's RTP payload format lays them out: an aggregation
 /// header, then OBU elements, each after its LEB128 length but for the last
 /// when the packet holds three or fewer (W). An element too large for a
@@ -606,6 +634,14 @@ impl Assembler {
     }
 
     pub fn push(&mut self, packet: &Packet) -> Pushed {
+        self.push_packet(packet, false)
+    }
+
+    pub(crate) fn push_for_decryption(&mut self, packet: &Packet) -> Pushed {
+        self.push_packet(packet, self.codec == Codec::Av1)
+    }
+
+    fn push_packet(&mut self, packet: &Packet, keyframe_after_decryption: bool) -> Pushed {
         let gap = self
             .expected
             .is_some_and(|expected| expected != packet.sequence);
@@ -669,7 +705,7 @@ impl Assembler {
                 lost: true,
             };
         }
-        if self.waiting && !self.keyframe {
+        if self.waiting && !self.keyframe && !keyframe_after_decryption {
             return Pushed {
                 frame: None,
                 lost: true,
@@ -729,8 +765,8 @@ impl Assembler {
 
     /// AV1's OBU elements, written as OBUs that give their size but for
     /// the last, as DAVE left it: its decryptor reads the frame as the
-    /// sender sealed it. N in a packet's aggregation header makes the frame
-    /// a keyframe.
+    /// sender sealed it. N marks a new sequence, but a recovery keyframe can
+    /// reuse the current sequence and is identified after decryption.
     fn av1(&mut self, payload: &[u8]) {
         let Some((&header, mut rest)) = payload.split_first() else {
             self.damaged = true;
@@ -1979,6 +2015,23 @@ mod tests {
             rest = &rest[length..];
         }
         units
+    }
+
+    #[test]
+    fn recovers_av1_on_a_keyframe_without_a_new_sequence_flag() {
+        let mut packetizer = Packetizer::new(5, Codec::Av1);
+        let mut assembler = Assembler::new(Codec::Av1);
+        let units = av1_recording();
+        assembler.wait_for_keyframe();
+        for (index, unit) in units.iter().enumerate() {
+            let packets = packetizer.packets(unit, index as u32 * 3000, false);
+            let frame = packets
+                .iter()
+                .find_map(|packet| assembler.push_for_decryption(&parse(packet).unwrap()).frame)
+                .expect("complete AV1 unit must reach decryption");
+            assert!(!frame.keyframe, "the sender did not set the N bit");
+            assert_eq!(av1_recovery_keyframe(&frame.data), index == 0 || index == 15);
+        }
     }
 
     #[test]

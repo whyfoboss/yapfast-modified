@@ -3914,6 +3914,7 @@ const h265Recording = annexB(readFileSync(new URL("stream-h265.h265", fixtures))
 /** And in AV1, for viewers that decode that. */
 const av1Recording = obus(readFileSync(new URL("stream-av1.obu", fixtures)));
 let streamCodec: "vp8" | "h264" | "h265" | "av1" = "vp8";
+let skipAv1Keyframes = false;
 
 /** A viewer of Bob's stream and what it was sent. */
 type Watcher = {
@@ -4026,7 +4027,7 @@ function streamTo(ws: Socket, key: Buffer, ssrc: number, watcher = watchers.get(
       // one in fragments: W of 1, Z and Y marking fragments, and N on a
       // keyframe's first packet, which starts with its sequence header.
       const { elements, keyframe } = av1Recording[frame % av1Recording.length]!;
-      elements.forEach((element, index) => {
+      if (!skipAv1Keyframes || !keyframe) elements.forEach((element, index) => {
         const last = index === elements.length - 1;
         for (let at = 0; at < element.length; at += 1100) {
           const end = at + 1100 >= element.length;
@@ -8367,7 +8368,8 @@ const server = Bun.serve<SocketData>({
       }
       state.channel = to;
       announce(ALICE);
-      for (const ws of voiceSockets) if (!ws.data.stream && ws.data.callKey) ws.close(4014, "Disconnected.");
+      const closeCode = url.searchParams.get("close") === "4022" ? 4022 : 4014;
+      for (const ws of voiceSockets) if (!ws.data.stream && ws.data.callKey) ws.close(closeCode, "Disconnected.");
       setTimeout(name, 40);
       return new Response(`moved Alice to ${to}\n`);
     }
@@ -8613,6 +8615,7 @@ const server = Bun.serve<SocketData>({
       const codec = (await req.text()).trim();
       if (codec !== "vp8" && codec !== "h264" && codec !== "h265" && codec !== "av1") return new Response("vp8, h264, h265 or av1\n", { status: 400 });
       streamCodec = codec;
+      skipAv1Keyframes = codec === "av1" && url.searchParams.has("no-keyframes");
       return new Response(`streams are ${codec}\n`);
     }
     if (req.method === "POST" && path === "/_control/chat-start") {
