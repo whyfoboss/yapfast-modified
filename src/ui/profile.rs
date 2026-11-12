@@ -152,7 +152,7 @@ pub(super) fn activity_panel(
 /// someone is doing; see `yapfast_discord::activity::subline`.
 #[cfg(feature = "discord")]
 pub(super) fn subline(
-    activities: &yapfast_core::chat::Activities,
+    activities: &[yapfast_core::chat::Activity],
     line: Option<&str>,
 ) -> (i32, bool, Option<String>) {
     let subline = yapfast_core::yapfast_discord::activity::subline(activities, line);
@@ -161,7 +161,7 @@ pub(super) fn subline(
 
 #[cfg(not(feature = "discord"))]
 pub(super) fn subline(
-    _activities: &yapfast_core::chat::Activities,
+    _activities: &[yapfast_core::chat::Activity],
     _line: Option<&str>,
 ) -> (i32, bool, Option<String>) {
     (0, false, None)
@@ -296,10 +296,12 @@ pub(super) fn activity_row(activity: &yapfast_core::chat::Activity) -> ActivityR
         large_text: text(&activity.large_text),
         small_url: text(&activity.small_image),
         small_text: text(&activity.small_text),
+        media: activity.kind == yapfast_core::chat::ActivityKind::Listening,
         start: seconds(activity.start),
         end: seconds(activity.end),
         url: text(&activity.url),
         link: text(&activity.link),
+        ..Default::default()
     }
 }
 
@@ -329,6 +331,11 @@ impl Adapter {
             && window.get_settings_section() == 8
             && window.get_has_game_activity_preview();
         let shown = preview_timed
+            || (window.get_profile_editor_open()
+                && window
+                    .get_profile_editor_activity()
+                    .iter()
+                    .any(|row| !row.paused && (row.start > 0 || row.end > 0)))
             || (self.app.state.profile.is_some() && timed(window.get_profile()))
             || (self.app.state.panel_profile.is_some() && timed(window.get_panel_profile()));
         if !shown {

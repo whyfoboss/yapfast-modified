@@ -22,6 +22,8 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use memmap2::MmapMut;
 
+use crate::picture::I420;
+
 const MAGIC: u32 = u32::from_le_bytes(*b"TKFR");
 const HEADER: usize = 64;
 const SLOTS: u32 = 3;
@@ -36,7 +38,7 @@ struct Header {
     capacity: u32,
     /// The middle slot's index, with [`FRESH`].
     middle: AtomicU32,
-    _reserved: u32,
+    i420: u32,
     /// Each slot's frame size, as width and height in pixels.
     sizes: [[AtomicU32; 2]; SLOTS as usize],
     /// When each slot's frame shows in a video file, in milliseconds.
@@ -46,8 +48,12 @@ struct Header {
 const _: () = assert!(size_of::<Header>() <= HEADER);
 
 /// The largest frame `width` by `height` RGBA pixels fit in.
-fn capacity(width: u32, height: u32) -> usize {
-    width as usize * height as usize * 4
+fn capacity(width: u32, height: u32, i420: bool) -> usize {
+    if i420 {
+        I420::packed_len(width, height)
+    } else {
+        width as usize * height as usize * 4
+    }
 }
 
 struct Mapping {
@@ -78,6 +84,10 @@ impl Mapping {
         // SAFETY: the map is at least HEADER bytes, page aligned, and Header
         // is plain integers.
         unsafe { &*self.map.as_ptr().cast::<Header>() }
+    }
+
+    fn frame_len(&self, width: u32, height: u32) -> usize {
+        capacity(width, height, self.header().i420 != 0)
     }
 
     fn slot(&self, index: u32) -> *mut u8 {
@@ -172,13 +182,21 @@ impl std::fmt::Debug for Frames {
 impl Frames {
     /// Creates a file for frames up to `width` by `height` pixels.
     pub fn create(width: u32, height: u32) -> Result<Self> {
+        Self::create_format(width, height, false)
+    }
+
+    pub(crate) fn create_i420(width: u32, height: u32) -> Result<Self> {
+        Self::create_format(width, height, true)
+    }
+
+    fn create_format(width: u32, height: u32, i420: bool) -> Result<Self> {
         let directory = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|directory| directory.is_dir())
             .unwrap_or_else(std::env::temp_dir);
         let (file, name) =
             create_file(directory).context("could not create the video frames file")?;
-        let capacity = capacity(width, height);
+        let capacity = capacity(width, height, i420);
         file.set_len((HEADER + SLOTS as usize * capacity) as u64)
             .context("could not size the video frames file")?;
         {
@@ -189,6 +207,7 @@ impl Frames {
             map[4..8].copy_from_slice(&u32::try_from(capacity)?.to_ne_bytes());
             // The worker starts with slot 0 and the UI with slot 2.
             map[8..12].copy_from_slice(&1u32.to_ne_bytes());
+            map[12..16].copy_from_slice(&u32::from(i420).to_ne_bytes());
         }
         Ok(Self {
             mapping: Mapping::open(&file)?,
@@ -221,6 +240,18 @@ impl Frames {
         self.take_timed(show).map(|(shown, _)| shown)
     }
 
+    /// Reads a stream frame in either the packed or legacy RGBA format.
+    pub fn take_stream<T>(
+        &self,
+        show: impl FnOnce(u32, u32, &[u8], Option<I420<'_>>) -> T,
+    ) -> Option<T> {
+        self.take(|w, h, pixels| {
+            let picture =
+                (self.mapping.header().i420 != 0).then(|| I420::from_packed(w, h, pixels));
+            show(w, h, pixels, picture)
+        })
+    }
+
     /// As [`Self::take`], with when the frame shows in a video file.
     pub fn take_timed<T>(&self, show: impl FnOnce(u32, u32, &[u8]) -> T) -> Option<(T, u64)> {
         let header = self.mapping.header();
@@ -231,13 +262,19 @@ impl Frames {
             .front
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if header.middle.load(Ordering::Acquire) & FRESH == 0 {
+            return None;
+        }
         *front = header.middle.swap(*front, Ordering::AcqRel) & !FRESH;
         let [width, height] = &header.sizes[*front as usize];
         let (width, height) = (
             width.load(Ordering::Relaxed),
             height.load(Ordering::Relaxed),
         );
-        let length = capacity(width, height).min(self.mapping.capacity);
+        let length = self
+            .mapping
+            .frame_len(width, height)
+            .min(self.mapping.capacity);
         // SAFETY: the worker no longer writes this slot: it's the UI's front
         // until the UI swaps it back.
         let pixels = unsafe { std::slice::from_raw_parts(self.mapping.slot(*front), length) };
@@ -267,12 +304,29 @@ impl Writer {
 
     /// The largest frame, in pixels, that fits.
     pub fn fits(&self, width: u32, height: u32) -> bool {
-        capacity(width, height) <= self.mapping.capacity
+        self.mapping.frame_len(width, height) <= self.mapping.capacity
     }
 
     /// Writes a frame with `fill`, which gets its RGBA pixels, then shows it.
     pub fn write(&mut self, width: u32, height: u32, fill: impl FnOnce(&mut [u8])) {
         self.write_timed(width, height, 0, fill);
+    }
+
+    pub(crate) fn write_video(
+        &mut self,
+        picture: I420<'_>,
+        width: u32,
+        height: u32,
+        scratch: &mut Vec<u8>,
+    ) {
+        let packed = self.mapping.header().i420 != 0;
+        self.write(width, height, |pixels| {
+            if packed {
+                picture.pack(pixels, width, height);
+            } else {
+                picture.to_rgba(scratch, pixels, width, height);
+            }
+        });
     }
 
     /// As [`Self::write`], for a frame of a video file showing at `time_ms`.
@@ -286,7 +340,10 @@ impl Writer {
         assert!(self.fits(width, height), "a frame larger than its slot");
         // SAFETY: the back slot is the worker's alone until it's swapped in.
         let pixels = unsafe {
-            std::slice::from_raw_parts_mut(self.mapping.slot(self.back), capacity(width, height))
+            std::slice::from_raw_parts_mut(
+                self.mapping.slot(self.back),
+                self.mapping.frame_len(width, height),
+            )
         };
         fill(pixels);
         let header = self.mapping.header();
@@ -301,6 +358,32 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_stream_frames_match_the_rgba_path() {
+        let (width, height) = (9, 7);
+        let bytes: Vec<_> = (0..I420::packed_len(width, height))
+            .map(|n| (n * 17) as u8)
+            .collect();
+        let source = I420::from_packed(width, height, &bytes);
+        let frames = Frames::create_i420(width, height).unwrap();
+        let mut writer = Writer::open(&frames.path().unwrap()).unwrap();
+        for (w, h) in [(width, height), (6, 4)] {
+            let mut scratch = Vec::new();
+            let mut expected = vec![0; (w * h * 4) as usize];
+            source.to_rgba(&mut scratch, &mut expected, w, h);
+            writer.write_video(source, w, h, &mut scratch);
+            let shown = frames
+                .take_stream(|w, h, pixels, picture| {
+                    assert_eq!(pixels.len(), I420::packed_len(w, h));
+                    let mut rgba = vec![0; (w * h * 4) as usize];
+                    picture.unwrap().to_rgba(&mut scratch, &mut rgba, w, h);
+                    rgba
+                })
+                .unwrap();
+            assert_eq!(shown, expected);
+        }
+    }
 
     #[test]
     fn frames_pass_from_writer_to_reader() {

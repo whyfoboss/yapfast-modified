@@ -64,7 +64,9 @@ component ActivityPicture inherits Rectangle {
     in property <string> url;
     in property <string> label;
     in property <length> size;
-    property <image> picture: root.url != "" ? PictureStore.picture(root.url, PictureStore.revision) : @image-url("");
+    in property <image> artwork;
+    in property <image> fallback;
+    property <image> picture: root.artwork.width > 0 ? root.artwork : root.url != "" ? PictureStore.picture(root.url, PictureStore.revision) : @image-url("");
     function request() {
         if root.url != "" && root.picture.width == 0 {
             PictureStore.request(root.url);
@@ -79,6 +81,9 @@ component ActivityPicture inherits Rectangle {
     accessible-role: image;
     accessible-label: root.label;
     Image { source: root.picture; width: root.size; height: root.size; image-fit: cover; }
+    if root.picture.width == 0 && root.fallback.width > 0: Image {
+        source: root.fallback; width: root.size / 2; height: root.size / 2; colorize: Theme.muted;
+    }
 }
 
 /// A card in the panel above the member list, from Discord's activity feed.
@@ -357,6 +362,7 @@ export struct ActivityRow {
     details: string, state: string,
     /// The addresses of its large and small pictures, and what they name.
     large-url: string, large-text: string, small-url: string, small-text: string,
+    artwork: image, media: bool, paused: bool, paused-position: int,
     /// When it started and when it ends, in ActivityClock's seconds; 0 when
     /// Discord didn't say.
     start: int, end: int,
@@ -671,12 +677,13 @@ component ActivityTime inherits Rectangle {
 
 export component ActivityCard inherits VerticalLayout {
     in property <ActivityRow> activity;
+    in property <image> fallback;
     callback open-link(string);
     property <bool> timed: root.activity.start > 0 || root.activity.end > 0;
     // A song, with its start and end, shows how far it's got on a bar.
     property <bool> bar: root.activity.start > 0 && root.activity.end > root.activity.start;
     property <int> length: root.activity.end - root.activity.start;
-    property <int> played: max(0, min(self.length, ActivityClock.now - root.activity.start));
+    property <int> played: max(0, min(self.length, root.activity.paused ? root.activity.paused-position : ActivityClock.now - root.activity.start));
     /// `0:42`, `12:05` or `1:02:03`.
     pure function clock(seconds: int) -> string {
         let hours = floor(seconds / 3600);
@@ -688,9 +695,9 @@ export component ActivityCard inherits VerticalLayout {
     ProfileHeading { text: root.activity.heading; }
     HorizontalLayout {
         spacing: 12px;
-        if root.activity.large-url != "": Rectangle {
+        if root.activity.large-url != "" || root.activity.artwork.width > 0 || root.fallback.width > 0: Rectangle {
             width: 64px; height: 64px;
-            ActivityPicture { size: 64px; url: root.activity.large-url; label: root.activity.large-text; }
+            ActivityPicture { size: 64px; url: root.activity.large-url; label: root.activity.large-text; artwork: root.activity.artwork; fallback: root.fallback; }
             if root.activity.small-url != "": Rectangle {
                 x: 44px; y: 44px; width: 26px; height: 26px; border-radius: 13px; background: Theme.sidebar;
                 Rectangle {
@@ -720,7 +727,7 @@ export component ActivityCard inherits VerticalLayout {
             if root.activity.details != "": Text { text: root.activity.details; color: Theme.secondary; font-size: 13px; overflow: elide; }
             if root.activity.state != "": Text { text: root.activity.state; color: Theme.secondary; font-size: 13px; overflow: elide; }
             if root.timed && !root.bar: ActivityTime {
-                text: root.activity.start > 0
+                text: root.activity.paused ? root.clock(root.activity.paused-position) + " elapsed" : root.activity.start > 0
                     ? root.clock(max(0, ActivityClock.now - root.activity.start)) + " elapsed"
                     : root.clock(max(0, root.activity.end - ActivityClock.now)) + " left";
             }

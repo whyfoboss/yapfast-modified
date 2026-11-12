@@ -81,6 +81,15 @@ real Windows.
 
 ## How to measure
 
+On Windows, `testing/measure_windows_streams.py EXE OUTPUT --capture-window`
+uses a generated 1080p window and three 1080p30 Fake Discord streams. Pass
+`--packed` for builds with packed I420 stream mappings. The JSON output
+reports private working set and private commit for the workers, and mapping
+capacity separately. It also records video and audio counters. The preview
+window is measured separately from the workers, since this test does not
+render the streams in the application. Bun, ffmpeg and Python with Tk are
+needed for this local test.
+
 Measure a `measure` build of the release features, not `fast`, which leaves
 the Slint interface unoptimized. Use `release` only when the question is the
 shipped build's absolute number.

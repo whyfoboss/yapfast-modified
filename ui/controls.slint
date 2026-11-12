@@ -143,7 +143,7 @@ export component IconButton inherits Rectangle {
                     Tip.text = root.label;
                     Tip.side = root.tip-side;
                     Tip.x = root.tip-side == 1 ? face.absolute-position.x + root.size : face.absolute-position.x + root.size / 2;
-                    Tip.y = root.tip-side == 0 ? face.absolute-position.y : root.tip-side == 1 ? face.absolute-position.y + root.size / 2 : face.absolute-position.y + root.size;
+                    Tip.y = (root.tip-side == 0 || root.tip-side == 4) ? face.absolute-position.y : root.tip-side == 1 ? face.absolute-position.y + root.size / 2 : face.absolute-position.y + root.size;
                 } else if Tip.text == root.label {
                     Tip.text = "";
                 }
@@ -1204,10 +1204,10 @@ export component ContextMenu inherits Rectangle {
             return accept;
         }
         main-panel := Rectangle {
-            opacity: Looks.better-animations ? (0.2 + 0.8 * root.enter-amount) : 1.0;
-            transform-scale: Looks.better-animations ? Popup.menu-scale(root.enter-amount) : 1.0;
+            opacity: Looks.better-animations ? root.enter-amount : 1.0;
             transform-origin: { x: root.flip ? root.menu-width : 0px, y: 0px };
-            x: root.flip ? root.content-width - root.menu-width : 0px; y: root.lift;
+            x: (root.flip ? root.content-width - root.menu-width : 0px) + (Looks.better-animations ? (1 - root.enter-amount) * (root.flip ? 8px : -8px) : 0px);
+            y: root.lift;
             width: root.menu-width; height: root.main-height;
             background: Theme.menu; border-color: Theme.menu-line; border-width: 1px; border-radius: 8px;
             drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;

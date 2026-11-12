@@ -607,9 +607,11 @@ windows to choose those collectibles, so their tiles open Discord's shop.
 Hide Styles folds the column away, sliding, and the Show Styles tab on the
 card's edge brings it back.
 
-The name, the pronouns, the bio and the note are outlined while pointed at,
-the name with a pencil at its end, and clicking one turns it into a field in
-place; Enter, Escape or a click elsewhere on the card ends it. The note
+The name, bio and note are outlined while pointed at. Clicking the name or
+bio opens its field in place. The pronouns field is directly after the username
+and takes focus by click or Tab. Activity cards appear below it. Profile badges
+are shown in profile views outside this editor. Enter, Escape
+or a click elsewhere on the card ends text editing. The note
 opens the note's dialog, as on anyone's profile. Hovering the avatar or banner
 darkens it under a pencil, and clicking it opens the file chooser, or a menu
 of Change and Remove when there's one to remove; without Nitro the banner
@@ -785,7 +787,9 @@ an error. As Discord's desktop client does when a game connects, it asks
 first time the game names an image, `GET /oauth2/applications/{id}/assets`
 for its images' ids. Images given by https address go to
 `POST /applications/{id}/external-assets` and show through the media proxy
-as `mp:` assets; each client's last 32 addresses are kept. Timestamps in
+as `mp:` assets; each client's last 32 addresses are kept. Text and timing
+are published while images are resolving. An image update only enriches
+its client's current activity and preserves the order of active clients. Timestamps in
 seconds become the gateway's milliseconds, and buttons become labels with
 their addresses in the activity's `metadata`. Playing, Listening, Watching
 and Competing activities show. Yapfast copies only the fields it knows, so a
@@ -798,6 +802,25 @@ is never saved. Presence updates keep to Discord's limit, as every other
 presence change does.
 
 ## Game detection
+
+Own presence excludes Watching activities and Windows sessions that report
+video. A Windows session needs an identified music player or a matching music
+integration because a browser can label video as music and expose an opaque
+application id. A matched session supplies playback position and pause state
+for that integration. Browser applications are excluded from own presence.
+
+On Windows, the Game Activity card and own profiles use the SMTC playback
+position when the current media session matches the RPC track. Paused
+positions stay fixed. Published music RPC omits the running timer while
+paused and uses the Windows playback timeline again on resume. Video RPC,
+including YouTube reported as Playing, is filtered from own presence.
+Media and RPC artwork arrive independently of the
+initial activity. For local troubleshooting, `YAPFAST_MEDIA_LOG=1` enables
+the `yapfast_media` transition and timing diagnostics.
+
+A per-app Off rule filters the published presence, the own roster line and
+live and cached own activity cards. The rule remains in the detected list
+so it can be enabled again.
 
 Settings → Game activity → Share the game you play is the account's own
 `show_current_game` setting, which Discord's apps change too. Yapfast reads
@@ -819,7 +842,8 @@ services don't count. The game started last shows and stays while it runs.
 One that ended clears after two scans without it, up to 30 s. Only the
 game's name, its application id and when it started go to Discord.
 
-Rich Presence comes first, then the custom games, Discord's list and Steam.
+Game and application Rich Presence comes first, then the custom games,
+Discord's list and Steam. Detected games take precedence over music.
 A custom game is an executable and the name to show after Playing: a file
 name matches the executable in any folder, a full path only there, and
 Windows and Wine paths ignore case. Custom games and per-application sharing
@@ -847,9 +871,15 @@ rich metadata, and a live music progress bar.
   button for instant verification without needing third-party processes.
 - **Windows SMTC Media Sessions:** On Windows, native WinRT media session tracking
   (`Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager`)
-  detects playing audio across compatible media players and browsers (Spotify,
-  SoundCloud, Apple Music, Edge, Chrome), subscribing to track, timeline, and
-  playback status events with zero polling overhead.
+  follows the current session across compatible media players and browsers,
+  subscribing to track, timeline, and playback status events. The preview
+  keeps paused tracks at their reported position and clears stopped sessions.
+  It uses SMTC thumbnails or resolved RPC artwork, with a media or game icon
+  if artwork is unavailable. An RPC activity's timestamps alone do not
+  indicate a pause. When browser media and RPC describe the same recording,
+  the preview uses the reported Windows position and keeps the RPC artwork
+  as a fallback. Edit Profile shows the same local activity below the handle
+  without changing the draft fields.
 - **Discord Account Safety:** Yapfast strictly preserves Discord account safety.
   Rich media sessions and custom multi-app presences are displayed locally in
   Yapfast and Fake Discord environments; outbound Gateway presence publishes

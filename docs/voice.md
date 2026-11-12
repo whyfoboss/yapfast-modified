@@ -82,6 +82,11 @@ with click-to-promote; 4 streams form a 2x2 grid. In multi-stream Grid mode
 (2-4 streams), the stage dedicates full space to the stream videos. All layouts
 preserve 16:9 aspect ratios.
 
+Click the open space beside an enlarged share to return it to the compact
+layout. It keeps playing there. Click the share tile to enlarge it again.
+Participant tiles show avatar decorations where available. For a speaking
+streamer, the outline follows the outside of the visible video.
+
 In Focus mode (or Grid mode with a single stream), the focused stream occupies
 the upper stage area, and a horizontal participant thumbnail strip appears
 below it. This strip displays all other people currently in the voice channel

@@ -28,7 +28,8 @@ own stream has a tile of its own, which opens large as others' do, without
 watching it through Discord: it shows the worker's preview.
 
 Capture runs in a worker process, `yapfast --stream-worker`, so its buffers take
-memory only while sharing; the process exits when sharing stops. Playing a
+memory only while sharing; stopping the share ends the worker before closing its
+Discord stream, and clears a stale share-connection error. Playing a
 video file runs there too (`Job::Play`, `video_player`), which also keeps
 FFmpeg's reading of files people sent out of the window's process. Its
 frames carry their time, which the seek bar shows.
@@ -38,6 +39,9 @@ names a deleted file once a rebuild or update replaces it. Frames reach the UI t
 file in the runtime directory. The file is unlinked once the worker opens it.
 Windows won't delete a mapped file, so there it's a temporary file that
 Windows deletes once both processes close it.
+Screen sharing and watching store packed I420 in those slots, preserving the
+original video samples. The UI converts the newest frame directly into its
+display buffer. File playback keeps its RGBA frames and timestamps.
 The worker's standard error goes to Yapfast's log file. If its output ends
 without an `ended` report, as when it crashes, the popup says "Screen sharing
 stopped unexpectedly." and Yapfast logs a warning, "the stream worker ended
@@ -55,7 +59,9 @@ no such dialog, and libwebrtc uses the portal only on Wayland, so elsewhere,
 as on Windows and in an X11 session such as XFCE's, the share menu lists the
 screens and windows libwebrtc's capturers find (`stream_worker::shareable`),
 and the worker captures the one picked by its id; see the
-[Windows guide](../windows-beta.md#go-live-on-windows). On X11 the capturers
+[Windows guide](../windows-beta.md#go-live-on-windows). On Windows the outgoing
+frames include the cursor from the capture backend or WebRTC's cursor composer.
+On X11 the capturers
 read the X server, and Yapfast's own windows are listed too.
 `stream_worker::portal_picks` makes the choice as libwebrtc does:
 `XDG_SESSION_TYPE` starting with `wayland` and `WAYLAND_DISPLAY` set. The
@@ -187,7 +193,9 @@ Watching works the same way in reverse. Clicking someone's LIVE badge, or their
 tile in the call, sends op 20 and starts a worker with a watch job. The worker
 connects as a viewer, offers AV1, H265, H264 and VP8 for decoding only (H265
 only where it's built, on Linux and Windows), and asks for video with op 15. It
-learns the streamer's SSRCs and codec from op 12 and op 14, then puts RTP
+learns the streamer's SSRCs and codec from op 12 and op 14. Inactive video
+layers cannot replace the selected source or reserve packet buffers. Among
+active layers, the highest advertised quality wins. It then puts RTP
 packets back in order (`rtp::Reorder`) and together into frames
 (`rtp::Assembler`: VP8 descriptors, H264 single units, STAP-A and FU-A, and
 H265 single units, aggregation and fragmentation units, as Annex B; AV1's
@@ -197,18 +205,21 @@ Discord's client does, it asks for a missing packet again at once with a
 generic NACK, again every 80 ms up to three times, and takes the resend from
 the streamer's RTX SSRC (RFC 4588); padding there, which probes the path, is
 dropped. Packets after a gap wait for it at most 300 ms. A frame still missing
-a packet is dropped, and so is everything after it until the next keyframe. So
-are frames while none has come yet, and after one the decoder was too far
-behind to take. The connection asks for a keyframe with a picture loss
-indication, at most every 500 ms. It sends a receiver report every second
+a packet or its end marker is dropped. After loss, a decryption or decoding
+error, or a full decoder queue, playback holds the last picture and drops
+dependent frames until a keyframe arrives. The connection retries its picture
+loss indication at most every 500 ms until a keyframe reaches the decoder,
+even if no further video packets arrive. It sends a receiver report every second
 (packets lost, the highest received, and the streamer's last sender report
 echoed). With `YAPFAST_LOG=debug` it logs what it received every 5 s (`stream
 received`): packets out of order, resent, recovered, given up on, and keyframes
-asked for. The worker decodes with libvpx or with the FFmpeg H264 decoder in
+asked for. `YAPFAST_STREAM_LOG=1` reports packet, assembler, decoder, and UI
+progress without stream content or account identifiers. The worker decodes
+with libvpx or with the FFmpeg H264 decoder in
 libwebrtc's archive (`native/decode.c`), AV1 with the dav1d in the same
 archive (`native/av1.c`), a picture out for each frame in, or H265 with the
 HEVC decoder of `vendor/ffmpeg-src`'s FFmpeg (`native/hevc.c`), which
-libwebrtc's lacks, and writes RGBA at up to 1080p into the shared frames.
+libwebrtc's lacks, and writes packed I420 at up to 1440p into the shared frames.
 dav1d takes 0.07 of a core for 1080p30 AV1 at 3.6 Mbit/s, against 0.1 for
 H265 at the same bitrate. That FFmpeg is built with
 its x86-64 assembly, without which H265 took over three times the processor
@@ -217,7 +228,8 @@ sharing in another channel joins it first, once asked, and watches once the
 call is connected; Discord drops a watch sent before. The stream's sound, Opus
 on the streamer's audio SSRC, is DAVE-decrypted as audio and played by the
 worker through `audio_io.rs` on the call's speakers (`stream_audio::Player`),
-about 100 ms queued; being deafened silences it, which Yapfast tells the worker
+about 100 ms queued. Short RTP gaps use Opus packet loss concealment and
+late duplicates are skipped. Being deafened silences it, which Yapfast tells the worker
 with a `hear` control. Up to 4 streams can be watched simultaneously in the same
 call. Each active stream runs an independent worker process, WebRTC socket,
 decoder and shared-memory frame buffer. The gateway manages concurrent op 20
@@ -228,9 +240,12 @@ at 15 Mbit/s to satisfy WebRTC Google Congestion Control (GCC) estimators and
 prevent stream stalls on Discord's voice servers. Shared memory frame buffers
 support up to 2560x1440 without software downscaling, converting decoded I420
 frames directly to RGBA via SIMD. In Focus Mode (or single-stream Grid mode),
-the focused stream is featured at the top, while all other channel participants
-appear in a thumbnail strip below (members, unwatched broadcasters with a LIVE
-badge, and secondary watched streams). In multi-stream Grid Mode (2-4 streams),
+the focused stream appears at the top, using its latest frame immediately when
+switching between streams already being watched. The streamer's avatar or camera stays in
+the strip below with the other participants. Avatars and their decorations
+share the tile's center. Main participant tiles allow a larger avatar.
+The strip can also show unwatched
+broadcasters with a LIVE badge and secondary watched streams. In multi-stream Grid Mode (2-4 streams),
 all watched streams are laid out in a balanced 16:9 grid (2 side-by-side, 3 balanced,
 4 in 2x2). Broadcaster tiles provide two actions: "Watch stream" (replaces the
 current focused stream and audio route) and an eye icon button (adds the stream
@@ -272,6 +287,9 @@ With "Encode streams with the GPU" in Settings, Advanced, on unless turned off,
 a stream's H264 goes to the graphics card's encoder where it has one:
 `native/hwenc.c` opens FFmpeg's NVENC encoder, then on Windows its AMF one
 (AMD) and on Linux its VA-API one (AMD and Intel), and x264 when none opens.
+On Windows, NVENC first opens a Direct3D 11 device on the NVIDIA adapter.
+This avoids a dedicated CUDA context while keeping the same codec and
+encoding settings. If the device or encoder cannot open, NVENC tries CUDA.
 It's on by default because it takes almost no processor time and looks better
 than x264 at low bitrates. Intel graphics encode with x264 on Windows so far.
 The setting lives in `layout.json` and reaches the worker with each

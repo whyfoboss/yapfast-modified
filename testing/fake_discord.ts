@@ -86,6 +86,7 @@
 // and back when he stops. Watching
 // Bob's stream gets testing/fixtures' recording once the viewer asks for video
 // with op 15: VP8 or, after POST /_control/stream-codec with "h264", H264;
+// POST /_control/stream-video?paused=1 holds video while audio continues.
 // with "h265" or "av1", that codec to viewers that decode it, and H264 to
 // the rest.
 // Alice has a DM with Bob, whose last two messages she hasn't read, and a
@@ -261,6 +262,7 @@
 // GET /_control/list-requests counts member list subscriptions. POST
 // /_control/slow with a number of milliseconds slows history, attachments
 // and links' pictures, to show loading states.
+// POST /_control/voice-message makes Bob send the synthetic Ogg/Opus recording.
 // POST /_control/clip makes Bob attach clip.mp4, six seconds with sound, and
 // link a post whose card plays a video, as vxtwitter's do; Carol forwards
 // the clip. They go to #general, or with ?channel=ID to that channel or thread.
@@ -1184,6 +1186,7 @@ type File = {
   data: Uint8Array;
   width?: number;
   height?: number;
+  duration?: number;
   /** Draws the image at a requested size, as Discord's media proxy does. */
   draw?: (width: number, height: number) => Uint8Array;
 };
@@ -1205,6 +1208,7 @@ function wireAttachment(file: File, origin: string) {
     proxy_url: `${origin}/media/${path}`,
     content_type: file.contentType,
     ...(file.width ? { width: file.width, height: file.height } : {}),
+    ...(file.duration ? { duration_secs: file.duration, waveform: "ECAwQA==" } : {}),
   };
 }
 
@@ -3914,6 +3918,7 @@ let streamCodec: "vp8" | "h264" | "h265" | "av1" = "vp8";
 /** A viewer of Bob's stream and what it was sent. */
 type Watcher = {
   stream: string; codec: string; framesSent: number; soundsSent: number; keyframeRequests: number; timer?: Timer;
+  videoPaused?: boolean;
   /** What it's sent, if not testing/fixtures' recording: an env's video,
    *  at its own frame rate. */
   recording?: typeof recordings & { fps?: number };
@@ -3966,6 +3971,7 @@ function streamTo(ws: Socket, key: Buffer, ssrc: number, watcher = watchers.get(
   const history = new Map<number, { payload: Buffer; marker: boolean; timestamp: number; payloadType: number }>();
   let overtaken: Buffer | undefined;
   const send = (payload: Buffer, marker: boolean, timestamp: number, payloadType: number) => {
+    if (watcher.videoPaused) return;
     const number = sequence++ & 0xffff;
     history.set(number, { payload, marker, timestamp, payloadType });
     history.delete((number - 1024) & 0xffff);
@@ -4056,7 +4062,7 @@ function streamTo(ws: Socket, key: Buffer, ssrc: number, watcher = watchers.get(
         }
       });
     }
-    watcher.framesSent++;
+    if (!watcher.videoPaused) watcher.framesSent++;
     // Each 100 ms of sound from Bob's audio SSRC, just before his video's:
     // five Opus frames of silence, plain RTP as a call's audio goes, as the
     // frames reach it. A camera has no sound of its own.
@@ -5067,6 +5073,12 @@ async function api(req: Request, path: string, origin: string): Promise<Response
   if (req.method === "GET" && path === "/oauth2/applications/123456789012345678/rpc") {
     return json({ id: "123456789012345678", name: "Fixture Game" });
   }
+  if (req.method === "GET" && path === "/oauth2/applications/123456789012345681/rpc") {
+    return json({ id: "123456789012345681", name: "SoundCloud" });
+  }
+  if (req.method === "GET" && path === "/oauth2/applications/123456789012345682/rpc") {
+    return json({ id: "123456789012345682", name: "YouTube" });
+  }
   if (req.method === "GET" && path === "/oauth2/applications/123456789012345678/assets") {
     return json([{ id: "123456789012345679", name: "game_cover", type: 1 }]);
   }
@@ -5074,6 +5086,8 @@ async function api(req: Request, path: string, origin: string): Promise<Response
   if (req.method === "POST" && path === "/applications/123456789012345678/external-assets") {
     const body: any = await req.json().catch(() => ({}));
     const urls: string[] = Array.isArray(body.urls) ? body.urls : [];
+    if (urls.some(url => url.endsWith("/slow-artwork.png"))) await Bun.sleep(1500);
+    if (urls.some(url => url.endsWith("/missing-artwork.png"))) return json({ message: "Unavailable" }, 503);
     return json(urls.map(url => ({ url, external_asset_path: `external/fixture/${url.replace("://", "/")}` })));
   }
   // A confirmed remote login's ticket, traded for the login without one.
@@ -7654,7 +7668,7 @@ const GENERIC_CONTROLS = new Set([
   "media-requests", "history", "forwards", "gif-selects", "nitro", "profile", "profile-reset", "server-profile", "health", "presence", "logouts",
   "voice-identifies", "voice-changes", "call-audio", "call-video", "voice-link", "voice-drop", "voice-move", "voice-kick",
   "stream-move", "stream-stop", "stream-start", "sessions", "cookies", "list-requests", "audit-log", "slow", "gateway-reconnect", "qr-scan",
-  "qr-confirm", "qr-captcha", "qr-cancel", "qr-expire", "voice-audio", "video", "stream-codec", "reactor-pages",
+  "qr-confirm", "qr-captcha", "qr-cancel", "qr-expire", "voice-audio", "video", "stream-codec", "stream-video", "reactor-pages",
   "reactor-removals", "thread-searches", "thread-creates", "thread-members", "typed", "acks", "invites",
   "invite-joins", "invite-captcha", "invite-form", "event-interest", "gift-redeems", "oauth-authorizations", "mfa", "soundboard-sends", "custom-call-sounds",
   "logger-scenario", "logger-edit", "logger-delete",
@@ -8577,6 +8591,24 @@ const server = Bun.serve<SocketData>({
         previews,
       });
     }
+    if (req.method === "POST" && path === "/_control/stream-video") {
+      for (const watcher of watchers.values()) watcher.videoPaused = url.searchParams.get("paused") === "1";
+      if (url.searchParams.has("announceInactive") || url.searchParams.has("announceLow")) {
+        const low = url.searchParams.has("announceLow");
+        for (const ws of voiceSockets) {
+          if (!ws.data.stream || !watchers.has(ws.data.ssrc ?? 0)) continue;
+          ws.send(JSON.stringify({ op: 12, d: {
+            user_id: streamOf(ws.data.stream).user,
+            video_ssrc: low ? 5011 : 5001, rtx_ssrc: low ? 5012 : 5002,
+            streams: [
+              { type: "video", ssrc: 5001, rtx_ssrc: 5002, active: true, quality: 100 },
+              { type: "video", ssrc: 5011, rtx_ssrc: 5012, active: low, quality: low ? 25 : 100 },
+            ],
+          }}));
+        }
+      }
+      return new Response("updated stream video\n");
+    }
     if (req.method === "POST" && path === "/_control/stream-codec") {
       const codec = (await req.text()).trim();
       if (codec !== "vp8" && codec !== "h264" && codec !== "h265" && codec !== "av1") return new Response("vp8, h264, h265 or av1\n", { status: 400 });
@@ -8627,6 +8659,15 @@ const server = Bun.serve<SocketData>({
     if (req.method === "POST" && path === "/_control/clip") {
       postVideo(origin, url.searchParams.get("channel") ?? GENERAL);
       return new Response("video posted\n");
+    }
+    if (req.method === "POST" && path === "/_control/voice-message") {
+      const now = Date.now();
+      const channel = url.searchParams.get("channel") ?? GENERAL;
+      const file = addFile({ id: snowflake(now, 1), channel, filename: "voice-message.ogg",
+        contentType: "audio/ogg", duration: 0.65, data: readFileSync(new URL("voice-message.ogg", fixtures)) });
+      const message = post(channel, users.bob, "", now, { files: [file], flags: 1 << 13 });
+      dispatch("MESSAGE_CREATE", dispatched(message, origin));
+      return new Response(message.id);
     }
     if (req.method === "POST" && path === "/_control/components") {
       return new Response(`${postComponents(origin)}\n`);

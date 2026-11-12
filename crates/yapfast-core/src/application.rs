@@ -3216,6 +3216,13 @@ impl Application {
                 self.queue_action(item, |room, item| Command::Retry { room, item })
             }
             Action::CancelSend(item) => {
+                if !self
+                    .state
+                    .message(&item)
+                    .is_some_and(|message| message.can_cancel_send())
+                {
+                    return vec![];
+                }
                 self.queue_action(item, |room, item| Command::Cancel { room, item })
             }
             Action::Stage(paths) => {

@@ -1001,6 +1001,8 @@ fn deletion_needs_confirmation_and_queue_actions_need_a_pending_message() {
     let mut app = connected();
     let mut pending = message("t:txn", true);
     pending.delivery = chat::Delivery::Failed;
+    let mut in_flight = message("n:in-flight", true);
+    in_flight.delivery = chat::Delivery::Sending;
     app.apply(Event::Timeline {
         room: "dm".into(),
         messages: timeline(vec![
@@ -1008,6 +1010,7 @@ fn deletion_needs_confirmation_and_queue_actions_need_a_pending_message() {
             message("e:$mine", true),
             message("e:$other", true),
             pending,
+            in_flight,
         ]),
     });
     app.dispatch(Action::RequestDelete("e:$bob".into()));
@@ -1045,6 +1048,15 @@ fn deletion_needs_confirmation_and_queue_actions_need_a_pending_message() {
         app.dispatch(Action::CancelSend("t:txn".into())).as_slice(),
         [Effect::Backend(Command::Cancel { .. })]
     ));
+    assert!(
+        app.dispatch(Action::CancelSend("n:in-flight".into()))
+            .is_empty()
+    );
+    app.apply(Event::Timeline {
+        room: "dm".into(),
+        messages: timeline(vec![message("e:$bob", false), message("t:txn", true)]),
+    });
+    assert!(app.dispatch(Action::CancelSend("t:txn".into())).is_empty());
     assert!(matches!(
         app.dispatch(Action::React { item: "e:$bob".into(), key: "👍".into() }).as_slice(),
         [Effect::Backend(Command::React { key, .. })] if key == "👍"
@@ -2776,6 +2788,7 @@ fn discord_channels_join_unless_locked_and_hidden_ones_show_on_request() {
 fn videos_play_in_the_open_room_until_it_closes() {
     let mut app = connected();
     let file = |name: &str, video: bool| chat::Attachment {
+        voice_ms: None,
         name: name.into(),
         size: None,
         image: false,
@@ -2855,6 +2868,7 @@ fn videos_play_in_the_open_room_until_it_closes() {
 fn the_viewer_steps_through_a_messages_images() {
     let mut app = connected();
     let file = |name: &str, image: bool| chat::Attachment {
+        voice_ms: None,
         name: name.into(),
         size: None,
         image,
@@ -2936,6 +2950,7 @@ fn the_viewer_steps_through_a_messages_images() {
 fn a_picture_with_an_address_is_copied_to_the_clipboard() {
     let mut app = connected();
     let file = |url: Option<&str>| chat::Attachment {
+        voice_ms: None,
         name: "cat.png".into(),
         size: None,
         image: true,
@@ -3583,6 +3598,7 @@ fn discord_threads_show_beside_their_channel() {
             item: "d:5".into(),
             body: "Saturday?".into(),
             attachments: vec![chat::Attachment {
+                voice_ms: None,
                 name: "map.png".into(),
                 size: None,
                 image: true,
@@ -5133,6 +5149,7 @@ fn shares_the_game_as_the_account_settings_say() {
             Arc::new(Playing {
                 name: name.into(),
                 started_ms: Some(5),
+                activity: None,
             })
         }),
         ..Default::default()
@@ -5143,7 +5160,8 @@ fn shares_the_game_as_the_account_settings_say() {
         app.state.discord_playing,
         Some(chat::Playing {
             name: "Game".into(),
-            started_ms: Some(5)
+            started_ms: Some(5),
+            activity: None,
         })
     );
     assert!(
@@ -5355,6 +5373,7 @@ fn closed_channels_keep_metadata_without_pinning_previews() {
     let picture = Arc::new(Picture::default());
     let with_picture = |index: usize| ChatMessage {
         attachments: vec![crate::chat::Attachment {
+            voice_ms: None,
             name: "a.png".into(),
             size: None,
             image: true,
@@ -9668,6 +9687,7 @@ fn favourite_gifs_show_from_disk_and_stars_wait_for_discords() {
     };
     let with_gif = ChatMessage {
         attachments: vec![crate::chat::Attachment {
+            voice_ms: None,
             name: "cat.webp".into(),
             size: None,
             image: true,

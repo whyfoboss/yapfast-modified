@@ -1943,6 +1943,7 @@ async fn publish_timeline(
                             Some((side(info.width)?, side(info.height)?))
                         });
                         message.attachments = vec![Attachment {
+                            voice_ms: None,
                             name: content.filename().into(),
                             size,
                             image: true,
@@ -1959,6 +1960,7 @@ async fn publish_timeline(
                     MessageType::File(content) => {
                         message.body = content.caption().unwrap_or_default().into();
                         message.attachments = vec![Attachment {
+                            voice_ms: None,
                             name: content.filename().into(),
                             size: content
                                 .info
@@ -1979,6 +1981,7 @@ async fn publish_timeline(
                     MessageType::Video(content) => {
                         message.body = content.caption().unwrap_or_default().into();
                         message.attachments = vec![Attachment {
+                            voice_ms: None,
                             name: content.filename().into(),
                             size: content
                                 .info
@@ -1999,6 +2002,7 @@ async fn publish_timeline(
                     MessageType::Audio(content) => {
                         message.body = content.caption().unwrap_or_default().into();
                         message.attachments = vec![Attachment {
+                            voice_ms: None,
                             name: content.filename().into(),
                             size: content
                                 .info

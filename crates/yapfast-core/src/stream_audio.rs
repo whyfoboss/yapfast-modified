@@ -238,7 +238,7 @@ impl Player {
     /// Plays `sounds` on `speakers`, or the default output, at `volume`, while
     /// `hearing` is set: being deafened silences streams too.
     pub fn start(
-        sounds: std::sync::mpsc::Receiver<Vec<u8>>,
+        sounds: std::sync::mpsc::Receiver<yapfast_discord::stream_connection::ReceivedSound>,
         speakers: Option<String>,
         hearing: Arc<AtomicBool>,
         volume: Arc<Volume>,
@@ -262,7 +262,7 @@ impl Drop for Player {
 }
 
 fn play(
-    sounds: std::sync::mpsc::Receiver<Vec<u8>>,
+    sounds: std::sync::mpsc::Receiver<yapfast_discord::stream_connection::ReceivedSound>,
     speakers: Option<String>,
     hearing: Arc<AtomicBool>,
     volume: Arc<Volume>,
@@ -300,6 +300,7 @@ fn play(
             };
             // Opus's longest frame, 120 ms.
             let mut pcm = vec![0i16; RATE as usize / 1000 * 120 * CHANNELS];
+            let mut timeline = SoundTimeline::default();
             while !stop.load(Ordering::Relaxed) {
                 let opus = match sounds.recv_timeout(Duration::from_millis(100)) {
                     Ok(opus) => opus,
@@ -307,10 +308,29 @@ fn play(
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 if !hearing.load(Ordering::Relaxed) {
+                    timeline = SoundTimeline::default();
                     continue;
                 }
-                match decoder.decode(&opus, &mut pcm, false) {
+                if timeline.ssrc != Some(opus.ssrc) {
+                    timeline = SoundTimeline {
+                        ssrc: Some(opus.ssrc),
+                        previous: None,
+                    };
+                }
+                let Some(gap) = timeline.gap(opus.sequence, opus.timestamp) else {
+                    continue;
+                };
+                for samples in gap {
+                    let conceal = &mut pcm[..samples * CHANNELS];
+                    if decoder.conceal(conceal).is_ok() {
+                        scale(conceal, volume.get());
+                        output.write(conceal);
+                    }
+                }
+                match decoder.decode(&opus.data, &mut pcm, false) {
                     Ok(samples) => {
+                        timeline.previous =
+                            Some((opus.sequence, opus.timestamp.wrapping_add(samples as u32)));
                         let pcm = &mut pcm[..samples * CHANNELS];
                         scale(pcm, volume.get());
                         output.write(pcm);
@@ -324,6 +344,53 @@ fn play(
         .recv()
         .context("the stream's sound stopped before it started")??;
     Ok(thread)
+}
+
+#[derive(Default)]
+struct SoundTimeline {
+    ssrc: Option<u32>,
+    previous: Option<(u16, u32)>,
+}
+
+impl SoundTimeline {
+    fn gap(&self, sequence: u16, timestamp: u32) -> Option<impl Iterator<Item = usize>> {
+        let mut missing = 0;
+        if let Some((previous, expected)) = self.previous {
+            let distance = sequence.wrapping_sub(previous) as i16;
+            if distance <= 0 {
+                return None;
+            }
+            let samples = timestamp.wrapping_sub(expected) as usize;
+            // Conceal short packet losses. A long gap may be intentional silence.
+            if distance > 1 && samples <= 2880 && samples.is_multiple_of(120) {
+                missing = samples;
+            }
+        }
+        Some(std::iter::from_fn(move || {
+            if missing == 0 {
+                return None;
+            }
+            let chunk = [960, 480, 240, 120]
+                .into_iter()
+                .find(|&size| size <= missing)
+                .unwrap();
+            missing -= chunk;
+            Some(chunk)
+        }))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn watched_audio_conceals_short_gaps_and_ignores_late_packets() {
+    let timeline = SoundTimeline {
+        ssrc: None,
+        previous: Some((u16::MAX, u32::MAX - 479)),
+    };
+    assert_eq!(timeline.gap(0, 0).unwrap().sum::<usize>(), 0);
+    assert_eq!(timeline.gap(1, 480).unwrap().sum::<usize>(), 960);
+    assert!(timeline.gap(u16::MAX, 0).is_none());
+    assert_eq!(timeline.gap(3, 4800).unwrap().sum::<usize>(), 0);
 }
 
 #[cfg(test)]

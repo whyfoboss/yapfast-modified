@@ -119,6 +119,7 @@ pub(super) fn found(
             .iter()
             .filter(|attachment| attachment.shown == Shown::Message)
             .map(|attachment| Attachment {
+                voice_ms: attachment.voice_ms,
                 name: attachment.name.clone(),
                 size: attachment.size,
                 image: attachment.image,

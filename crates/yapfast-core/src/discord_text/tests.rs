@@ -233,6 +233,7 @@ fn closed_channels_keep_metadata_without_pinning_previews() {
     let mut open = OpenChannel::new("discord:10:11").unwrap();
     let with_image = |id: u64| Message {
         attachments: vec![yapfast_discord::message::Attachment {
+            voice_ms: None,
             name: "a.png".into(),
             size: None,
             url: "".into(),
@@ -282,6 +283,7 @@ fn changes_render_again_only_the_messages_they_change() {
     let mut open = OpenChannel::new("discord:10:11").unwrap();
     let with_image = Message {
         attachments: vec![yapfast_discord::message::Attachment {
+            voice_ms: None,
             name: "a.png".into(),
             size: None,
             url: "".into(),
@@ -1565,6 +1567,7 @@ fn changing_the_view_drops_old_previews_and_ignores_late_downloads() {
         shown(vec![
             Message {
                 attachments: vec![yapfast_discord::message::Attachment {
+                    voice_ms: None,
                     name: "a.png".into(),
                     size: None,
                     url: "image".into(),
@@ -1630,6 +1633,7 @@ async fn previews_follow_the_view_and_share_cache_across_channels() {
     let previews = channels::SharedPreviews::default();
     let with_image = |id: &str| Message {
         attachments: vec![yapfast_discord::message::Attachment {
+            voice_ms: None,
             name: "a.png".into(),
             size: None,
             url: "".into(),

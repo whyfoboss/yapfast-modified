@@ -117,6 +117,7 @@ export component RailItem inherits Rectangle {
     in property <string> label;
     /// The tooltip; the accessible label may add state such as "unread".
     in property <string> tip: root.label;
+    in property <bool> server-tip;
     in property <string> initial;
     in property <image> icon;
     /// The icon's colour and size while the item isn't lit.
@@ -142,6 +143,11 @@ export component RailItem inherits Rectangle {
     in property <bool> call;
     /// Marks a Discord server.
     in property <bool> discord;
+    in property <bool> reorderable;
+    property <bool> dragging;
+    callback drag-start;
+    callback drag-move(length, length);
+    callback drag-end(length, length);
     callback clicked;
     /// A right click, or the Menu key or Shift+F10 when focused: where to open
     /// a menu in the window.
@@ -216,9 +222,23 @@ export component RailItem inherits Rectangle {
             return reject;
         }
         pointer := TouchArea {
-            mouse-cursor: MouseCursor.pointer;
-            clicked => { root.clicked(); }
+            mouse-cursor: root.dragging ? MouseCursor.grabbing : MouseCursor.pointer;
+            clicked => { if !root.dragging { root.clicked(); } }
+            moved => {
+                if self.pressed && root.reorderable && !root.dragging && abs(self.mouse-y - self.pressed-y) > 4px {
+                    root.dragging = true;
+                    Tip.text = "";
+                    root.drag-start();
+                }
+                if root.dragging {
+                    root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
             pointer-event(event) => {
+                if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.dragging {
+                    root.dragging = false;
+                    root.drag-end(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
                 if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                     root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                 }
@@ -226,10 +246,12 @@ export component RailItem inherits Rectangle {
             changed has-hover => {
                 if self.has-hover {
                     Tip.text = root.tip;
-                    Tip.side = 1;
+                    Tip.side = root.server-tip ? 3 : 1;
                     Tip.x = root.absolute-position.x + root.width;
                     Tip.y = root.absolute-position.y + root.height / 2;
-                } else if Tip.text == root.tip {
+                } else if Tip.text == root.tip && Tip.side == (root.server-tip ? 3 : 1)
+                    && Tip.x == root.absolute-position.x + root.width
+                    && Tip.y == root.absolute-position.y + root.height / 2 {
                     Tip.text = "";
                 }
             }
@@ -401,6 +423,7 @@ export component ChannelRow inherits Rectangle {
     in property <color> nameplate-light;
     /// Marks a Discord DM, as the rail marks Discord servers.
     in property <bool> discord;
+    in property <bool> voice-connected;
     in property <bool> selected;
     /// Red, as a settings sidebar's Delete Channel or Delete Server.
     in property <bool> danger;
@@ -465,7 +488,7 @@ export component ChannelRow inherits Rectangle {
     animate hover-shift { duration: pointer.has-hover ? Popup.hover-enter : Popup.hover-exit; easing: ease-out; }
     height: root.person ? ClientStyle.dm-row-height : ClientStyle.channel-row-height;
     border-radius: 6px;
-    background: root.voice-drop-hovered ? Theme.accent.with-alpha(0.25) : root.selected ? Theme.active : pointer.has-hover ? Theme.hover : transparent;
+    background: root.voice-drop-hovered ? Theme.accent.with-alpha(0.25) : (root.selected || root.voice-connected) ? Theme.active : pointer.has-hover ? Theme.hover : transparent;
     animate background { duration: (Looks.better-animations ? 120ms : 90ms); }
     border-width: root.voice-drop-hovered ? 2px : focus.has-focus ? 2px : root.voice-drop-target ? 1px : 0px;
     border-color: root.voice-drop-hovered ? Theme.accent : focus.has-focus ? Theme.accent : root.voice-drop-target ? Theme.accent.with-alpha(0.45) : transparent;
@@ -474,7 +497,7 @@ export component ChannelRow inherits Rectangle {
     accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
     forward-focus: focus;
-    property <color> ink: root.danger ? Theme.danger : root.locked ? (root.selected ? Theme.muted : Theme.faint) : root.selected || root.unread ? Theme.text : pointer.has-hover ? Theme.secondary : Theme.muted;
+    property <color> ink: root.danger ? Theme.danger : root.locked ? (root.selected ? Theme.muted : Theme.faint) : root.selected || root.voice-connected || root.unread ? Theme.text : pointer.has-hover ? Theme.secondary : Theme.muted;
     // Discord's client draws a DM row's plate only while the row is selected,
     // pointed at or focused, so a long list holds none. It stops short of the
     // focus ring.
@@ -552,7 +575,7 @@ export component ChannelRow inherits Rectangle {
                         }
                     }
                 }
-                if !root.person && !root.thread: Image { source: root.icon; width: 20px; image-fit: contain; colorize: root.danger ? Theme.danger : root.selected && ClientStyle.enabled ? Theme.text : root.selected || root.unread ? Theme.secondary : Theme.faint; }
+                if !root.person && !root.thread: Image { source: root.icon; width: 20px; image-fit: contain; colorize: root.danger ? Theme.danger : (root.voice-connected || (root.selected && ClientStyle.enabled)) ? Theme.text : root.selected || root.unread ? Theme.secondary : Theme.faint; }
                 text-column := VerticalLayout {
                     alignment: center; spacing: 0px; horizontal-stretch: 1;
                     HorizontalLayout {
@@ -882,6 +905,28 @@ export component ServerRail inherits Rectangle {
     callback read-all;
     callback navigate-dms;
     callback navigate-server(string);
+    callback reorder-server(string, string, bool);
+    property <string> drag-id;
+    property <string> target-id;
+    property <length> target-middle;
+    property <length> drag-x;
+    property <length> drag-y;
+    pure function within-rail(x: length, y: length) -> bool {
+        return x >= list.absolute-position.x && x < list.absolute-position.x + list.width
+            && y >= list.absolute-position.y && y < list.absolute-position.y + list.height;
+    }
+    Timer {
+        interval: 16ms;
+        running: root.drag-id != "" && root.within-rail(root.drag-x, root.drag-y)
+            && (root.drag-y < list.absolute-position.y + 32px || root.drag-y > list.absolute-position.y + list.height - 32px);
+        triggered => {
+            if root.drag-y < list.absolute-position.y + 32px {
+                list.content-y = min(0px, list.content-y + 8px);
+            } else {
+                list.content-y = max(min(0px, list.visible-height - list.content-height), list.content-y - 8px);
+            }
+        }
+    }
     callback toggle-folder(string);
     /// An unread DM was clicked: open it.
     callback open-dm(string);
@@ -914,9 +959,21 @@ export component ServerRail inherits Rectangle {
         }
         // A list view makes only the servers in sight, which
         // matters on accounts in many servers. Unread DMs scroll with them.
-        ListView {
+        list := ListView {
             vertical-stretch: 1;
-            for server[index] in root.servers: Rectangle {
+            for server[index] in root.servers: server-slot := Rectangle {
+                property <length> middle: self.absolute-position.y + self.height / 2;
+                property <bool> pointed: root.drag-id != "" && !server.dm && !server.divider
+                    && root.within-rail(root.drag-x, root.drag-y)
+                    && root.drag-y >= self.absolute-position.y && root.drag-y < self.absolute-position.y + self.height;
+                function report-target() {
+                    if self.pointed {
+                        root.target-id = server.id;
+                        root.target-middle = self.middle;
+                    }
+                }
+                changed pointed => { self.report-target(); }
+                changed middle => { self.report-target(); }
                 // Home already has a pinned separator. Keep the model's line
                 // only when it separates unread DMs from servers below them.
                 height: server.divider ? (ClientStyle.enabled && index == 0 ? 0px : (ClientStyle.enabled ? 1px : 2px) + 8px) : (server.folder ? ClientStyle.folder-tile : ClientStyle.rail-tile) + (ClientStyle.enabled && ((server.folder && server.open) || (server.nested && server.last)) ? 4px : 0px) + (ClientStyle.enabled && server.folder && server.open ? 0px : 8px);
@@ -955,6 +1012,8 @@ export component ServerRail inherits Rectangle {
                 }
                 if !server.folder && !server.dm && !server.divider: RailItem {
                     y: 0px;
+                    reorderable: true;
+                    server-tip: true;
                     initial: server.initial; picture: server.picture; picture-url: server.picture-url;
                     label: server.name + (server.discord && root.matrix-build ? ", Discord" : "") + (server.unavailable ? ", unavailable" : "")
                         + (server.call ? ", in a call" : "")
@@ -962,9 +1021,23 @@ export component ServerRail inherits Rectangle {
                     tip: server.unavailable ? server.name + " (unavailable in a Discord outage)" : server.discord && root.matrix-build ? server.name + " (Discord)" : server.name;
                     selected: server.selected; unread: server.unread; badge: server.badge; discord: server.discord;
                     call: server.call;
-                    opacity: server.unavailable ? 0.5 : 1;
+                    opacity: server.unavailable || root.drag-id == server.id ? 0.5 : 1;
                     clicked => { root.navigate-server(server.id); }
                     context-menu(x, y) => { root.open-server-menu(server.id, x, y); }
+                    drag-start => { root.target-id = ""; root.drag-id = server.id; }
+                    drag-move(x, y) => { root.drag-x = x; root.drag-y = y; }
+                    drag-end(x, y) => {
+                        let target = root.target-id;
+                        let before = y < root.target-middle;
+                        root.drag-id = "";
+                        if target != "" && root.within-rail(x, y) {
+                            root.reorder-server(server.id, target, before);
+                        }
+                    }
+                }
+                if server-slot.pointed && root.drag-id != server.id: Rectangle {
+                    x: 9px; y: root.drag-y < server-slot.middle ? 0px : parent.height - 2px;
+                    width: parent.width - 18px; height: 2px; border-radius: 1px; background: Theme.accent;
                 }
             }
         }
@@ -1298,8 +1371,9 @@ export component RoomList inherits Rectangle {
                     }
                 }
                 if !room.hidden && !room.thread: ChannelRow {
+                    voice-connected: room.voice && room.id == root.voice-channel;
                     text: room.name;
-                    label: room.name + (room.discord ? ", Discord" : "")
+                    label: room.name + (self.voice-connected ? ", connected" : "") + (room.discord ? ", Discord" : "")
                         + (room.presence == "dnd" ? ", do not disturb" : room.presence == "mobile" ? ", online on mobile" : room.presence != "" ? ", " + room.presence : "")
                         + (room.voice-room != "" ? ", in " + room.voice-channel + " in " + room.voice-server : "")
                         + (room.detail != "" ? ", " + room.detail : "")

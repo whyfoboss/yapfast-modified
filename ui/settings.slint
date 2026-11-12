@@ -1468,6 +1468,8 @@ export component GameActivitySettings inherits VerticalLayout {
             }
             ActivityCard {
                 activity: root.preview-activity;
+                fallback: root.preview-activity.media
+                    ? @image-url("icons/volume-2.svg") : @image-url("icons/play.svg");
             }
         }
     }

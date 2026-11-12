@@ -1666,6 +1666,7 @@ impl OpenChannel {
                     .files
                     .iter()
                     .map(|file| Attachment {
+                        voice_ms: None,
                         name: file.name.clone(),
                         size: Some(file.size),
                         image: false,
@@ -1744,6 +1745,7 @@ impl OpenChannel {
                     preview = preview_of(still);
                 }
                 Attachment {
+                    voice_ms: attachment.voice_ms,
                     name: attachment.name.clone(),
                     size: attachment.size,
                     image: attachment.image && attachment.preview_url.is_some(),

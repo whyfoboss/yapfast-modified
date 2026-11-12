@@ -2617,6 +2617,20 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     });
     let state = adapter.clone();
     let weak = window.as_weak();
+    window.on_reorder_server(move |source, target, before| {
+        let Some(window) = weak.upgrade() else { return };
+        let mut adapter = state.borrow_mut();
+        if let Some(order) = refresh::move_rail_server(
+            &adapter.app.state, &adapter.layout.server_rail_order, &source, &target, before,
+        ) {
+            adapter.layout.server_rail_order = order;
+            adapter.layout.write(&adapter.root);
+            adapter.sidebar = None;
+            adapter.show_sidebar(&window);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
     window.on_toggle_folder(move |id| {
         let Some(window) = weak.upgrade() else { return };
         let mut adapter = state.borrow_mut();
@@ -3249,7 +3263,6 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
             if is_already_watching {
                 return;
             }
-            tracing::info!("[STREAM-DIAG] Add Stream clicked for: {}", id);
             // Ensure currently focused stream stays firmly focused so adding does not visually interrupt it
             if adapter.call_focus.is_none() {
                 let current_first = adapter
@@ -3370,15 +3383,20 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         };
         let adapter = state.borrow();
         let voice = &adapter.app.state.voice;
-        let image = |width, height, pixels: &[u8]| {
-            slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
-                pixels, width, height,
-            ))
+        let image = |width, height, pixels: &[u8], picture: Option<yapfast_core::picture::I420<'_>>| {
+            let buffer = if let Some(picture) = picture {
+                let mut buffer = slint::SharedPixelBuffer::new(width, height);
+                picture.to_rgba(&mut Vec::new(), buffer.make_mut_bytes(), width, height);
+                buffer
+            } else {
+                slint::SharedPixelBuffer::clone_from_slice(pixels, width, height)
+            };
+            slint::Image::from_rgba8(buffer)
         };
         if let Some(frame) = voice
             .sharing
             .as_ref()
-            .and_then(|sharing| sharing.frames.take(image))
+            .and_then(|sharing| sharing.frames.take_stream(image))
         {
             window.set_share_frame(frame);
         }
@@ -3405,7 +3423,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         for (index, person) in voice.participants.iter().enumerate() {
             if let Some(watching) = voice.watching.iter().find(|w| w.user == person.id)
                 && let Some(frames) = watching.frames.as_ref()
-                && let Some(frame) = frames.take(image)
+                && let Some(frame) = frames.take_stream(image)
             {
                 let is_first_frame = index < stream_frames.row_count()
                     && stream_frames
@@ -3421,11 +3439,25 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                 if is_focused {
                     window.set_watch_frame(frame);
                 }
+                if tracing::enabled!(target: "yapfast_stream", tracing::Level::INFO) {
+                    thread_local! {
+                        static LAST_STREAM_FRAME_LOG: std::cell::Cell<Option<std::time::Instant>> =
+                            const { std::cell::Cell::new(None) };
+                    }
+                    LAST_STREAM_FRAME_LOG.with(|last| {
+                        let now = std::time::Instant::now();
+                        if is_first_frame
+                            || last
+                                .get()
+                                .is_none_or(|at| now - at >= std::time::Duration::from_secs(5))
+                        {
+                            last.set(Some(now));
+                            tracing::info!(target: "yapfast_stream", first = is_first_frame,
+                                focused = is_focused, "stream frame published to UI");
+                        }
+                    });
+                }
                 if is_first_frame {
-                    tracing::info!(
-                        "[STREAM-DIAG] First valid decoded frame received for: {}",
-                        person.id
-                    );
                     if let Some(mut row) = adapter.models.participants.row_data(index)
                         && !row.stream_ready
                     {
@@ -3436,8 +3468,10 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
             }
         }
         let video = adapter.app.state.video.as_ref();
-        let taken =
-            video.and_then(|video| Some((video, video.frames.as_ref()?.take_timed(image)?)));
+        let taken = video.and_then(|video| {
+            let frame = video.frames.as_ref()?.take_timed(|w, h, pixels| image(w, h, pixels, None))?;
+            Some((video, frame))
+        });
         if taken.is_none() && video.is_some_and(|video| !video.playing && !video.loading) {
             // Half a second without a picture: a paused video's ticks stop.
             adapter.video_quiet.set(adapter.video_quiet.get() + 1);
@@ -3448,8 +3482,10 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         if let Some((video, (frame, time))) = taken {
             adapter.video_quiet.set(0);
             let player = window.global::<VideoPlayer>();
-            player.set_frame(frame);
-            player.set_has_frame(true);
+            if video.size != Some((0, 0)) {
+                player.set_frame(frame);
+                player.set_has_frame(true);
+            }
             // The last picture shows a little before the end.
             let time = match video.duration_ms {
                 Some(duration) if video.ended => duration,
@@ -3463,6 +3499,15 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     });
     // The video playing: started from its cell, controlled from its bar.
     let player = window.global::<VideoPlayer>();
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    player.on_stop(move || {
+        if let Some(window) = weak.upgrade() {
+            state
+                .borrow_mut()
+                .action(&window, Action::Video(VideoCommand::Stop));
+        }
+    });
     let state = adapter.clone();
     let weak = window.as_weak();
     player.on_play(move |item, index, width, height| {

@@ -3,7 +3,13 @@
 //! Protocol: https://docs.discord.food/topics/rpc#ipc-transport.
 //! Works across Unix domain sockets (Linux/macOS), Windows named pipes, and in-memory streams.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -23,6 +29,9 @@ pub const MAX_PACKET: usize = 64 * 1024;
 pub const KEPT_IMAGES: usize = 32;
 pub const MAX_CLIENTS: usize = 16;
 pub const WAIT: Duration = Duration::from_secs(15);
+
+/// Connection ID, its current activity, and whether the update only adds artwork.
+pub(super) type Update = (u64, Option<Arc<Value>>, bool);
 
 pub type Assets = HashMap<String, String>;
 
@@ -101,12 +110,24 @@ pub fn asset_lookup(response: &Value) -> Result<Assets> {
 /// RPC uses seconds for timestamps and asset names; the Gateway needs
 /// milliseconds and asset ids. Select fields so callers cannot inject a
 /// custom status, another application id, or internal gateway metadata.
-pub fn normalize(
+#[cfg(test)]
+fn normalize(
     input: &Value,
     client: &str,
     name: &str,
     assets: Option<&Assets>,
     addresses: &Assets,
+) -> Result<Value> {
+    normalize_activity(input, client, name, assets, addresses, false)
+}
+
+fn normalize_activity(
+    input: &Value,
+    client: &str,
+    name: &str,
+    assets: Option<&Assets>,
+    addresses: &Assets,
+    allow_pending_images: bool,
 ) -> Result<Value> {
     ensure!(input.is_object(), "activity must be an object");
     let kind = match input.get("type") {
@@ -212,16 +233,19 @@ pub fn normalize(
             if let Some(value) = images.get(key).filter(|v| !v.is_null()) {
                 let text = value.as_str().context("asset must be text")?;
                 let text = if key.ends_with("_image") && web_address(text, usize::MAX) {
-                    addresses
-                        .get(text)
-                        .map(String::as_str)
-                        .context("Discord didn't take the image's address")?
+                    ensure!(web_address(text, 512), "invalid external image address");
+                    match addresses.get(text) {
+                        Some(image) => image.as_str(),
+                        None if allow_pending_images => continue,
+                        None => bail!("Discord didn't take the image's address"),
+                    }
                 } else if key.ends_with("_image") {
-                    assets
-                        .and_then(|lookup| lookup.get(text))
-                        .map(String::as_str)
-                        .or_else(|| snowflake(text).then_some(text))
-                        .context("unknown application asset")?
+                    match assets.and_then(|lookup| lookup.get(text)) {
+                        Some(image) => image.as_str(),
+                        None if snowflake(text) => text,
+                        None if allow_pending_images => continue,
+                        None => bail!("unknown application asset"),
+                    }
                 } else {
                     text
                 };
@@ -265,7 +289,7 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut stream: S,
     api: Arc<Api>,
     snapshots: watch::Receiver<Arc<Snapshot>>,
-    updates: mpsc::Sender<(u64, Option<Arc<Value>>)>,
+    updates: mpsc::Sender<Update>,
     id: u64,
 ) -> Result<()> {
     let (opcode, payload) = tokio::time::timeout(WAIT, read(&mut stream)).await??;
@@ -290,7 +314,10 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
         snapshots.borrow().status == Status::Online,
         "Discord is not connected"
     );
+    let lookup = Instant::now();
+    tracing::debug!(target: "yapfast_media", "RPC handshake received");
     let application = tokio::time::timeout(WAIT, api.rpc_application(&client)).await??;
+    tracing::debug!(target: "yapfast_media", elapsed_ms = lookup.elapsed().as_millis() as u64, "RPC application ready");
     let name = application["name"]
         .as_str()
         .context("RPC application has no name")?
@@ -332,8 +359,34 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
     let mut assets = None;
     let mut images = Assets::new();
+    type Artwork = Pin<Box<dyn Future<Output = (Value, Option<Assets>, Option<Assets>)> + Send>>;
+    let mut artwork: Option<Artwork> = None;
     loop {
-        let (opcode, payload) = read(&mut stream).await?;
+        let (opcode, payload) = {
+            let frame = read(&mut stream);
+            tokio::pin!(frame);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut frame => break result?,
+                    (input, named, external) = async { artwork.as_mut().unwrap().await }, if artwork.is_some() => {
+                        artwork = None;
+                        if let Some(named) = named {
+                            assets = Some(named);
+                        }
+                        if let Some(external) = external {
+                            if images.len() + external.len() > KEPT_IMAGES {
+                                images.clear();
+                            }
+                            images.extend(external);
+                        }
+                        if let Ok(value) = normalize_activity(&input, &client, &name, assets.as_ref(), &images, true) {
+                            updates.send((id, Some(Arc::new(value)), true)).await?;
+                        }
+                    }
+                }
+            }
+        };
         match opcode {
             2 => return Ok(()),
             3 => {
@@ -361,51 +414,90 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             .await?;
             continue;
         }
-        let result = async {
+        let received = Instant::now();
+        let result = (|| {
             let args = &packet["args"];
             ensure!(
                 args["pid"].as_u64().is_some_and(|pid| pid > 0),
                 "pid must be a positive integer"
             );
-            ensure!(
-                args.get("activity").is_some(),
-                "activity is required (null clears it)"
-            );
-            if args["activity"].is_null() {
+            let input = args
+                .get("activity")
+                .context("activity is required (null clears it)")?;
+            if input.is_null() {
                 return Ok(None);
             }
-            let pictures = &args["activity"]["assets"];
-            let (addresses, keys): (Vec<&str>, Vec<&str>) = ["large_image", "small_image"]
-                .iter()
-                .filter_map(|key| pictures[key].as_str())
-                .partition(|image| web_address(image, 512));
-            let addresses: Vec<&str> = addresses
-                .into_iter()
-                .filter(|address| !images.contains_key(*address))
-                .collect();
-            if assets.is_none() && !keys.is_empty() {
-                let response = tokio::time::timeout(WAIT, api.rpc_assets(&client)).await??;
-                assets = Some(asset_lookup(&response)?);
-            }
-            if !addresses.is_empty() {
-                // As the desktop client does, Discord's media proxy takes them.
-                let response =
-                    tokio::time::timeout(WAIT, api.rpc_external_assets(&client, &addresses))
-                        .await??;
-                if images.len() + addresses.len() > KEPT_IMAGES {
-                    images.clear();
-                }
-                images.extend(external_lookup(&response)?);
-            }
-            normalize(&args["activity"], &client, &name, assets.as_ref(), &images)
+            normalize_activity(input, &client, &name, assets.as_ref(), &images, true)
                 .map(|value| Some(Arc::new(value)))
-        }
-        .await;
+        })();
 
         match result {
             Ok(value) => {
+                // Any pending result belongs to the previous activity.
+                artwork = None;
+                let eligible = value.as_deref().is_some_and(crate::own_activity::eligible);
+                if eligible {
+                    let input = &packet["args"]["activity"];
+                    let pictures = &input["assets"];
+                    let mut addresses = Vec::new();
+                    let mut fetch_named = false;
+                    for key in ["large_image", "small_image"] {
+                        if let Some(image) = pictures[key].as_str() {
+                            if web_address(image, 512) {
+                                if !images.contains_key(image) {
+                                    addresses.push(image.to_owned());
+                                }
+                            } else if !snowflake(image) && assets.is_none() {
+                                fetch_named = true;
+                            }
+                        }
+                    }
+                    if fetch_named || !addresses.is_empty() {
+                        let input = input.clone();
+                        let api = api.clone();
+                        let client = client.clone();
+                        artwork = Some(Box::pin(async move {
+                            let named = async {
+                                if !fetch_named {
+                                    return None;
+                                }
+                                let response = tokio::time::timeout(WAIT, api.rpc_assets(&client))
+                                    .await
+                                    .ok()?
+                                    .ok()?;
+                                asset_lookup(&response).ok()
+                            };
+                            let external = async {
+                                if addresses.is_empty() {
+                                    return None;
+                                }
+                                let addresses: Vec<_> =
+                                    addresses.iter().map(String::as_str).collect();
+                                let response = tokio::time::timeout(
+                                    WAIT,
+                                    api.rpc_external_assets(&client, &addresses),
+                                )
+                                .await
+                                .ok()?
+                                .ok()?;
+                                external_lookup(&response).ok()
+                            };
+                            let (named, external) = tokio::join!(named, external);
+                            (input, named, external)
+                        }));
+                    }
+                }
                 // Bound queued updates even when games publish very frequently.
-                updates.send((id, value.clone())).await?;
+                updates
+                    .send((id, value.clone().filter(|_| eligible), false))
+                    .await?;
+                let published_at_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                tracing::debug!(target: "yapfast_media", source = "rpc", active = value.is_some(),
+                    artwork_pending = artwork.is_some(), elapsed_ms = received.elapsed().as_millis() as u64,
+                    published_at_ms, "RPC state published");
                 send(
                     &mut stream,
                     json!({"cmd": cmd, "nonce": nonce, "evt": null, "data": value.as_deref()}),

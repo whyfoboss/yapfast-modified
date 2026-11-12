@@ -233,6 +233,7 @@ pub struct Playing {
     pub name: String,
     /// When it started, in Unix milliseconds, when the game says.
     pub started_ms: Option<u64>,
+    pub activity: Option<Arc<Activity>>,
 }
 
 /// A Discord friend request waiting for an answer.
@@ -1634,6 +1635,8 @@ impl Picture {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attachment {
+    /// Discord voice recording, with duration in milliseconds (0 if unknown).
+    pub voice_ms: Option<u32>,
     pub name: String,
     pub size: Option<u64>,
     pub image: bool,
@@ -1965,6 +1968,14 @@ impl Poll {
 }
 
 impl ChatMessage {
+    pub fn can_cancel_send(&self) -> bool {
+        match self.delivery {
+            Delivery::Sent => false,
+            Delivery::Sending | Delivery::Waiting => self.item.starts_with("t:"),
+            Delivery::Failed => self.item.starts_with("t:") || self.item.starts_with("n:"),
+        }
+    }
+
     /// Whether the timeline highlights it: a mention always, as Discord's
     /// client does, and a reply to this account's message while it's `new`.
     pub fn highlighted(&self, new: bool) -> bool {
@@ -2885,6 +2896,8 @@ pub enum DiscordCommand {
     /// Share the game the Discord account plays, or stop;
     /// [`Event::ShowGameSet`] follows.
     ShowGame(bool),
+    #[cfg(feature = "discord")]
+    MusicPlayback(Option<yapfast_discord::own_activity::MusicPlayback>),
     /// Set how loud the soundboard plays, as Discord keeps it, from 0 to
     /// 100; [`Event::SoundboardVolumeSet`] follows.
     SoundboardVolume(f32),

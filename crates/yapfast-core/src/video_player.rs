@@ -272,6 +272,7 @@ pub fn play(
         interrupt: interrupt.clone(),
     };
     let shared = Arc::new(Shared::new((job.width, job.height), job.volume, interrupt));
+    let audio_only = (job.width, job.height) == (0, 0);
     let speaker = job
         .sound
         .then(|| {
@@ -290,12 +291,16 @@ pub fn play(
             .ok()
         })
         .flatten();
+    anyhow::ensure!(
+        !audio_only || speaker.is_some(),
+        "Could not open the speakers for this voice message."
+    );
     let decoder = {
         let shared = shared.clone();
         let sound = speaker.is_some();
         std::thread::Builder::new()
             .name("yapfast-video-decoder".into())
-            .spawn(move || decode(download, sound, &shared))
+            .spawn(move || decode(download, sound, audio_only, &shared))
             .context("could not start decoding the video")?
     };
     let speaker = match speaker {
@@ -304,7 +309,7 @@ pub fn play(
             Some(
                 std::thread::Builder::new()
                     .name("yapfast-video-sound".into())
-                    .spawn(move || play_sound(output, &shared))
+                    .spawn(move || play_sound(output, &shared, audio_only))
                     .context("could not start the video's sound")?,
             )
         }
@@ -332,6 +337,8 @@ fn show(
     report: &mut dyn FnMut(Report),
 ) -> Result<()> {
     let mut opened = false;
+    let mut audio_clock = None;
+    let mut audio_drained = None;
     let mut finished = false;
     while !stop.load(Ordering::Relaxed) {
         let wait = {
@@ -347,6 +354,9 @@ fn show(
         match controls.recv_timeout(wait) {
             Ok(control) => {
                 finished &= !matches!(control, Control::Seek(_) | Control::Play);
+                if matches!(control, Control::Seek(_) | Control::Pause) {
+                    audio_drained = None;
+                }
                 take(shared, progress, control);
             }
             Err(channel::RecvTimeoutError::Timeout) => {}
@@ -367,6 +377,12 @@ fn show(
         }
         // The clock waits while there's nothing to play.
         let now = state.clock.now();
+        if state.opened.as_ref().is_some_and(|file| file.width == 0)
+            && audio_clock != Some(now / 200)
+        {
+            audio_clock = Some(now / 200);
+            writer.write_timed(2, 2, now, |pixels| pixels.fill(0));
+        }
         let waiting = state.pictures.is_empty()
             && !state.ended
             && !state.sound.iter().any(|sound| sound.next_time() >= now);
@@ -396,6 +412,12 @@ fn show(
             shared.changed.notify_all();
         }
         if state.ended && state.pictures.is_empty() && state.sound.is_empty() && state.playing {
+            if audio_clock.is_some()
+                && audio_drained.get_or_insert_with(Instant::now).elapsed()
+                    < Duration::from_millis(100)
+            {
+                continue;
+            }
             state.playing = false;
             state.clock.run(false);
             shared.changed.notify_all();
@@ -460,11 +482,23 @@ fn move_to(shared: &Shared, state: &mut State, time_ms: u64) {
 }
 
 /// The decoder's thread: opens the file, then keeps the queues filled.
-fn decode(download: Download, sound: bool, shared: &Shared) {
-    let Some(mut video) = Video::open(download, sound) else {
+fn decode(download: Download, sound: bool, audio_only: bool, shared: &Shared) {
+    let opened = if audio_only {
+        Video::open_sound(download)
+    } else {
+        Video::open(download, sound)
+    };
+    let Some(mut video) = opened else {
         let mut state = shared.lock();
         if !state.stop {
-            state.failed = Some("Yapfast can't play this video.".into());
+            state.failed = Some(
+                if audio_only {
+                    "Yapfast can't play this voice message."
+                } else {
+                    "Yapfast can't play this video."
+                }
+                .into(),
+            );
         }
         return;
     };
@@ -530,7 +564,11 @@ fn decode(download: Download, sound: bool, shared: &Shared) {
             };
             (state.generation, state.size, sound_only)
         };
-        let next = if sound_only {
+        let next = if audio_only {
+            video
+                .decode_sound()
+                .map(|sound| sound.map_or(Next::End, Next::Sound))
+        } else if sound_only {
             match video.decode_sound() {
                 Ok(Some(time)) => Ok(Next::Sound(time)),
                 Ok(None) => {
@@ -607,6 +645,9 @@ fn decode(download: Download, sound: bool, shared: &Shared) {
             Err(_) if shared.interrupt.load(Ordering::Relaxed) => {}
             Err(error) => {
                 tracing::debug!(error = format!("{error:#}"), "the video stopped decoding");
+                if audio_only {
+                    state.failed = Some("Yapfast couldn't decode this voice message.".into());
+                }
                 state.ended = true;
             }
         }
@@ -614,7 +655,7 @@ fn decode(download: Download, sound: bool, shared: &Shared) {
 }
 
 /// The sound thread: plays queued sound when the clock reaches it.
-fn play_sound(mut output: Output<f32>, shared: &Shared) {
+fn play_sound(mut output: Output<f32>, shared: &Shared, audio_only: bool) {
     // 10 ms at a time.
     let frames = RATE as usize / 100;
     let mut generation = None;
@@ -691,6 +732,9 @@ fn play_sound(mut output: Output<f32>, shared: &Shared) {
                 error = format!("{error:#}"),
                 "stopped playing the video's sound"
             );
+            if audio_only {
+                shared.lock().failed = Some("The voice message's audio output stopped.".into());
+            }
             return;
         }
     }
@@ -1009,7 +1053,7 @@ mod tests {
             let shared = Arc::new(Shared::new((80, 80), 1.0, interrupt));
             let decoder = {
                 let shared = shared.clone();
-                std::thread::spawn(move || decode(download, true, &shared))
+                std::thread::spawn(move || decode(download, true, false, &shared))
             };
             let started = Instant::now();
             while shared.lock().pictures.len() < QUEUED_PICTURES {

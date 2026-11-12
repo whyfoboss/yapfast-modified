@@ -12,6 +12,23 @@ fn message_row_plain(message: &ChatMessage) -> MessageRow {
     message_row(message, &HashSet::new())
 }
 
+fn item_text_is(item: &i_slint_core::item_tree::ItemRc, value: &str) -> bool {
+    use i_slint_core::items::{ComplexText, SimpleText};
+    item.clone().downcast::<SimpleText>().is_some_and(|item| {
+        SimpleText::FIELD_OFFSETS
+            .text()
+            .apply_pin(item.as_pin_ref())
+            .get()
+            == value
+    }) || item.clone().downcast::<ComplexText>().is_some_and(|item| {
+        ComplexText::FIELD_OFFSETS
+            .text()
+            .apply_pin(item.as_pin_ref())
+            .get()
+            == value
+    })
+}
+
 #[test]
 fn a_server_without_a_picture_shows_its_initials_in_capitals() {
     assert_eq!(initials("Co-op crew"), "CC");
@@ -1369,6 +1386,7 @@ fn a_selection_runs_across_messages_with_their_names_and_times() {
 #[test]
 fn pictures_on_their_way_hold_their_place_as_skeletons() {
     let attachment = |name: &str, preview_failed| yapfast_core::chat::Attachment {
+        voice_ms: None,
         name: name.into(),
         size: Some(1000),
         image: true,
@@ -1645,6 +1663,7 @@ fn a_messages_sticker_is_160px_square() {
     });
     let row = message_row_plain(&ChatMessage {
         attachments: vec![yapfast_core::chat::Attachment {
+            voice_ms: None,
             name: "Wave".into(),
             size: None,
             image: true,
@@ -1677,6 +1696,7 @@ fn a_selection_copies_the_pictures_it_runs_through() {
             author: "Sam".into(),
             body: "Look at this.".into(),
             attachments: vec![yapfast_core::chat::Attachment {
+                voice_ms: None,
                 name: "cat.png".into(),
                 size: None,
                 image: true,
@@ -3108,6 +3128,149 @@ fn right_click_on_edited_message_preserves_view_edit_history() {
 }
 
 #[test]
+fn pending_send_menu_routes_the_pending_id_in_chat_and_thread() {
+    use i_slint_core::{accessibility::AccessibleStringProperty, item_tree::ItemRc};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
+    let window = showing(vec![]);
+    let pending = message_row_plain(&ChatMessage {
+        item: "t:pending".into(),
+        author: "Alice".into(),
+        body: "Queued message".into(),
+        own: true,
+        delivery: yapfast_core::chat::Delivery::Sending,
+        ..Default::default()
+    });
+    assert!(pending.delivery_sending && pending.can_cancel);
+    let canceled = Rc::new(RefCell::new(Vec::new()));
+    let picked = canceled.clone();
+    window.on_cancel_send(move |item| picked.borrow_mut().push(item));
+    let click = |position, button| {
+        let native = window.window();
+        native.dispatch_event(WindowEvent::PointerMoved { position });
+        native.dispatch_event(WindowEvent::PointerPressed { position, button });
+        native.dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle(&window);
+    };
+    for x in [440., 900.] {
+        let row = ModelRc::new(VecModel::from(vec![pending.clone()]));
+        if x == 440. {
+            window.set_messages(row);
+        } else {
+            window.set_messages(ModelRc::default());
+            window.set_aside_open(true);
+            window.set_aside_ready(true);
+            window.set_aside_messages(row);
+        }
+        settle(&window);
+        for y in (100..730).step_by(5) {
+            click(
+                slint::LogicalPosition::new(x, y as f32),
+                PointerEventButton::Right,
+            );
+            if window.get_menu_open() {
+                break;
+            }
+        }
+        assert_eq!(window.get_menu_message().item, "t:pending");
+        let position = {
+            let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+            let popups = inner.active_popups();
+            let popup = popups.last().expect("pending send menu");
+            let i_slint_core::window::PopupWindowLocation::ChildWindow(place) = popup.location
+            else {
+                panic!("not a child window");
+            };
+            let item = ItemRc::new_root(popup.component.clone())
+                .visit_descendants(|item| {
+                    if item
+                        .accessible_string_property(AccessibleStringProperty::Label)
+                        .as_deref()
+                        == Some("Cancel")
+                    {
+                        ControlFlow::Break(item.clone())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })
+                .expect("the pending send menu offers Cancel");
+            let at = item.map_to_item_tree(item.geometry().center(), &popup.component);
+            slint::LogicalPosition::new(place.x + at.x, place.y + at.y)
+        };
+        click(position, PointerEventButton::Left);
+    }
+    assert_eq!(canceled.borrow().as_slice(), &["t:pending", "t:pending"]);
+}
+
+#[test]
+fn the_sidebar_keeps_gateway_voice_members_visible_while_connecting() {
+    use i_slint_core::{accessibility::AccessibleStringProperty, item_tree::ItemRc};
+    use std::ops::ControlFlow;
+
+    let window = showing(vec![]);
+    let room = |id: &str, member: Option<&str>| RoomRow {
+        id: id.into(),
+        name: id.into(),
+        voice: true,
+        people: ModelRc::new(VecModel::from(
+            member
+                .map(|name| PersonRow {
+                    name: name.into(),
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )),
+        ..Default::default()
+    };
+    let rooms = Rc::new(VecModel::from(vec![
+        room("lounge", Some("Ada")),
+        room("study", Some("Bea")),
+        RoomRow {
+            id: "chat".into(),
+            name: "Chat".into(),
+            selected: true,
+            ..Default::default()
+        },
+    ]));
+    window.set_rooms(rooms.clone().into());
+    let visible = |name: &str| {
+        settle(&window);
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        ItemRc::new_root(inner.component())
+            .visit_descendants(|item| {
+                if item
+                    .accessible_string_property(AccessibleStringProperty::Label)
+                    .as_deref()
+                    == Some(name)
+                {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_some()
+    };
+    assert!(visible("Ada") && visible("Bea"));
+    window.set_voice_channel("lounge".into());
+    window.set_voice_tone(0);
+    assert!(visible("Ada") && visible("Bea"));
+    assert!(!visible("lounge, connected"));
+    window.set_voice_tone(1);
+    assert!(visible("lounge, connected") && visible("Chat"));
+    window.set_voice_channel("study".into());
+    assert!(visible("study, connected") && !visible("lounge, connected"));
+    window.set_voice_tone(0);
+    assert!(!visible("study, connected"));
+    rooms.set_row_data(0, room("lounge", None));
+    rooms.set_row_data(1, room("study", Some("Ada")));
+    assert!(visible("Ada") && !visible("Bea"));
+    window.set_voice_channel("".into());
+    assert!(visible("Ada"));
+}
+
+#[test]
 fn a_nameplates_picture_is_asked_for_when_its_row_shows() {
     i_slint_backend_testing::init_no_event_loop();
     let window = classic_window();
@@ -3883,6 +4046,63 @@ fn scrolling_up_through_styled_messages_stays_up() {
         window.invoke_timeline_at_end(),
         "starts at the latest message"
     );
+    let move_to = |x, y| {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                position: slint::LogicalPosition::new(x, y),
+            });
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(2));
+        settle();
+    };
+    move_to(700., 380.);
+    assert!(!window.get_active_item().is_empty());
+    let hovered = window.get_active_item();
+    let more = {
+        use i_slint_core::{accessibility::AccessibleStringProperty, item_tree::ItemRc};
+        use std::ops::ControlFlow;
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        let component = inner.component();
+        ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                let at = item.map_to_item_tree(item.geometry().center(), &component);
+                if (at.y - 380.).abs() < 100.
+                    && item
+                        .accessible_string_property(AccessibleStringProperty::Label)
+                        .as_deref()
+                        == Some("More")
+                {
+                    ControlFlow::Break(slint::LogicalPosition::new(at.x, at.y))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .expect("the hovered message shows its action bar")
+    };
+    move_to(more.x, more.y);
+    assert_eq!(
+        window.get_active_item(),
+        hovered,
+        "the bar keeps the row hovered"
+    );
+    let click = |position| {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let button = PointerEventButton::Left;
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle();
+    };
+    click(more);
+    assert_eq!(window.get_menu_item(), hovered);
+    click(slint::LogicalPosition::new(1100., 742.));
+    move_to(1100., 742.);
+    assert!(window.get_active_item().is_empty());
+    move_to(700., 380.);
+    assert!(!window.get_active_item().is_empty());
     for step in 0..8 {
         window
             .window()
@@ -3892,6 +4112,7 @@ fn scrolling_up_through_styled_messages_stays_up() {
                 delta_y: 50.,
             });
         settle();
+        assert!(window.get_active_item().is_empty());
         assert!(
             !window.invoke_timeline_at_end() && window.invoke_timeline_below() > 0.,
             "step {step} stays scrolled up"
@@ -4944,7 +5165,7 @@ fn a_folder_on_the_rail_holds_its_servers_until_opened() {
     state.navigation = Navigation::Server("Charlie".into());
     let shown = |open: &[&str]| {
         let open = open.iter().map(|&id| id.to_owned()).collect();
-        refresh::rail_rows(&state, &HashMap::new(), &open)
+        refresh::rail_rows(&state, &HashMap::new(), &open, &[])
     };
     let rows = |rows: &[ServerRow]| -> Vec<(String, bool, bool, bool, bool)> {
         rows.iter()
@@ -4991,6 +5212,117 @@ fn a_folder_on_the_rail_holds_its_servers_until_opened() {
         ]
     );
     assert!(open[1].open && open[3].tint == open[1].tint);
+}
+
+#[test]
+fn server_rail_order_persists_and_preserves_folders() {
+    use i_slint_core::{accessibility::AccessibleStringProperty, item_tree::ItemRc};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let make = || {
+        Adapter::new(
+            Arc::new(BackgroundRuntime::new().unwrap()),
+            directory.path().into(),
+            &window,
+        )
+        .unwrap()
+    };
+    let folder = yapfast_core::chat::ServerFolder {
+        id: "folder".into(),
+        name: None,
+        color: None,
+    };
+    let servers: Vec<_> = ["A", "B", "C", "D", "E"]
+        .into_iter()
+        .map(|id| {
+            Arc::new(yapfast_core::chat::ChatServer {
+                id: id.into(),
+                name: id.into(),
+                folder: matches!(id, "D" | "E").then(|| folder.clone()),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let adapter = make();
+    bind_callbacks(&window, &adapter);
+    adapter.borrow_mut().action(&window, Action::Preview);
+    adapter.borrow_mut().app.state.servers = servers.clone();
+    adapter.borrow_mut().sidebar = None;
+    adapter.borrow_mut().show_sidebar(&window);
+    window.set_workspace(true);
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1120., 760.));
+    settle(&window);
+    let point = |label| {
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        let component = inner.component();
+        ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                if item.is_visible()
+                    && item
+                        .accessible_string_property(AccessibleStringProperty::Label)
+                        .is_some_and(|text| {
+                            text.as_str() == label || text.split(',').next() == Some(label)
+                        })
+                {
+                    let point = item.map_to_item_tree(item.geometry().center(), &component);
+                    ControlFlow::Break(slint::LogicalPosition::new(point.x, point.y))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap_or_else(|| panic!("missing server {label}"))
+    };
+    let from = point("B");
+    let mut to = point("A");
+    to.y -= 10.;
+    let button = PointerEventButton::Left;
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position: from });
+    window.window().dispatch_event(WindowEvent::PointerPressed {
+        position: from,
+        button,
+    });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position: to });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased {
+            position: to,
+            button,
+        });
+    assert_eq!(
+        adapter
+            .borrow()
+            .layout
+            .server_rail_order
+            .first()
+            .map(String::as_str),
+        Some("B")
+    );
+    window.invoke_reorder_server("E".into(), "D".into(), true);
+    window.invoke_reorder_server("D".into(), "A".into(), true);
+    let reloaded = make();
+    let mut reloaded = reloaded.borrow_mut();
+    reloaded.app.state.servers = servers;
+    let rows = refresh::rail_rows(
+        &reloaded.app.state,
+        &HashMap::new(),
+        &["folder".into()].into(),
+        &reloaded.layout.server_rail_order,
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        ["B", "A", "C", "folder", "E", "D"]
+    );
+    window.hide().unwrap();
 }
 
 #[test]
@@ -5261,7 +5593,7 @@ fn a_call_shows_on_its_servers_icon_and_its_closed_folder() {
     .into();
     let calls = |state: &AppState, open: &[&str]| -> Vec<(String, bool)> {
         let open = open.iter().map(|&id| id.to_owned()).collect();
-        refresh::rail_rows(state, &HashMap::new(), &open)
+        refresh::rail_rows(state, &HashMap::new(), &open, &[])
             .iter()
             .map(|row| (row.id.to_string(), row.call))
             .collect()
@@ -5307,6 +5639,7 @@ fn closing_the_viewer_lets_go_of_its_picture() {
     adapter.app.state.messages = Arc::new(vec![Arc::new(ChatMessage {
         item: "i0".into(),
         attachments: vec![yapfast_core::chat::Attachment {
+            voice_ms: None,
             name: "a.png".into(),
             size: None,
             image: true,
@@ -5352,6 +5685,7 @@ fn a_pictures_menu_links_to_it_when_it_has_an_address() {
     .unwrap();
     bind_callbacks(&window, &adapter);
     let file = |url: Option<&str>| yapfast_core::chat::Attachment {
+        voice_ms: None,
         name: "a.png".into(),
         size: None,
         image: true,
@@ -7335,6 +7669,151 @@ fn the_two_factor_prompt_offers_discords_methods() {
 
 #[test]
 #[cfg(feature = "discord")]
+fn pronouns_can_be_typed_from_the_profile_card() {
+    use i_slint_core::{
+        accessibility::AccessibleStringProperty, item_tree::ItemRc, items::TextInput,
+    };
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
+    let (window, adapter, _directory) = discord_server_window_granting(0);
+    let handle = "a-very-long-username".repeat(8);
+    window.invoke_edit_profile();
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.apply(Event::OwnProfile {
+            server: None,
+            result: Ok(yapfast_core::chat::OwnProfile {
+                fallback: yapfast_core::chat::Profile {
+                    name: "Alice".into(),
+                    handle: handle.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        });
+        adapter.refresh(&window);
+    }
+    window.set_profile_editor_activity(ModelRc::new(VecModel::from(vec![ActivityRow {
+        heading: "LISTENING TO A TRACK".into(),
+        name: "Track".into(),
+        ..Default::default()
+    }])));
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(480., 700.));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
+    settle(&window);
+    let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+    let component = inner.component();
+    let find = |label: &str, predicate: &dyn Fn(&ItemRc) -> bool| {
+        ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                if item.is_visible() && predicate(&item) {
+                    ControlFlow::Break(item.clone())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap_or_else(|| panic!("{label} should be visible"))
+    };
+    let text = |value: &str| find(value, &|item| item_text_is(item, value));
+    let center = |item: &ItemRc| item.map_to_item_tree(item.geometry().center(), &component);
+    let label = text("Add pronouns");
+    let point = center(&label);
+    let position = slint::LogicalPosition::new(point.x, point.y);
+    let button = PointerEventButton::Left;
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    window.set_profile_editor_activity(ModelRc::new(VecModel::from(vec![ActivityRow {
+        heading: "LISTENING TO A TRACK".into(),
+        name: "Track".into(),
+        details: "Artist".into(),
+        state: "Album".into(),
+        ..Default::default()
+    }])));
+    settle(&window);
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    settle(&window);
+    let field = find("Pronouns", &|item| {
+        item.accessible_string_property(AccessibleStringProperty::Label)
+            .as_deref()
+            == Some("Pronouns")
+    });
+    let handle_item = text(&handle);
+    assert!((center(&handle_item).y - center(&field).y).abs() < 1.);
+    assert!(center(&handle_item).x + handle_item.geometry().width() / 2. <= center(&field).x);
+    assert!(center(&field).y < center(&text("LISTENING TO A TRACK")).y);
+    tap(&window, "t".into());
+    assert_eq!(window.get_profile_editor_pronouns(), "t");
+    assert_eq!(window.get_profile_editor_activity().row_count(), 0);
+    settle(&window);
+    tap(&window, "h".into());
+    assert_eq!(window.get_profile_editor_pronouns(), "th");
+    assert_eq!(
+        adapter
+            .borrow()
+            .app
+            .state
+            .profile_editor
+            .as_ref()
+            .unwrap()
+            .pronouns,
+        "th"
+    );
+
+    tap(&window, Key::Escape.into());
+    assert!(window.get_profile_editor_open());
+    let field = field.downcast::<TextInput>().unwrap();
+    let has_focus = || {
+        TextInput::FIELD_OFFSETS
+            .has_focus()
+            .apply_pin(field.as_pin_ref())
+            .get()
+    };
+    assert!(!has_focus());
+    for _ in 0..8 {
+        tap(&window, Key::Tab.into());
+        if has_focus() {
+            break;
+        }
+    }
+    assert!(has_focus(), "Tab reaches pronouns");
+    tap(&window, Key::End.into());
+    tap(&window, "e".into());
+    assert_eq!(window.get_profile_editor_pronouns(), "the");
+
+    window.invoke_save_profile();
+    assert!(window.get_profile_editor_prompt().saving);
+    tap(&window, "y".into());
+    assert_eq!(window.get_profile_editor_pronouns(), "they");
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.apply(Event::ProfileSaved {
+            server: None,
+            result: Err("Fixture save failed".into()),
+        });
+        adapter.refresh(&window);
+    }
+    assert_eq!(window.get_profile_editor_pronouns(), "they");
+    assert_eq!(
+        window.get_profile_editor_prompt().error,
+        "Fixture save failed"
+    );
+    window.invoke_undo_profile();
+    assert!(window.get_profile_editor_pronouns().is_empty());
+    assert!(!window.get_profile_editor_prompt().changed);
+}
+
+#[test]
+#[cfg(feature = "discord")]
 fn edit_profile_opens_the_main_profile_editor() {
     let (window, adapter, _directory) = discord_server_window_granting(0);
     window.invoke_edit_profile();
@@ -7400,6 +7879,35 @@ fn edit_profile_opens_the_main_profile_editor() {
         "they/them"
     );
     assert!(window.get_profile_editor_prompt().changed);
+
+    let mut track = yapfast_core::activity::MediaTrack {
+        requires_music_rpc: false,
+        title: "Track".into(),
+        artist: "Artist".into(),
+        album: String::new(),
+        duration_ms: 119_000,
+        position_ms: 48_000,
+        position_updated_ms: Some(games::now_ms()),
+        is_playing: true,
+        thumbnail_url: None,
+        thumbnail: None,
+        url: None,
+        source: Some("Chrome".into()),
+    };
+    assert_eq!(window.get_profile_editor_activity().row_count(), 0);
+    for playing in [true, false] {
+        track.is_playing = playing;
+        let mut adapter = adapter.borrow_mut();
+        adapter.activity_manager.set_global_sharing(true);
+        adapter
+            .activity_manager
+            .set_media_track(Some(track.clone()));
+        adapter.show_editor_activity(&window);
+        let row = window.get_profile_editor_activity().row_data(0).unwrap();
+        assert_eq!(row.name, "Track");
+        assert_eq!(row.paused, !playing);
+        assert_eq!(window.get_profile_editor_pronouns(), "they/them");
+    }
 
     window.invoke_write_profile(2, "Hello world bio".into());
     assert_eq!(
@@ -8346,6 +8854,7 @@ fn a_card_of_components_shows_headings_files_and_only_link_buttons_working() {
     let message = ChatMessage {
         item: "d:1".into(),
         attachments: vec![Attachment {
+            voice_ms: None,
             name: "notes.txt".into(),
             size: Some(10),
             image: false,
@@ -10114,7 +10623,7 @@ fn better_animations_phase_a_core_motion_and_overlays() {
     assert_eq!(popup.get_duration_exit(), 135);
 
     // Verify context menu, tooltip, popover, and hover durations and scale ranges.
-    assert_eq!(popup.get_menu_enter(), 120);
+    assert_eq!(popup.get_menu_enter(), 140);
     assert_eq!(popup.get_tooltip_enter(), 100);
     assert_eq!(popup.get_popover_enter(), 160);
     assert_eq!(popup.get_hover_enter(), 160);
@@ -11341,6 +11850,188 @@ fn task7_multi_stream_state_and_watching_models() {
 }
 
 #[test]
+fn clicking_the_stage_gutter_compacts_a_share_without_changing_focus() {
+    use i_slint_core::{
+        accessibility::AccessibleStringProperty,
+        item_tree::{ItemRc, ParentItemTraversalMode},
+    };
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
+    let window = showing(vec![]);
+    window.set_voice_room(true);
+    window.set_voice_here(true);
+    window.set_voice_active(true);
+    window.set_has_active_streams(true);
+    window.set_call_focus(0);
+    window.set_single_watched_slot(0);
+    window.set_watched_stream_count(1);
+    window.set_watch_user("watch".into());
+    window.set_participants(ModelRc::new(VecModel::from(vec![
+        PersonRow {
+            id: "watch".into(),
+            name: "Viewer".into(),
+            initial: "VA".into(),
+            decoration_url: "fixture-decoration".into(),
+            status: "Listening".into(),
+            live: true,
+            watched: true,
+            stream_ready: true,
+            connected: true,
+            ..Default::default()
+        },
+        PersonRow {
+            id: "local".into(),
+            name: "Local".into(),
+            initial: "LA".into(),
+            status: "Listening".into(),
+            local: true,
+            connected: true,
+            ..Default::default()
+        },
+    ])));
+    let tile = |label: &str| {
+        settle(&window);
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        let component = inner.component();
+        ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                if item
+                    .accessible_string_property(AccessibleStringProperty::Label)
+                    .as_deref()
+                    == Some(label)
+                {
+                    ControlFlow::Break(item.map_to_item_tree(item.geometry().center(), &component))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .expect("the watched share has a tile")
+    };
+    let click = |x, y| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = PointerEventButton::Left;
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        settle(&window);
+    };
+    let loading = || {
+        settle(&window);
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        ItemRc::new_root(inner.component())
+            .visit_descendants(|item| {
+                if item.is_visible()
+                    && item
+                        .accessible_string_property(AccessibleStringProperty::Label)
+                        .as_deref()
+                        == Some("Opening stream")
+                {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_some()
+    };
+    let participants = window.get_participants().iter().collect::<Vec<_>>();
+    let waiting = |watched| {
+        let mut rows = participants.clone();
+        rows[0].watched = watched;
+        rows[0].stream_ready = false;
+        window.set_participants(ModelRc::new(VecModel::from(rows)));
+    };
+    waiting(true);
+    assert!(loading());
+    click(1117., tile("Viewer's screen").y);
+    assert!(window.get_compact_call());
+    assert!(loading());
+    let opening = tile("Viewer's screen");
+    click(opening.x, opening.y);
+    assert!(!window.get_compact_call());
+    window.set_watch_user("".into());
+    waiting(false);
+    assert!(!loading());
+    window.set_watch_user("watch".into());
+    waiting(true);
+    assert!(loading());
+    window.set_participants(ModelRc::new(VecModel::from(participants.clone())));
+    assert!(!loading());
+    let screen = tile("Viewer's screen");
+    assert!(tile("Viewer, Listening").y > screen.y);
+    assert!(tile("Local, Listening").y > screen.y);
+    let avatar = |initial| {
+        settle(&window);
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        let component = inner.component();
+        ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                if item.is_visible() && item_text_is(item, initial) {
+                    let avatar = item
+                        .parent_item(ParentItemTraversalMode::FindAllParents)
+                        .unwrap();
+                    ControlFlow::Break((
+                        avatar.geometry().height(),
+                        avatar.map_to_item_tree(avatar.geometry().center(), &component),
+                    ))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .expect("the avatar shows its initials")
+    };
+    click(1117., screen.y);
+    assert!(window.get_compact_call());
+    assert_eq!(window.get_call_focus(), 0);
+    let center = tile("Viewer, Listening");
+    click(center.x, center.y);
+    assert!(!window.get_compact_call());
+    assert_eq!(window.get_watch_user(), "watch");
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1920., 1032.));
+    let centered = |initial, label| {
+        let (diameter, point) = avatar(initial);
+        let center = tile(label);
+        assert!((point.x - center.x).abs() < 1. && (point.y - center.y).abs() < 1.);
+        diameter
+    };
+    let decorated = centered("VA", "Viewer, Listening");
+    let plain = centered("LA", "Local, Listening");
+    assert!((60. ..=66.).contains(&decorated), "{decorated}");
+    assert!((decorated..=66.).contains(&plain), "{plain}");
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(570., 600.));
+    assert!(centered("VA", "Viewer, Listening") <= decorated);
+    assert!(centered("LA", "Local, Listening") <= plain);
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1920., 1032.));
+    window.set_has_active_streams(false);
+    window.set_call_focus(-1);
+    window.set_participants(ModelRc::new(VecModel::from(
+        window
+            .get_participants()
+            .iter()
+            .map(|mut person| {
+                person.watched = false;
+                person.stream_ready = false;
+                person
+            })
+            .collect::<Vec<_>>(),
+    )));
+    assert_eq!(centered("VA", "Viewer, Listening"), 80.);
+    assert_eq!(centered("LA", "Local, Listening"), 80.);
+}
+
+#[test]
 fn task7_grid_and_focus_layout_mode_switching() {
     i_slint_backend_testing::init_no_event_loop();
     let window = classic_window();
@@ -11568,7 +12259,7 @@ fn task7_stream_tick_delivers_independent_frames() {
         (writer, Arc::new(frames))
     };
     let (mut writer2, frames2) = {
-        let frames = yapfast_core::frames::Frames::create(2, 2).unwrap();
+        let frames = yapfast_core::frames::Frames::create(3, 2).unwrap();
         let writer = yapfast_core::frames::Writer::open(&frames.path().unwrap()).unwrap();
         (writer, Arc::new(frames))
     };
@@ -11578,11 +12269,7 @@ fn task7_stream_tick_delivers_independent_frames() {
             255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
         ])
     });
-    writer2.write(2, 2, |buf| {
-        buf[..16].copy_from_slice(&[
-            0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
-        ])
-    });
+    writer2.write(3, 2, |buf| buf[..24].fill(42));
 
     {
         let mut ad = adapter.borrow_mut();
@@ -11653,8 +12340,22 @@ fn task7_stream_tick_delivers_independent_frames() {
     let frame_bob = stream_frames.row_data(1).unwrap();
     assert_eq!(frame_alice.size().width, 2);
     assert_eq!(frame_alice.size().height, 2);
-    assert_eq!(frame_bob.size().width, 2);
+    assert_eq!(frame_bob.size().width, 3);
     assert_eq!(frame_bob.size().height, 2);
+    assert_eq!(window.get_watch_frame().size().width, 2);
+
+    // Both feeds are already open. Switching must use Bob's last frame even
+    // when no new frame arrives during the focus change.
+    window.invoke_focus_tile(1);
+    assert_eq!(window.get_watch_user(), "bob");
+    assert_eq!(window.get_watch_frame().size().width, 3);
+    window.invoke_focus_tile(0);
+    assert_eq!(window.get_watch_user(), "alice");
+    assert_eq!(window.get_watch_frame().size().width, 2);
+    window.invoke_focus_tile(1);
+    writer2.write(2, 2, |buf| buf[..16].fill(84));
+    window.invoke_stream_tick();
+    assert_eq!(window.get_watch_frame().size().width, 2);
 }
 
 #[test]
@@ -14053,7 +14754,8 @@ fn task9_game_activity_settings_section_and_scenarios() {
     assert!(window.get_has_game_activity_preview());
     let p = window.get_game_activity_preview();
     assert_eq!(p.name.as_str(), "Blinding Lights");
-    assert_eq!(p.heading.as_str(), "LISTENING TO SPOTIFY");
+    assert_eq!(p.heading.as_str(), "PAUSED");
+    assert_eq!(p.paused_position, 104);
 
     // Scenario 8: Rich Presence Party (2 of 5)
     window.invoke_select_simulated_scenario(8);
@@ -14319,13 +15021,16 @@ fn task9_live_media_session_updates_game_activity_and_profile() {
 
     // Set live media track from SoundCloud
     let track = yapfast_core::activity::MediaTrack {
+        requires_music_rpc: false,
         title: "Bass Cannon".into(),
         artist: "Excision".into(),
         album: "X Rated".into(),
         duration_ms: 210_000,
         position_ms: 30_000,
+        position_updated_ms: None,
         is_playing: true,
         thumbnail_url: None,
+        thumbnail: None,
         url: None,
         source: Some("SoundCloud".into()),
     };
@@ -14401,7 +15106,7 @@ fn task9_live_media_session_updates_game_activity_and_profile() {
         "Bass Cannon"
     );
 
-    // 5. Music paused -> suppressed in live mode
+    // A live paused track stays selected and its position is fixed.
     let mut paused = adapter
         .borrow()
         .activity_manager
@@ -14409,10 +15114,38 @@ fn task9_live_media_session_updates_game_activity_and_profile() {
         .clone()
         .unwrap();
     paused.is_playing = false;
+    paused.thumbnail = Some(Arc::new(Picture {
+        width: 1,
+        height: 1,
+        rgba: yapfast_core::chat::Pixels::new(1, 1, vec![80, 90, 100, 255]),
+        animation: None,
+    }));
+    adapter
+        .borrow_mut()
+        .activity_manager
+        .set_media_track(Some(paused.clone()));
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+    let preview = window.get_game_activity_preview();
+    assert!(window.get_has_game_activity_preview() && preview.paused);
+    assert_eq!(
+        (
+            preview.heading.as_str(),
+            preview.name.as_str(),
+            preview.paused_position
+        ),
+        ("PAUSED", "Bass Cannon", 30)
+    );
+    assert_eq!(preview.artwork.size().width, 1);
+    paused.is_playing = true;
+    paused.position_ms = 33_000;
     adapter
         .borrow_mut()
         .activity_manager
         .set_media_track(Some(paused));
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+    assert!(!window.get_game_activity_preview().paused);
+    assert_eq!(window.get_game_activity_preview().artwork.size().width, 1);
+    adapter.borrow_mut().activity_manager.set_media_track(None);
     games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
     assert!(!window.get_has_game_activity_preview());
 }
@@ -14438,6 +15171,7 @@ fn task9_discord_rpc_playing_syncs_to_detected_apps_and_priority_fallback() {
         ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
             name: "SoundCloud".into(),
             started_ms: Some(50_000),
+            activity: None,
         });
         games::refresh_game_activity(&mut ad, &window);
     }
@@ -14473,6 +15207,7 @@ fn task9_discord_rpc_playing_syncs_to_detected_apps_and_priority_fallback() {
         ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
             name: "Visual Studio Code".into(),
             started_ms: Some(60_000),
+            activity: None,
         });
         games::refresh_game_activity(&mut ad, &window);
     }
@@ -14495,4 +15230,248 @@ fn task9_discord_rpc_playing_syncs_to_detected_apps_and_priority_fallback() {
     for i in 0..apps.row_count() {
         assert!(!apps.row_data(i).unwrap().running);
     }
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn smtc_transitions_replace_stale_rpc_in_activity_cards() {
+    use yapfast_core::activity::windows_smtc::{MediaSessionState, PlaybackType};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    let mut ad = adapter.borrow_mut();
+    let now = games::now_ms();
+    let rpc = yapfast_discord::activity::activities(&serde_json::json!([{
+        "type": 2, "name": "SoundCloud", "details": "Fixture track", "state": "Artist",
+        "timestamps": {"start": now - 60_000, "end": now + 60_000}, "application_id": "42"
+    }]));
+    ad.app.state.discord_user = Some("1".into());
+    ad.app.state.discord_show_game = true;
+    ad.app.dispatch(Action::EditProfile);
+    ad.app.apply(Event::OwnProfile {
+        server: None,
+        result: Ok(yapfast_core::chat::OwnProfile {
+            fallback: yapfast_core::chat::Profile {
+                activities: rpc.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    });
+    ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
+        name: "SoundCloud".into(),
+        started_ms: rpc[0].start,
+        activity: Some(Arc::new(rpc[0].clone())),
+    });
+    ad.app.state.account_profile = Some(Arc::new(yapfast_core::chat::Profile {
+        activities: rpc.clone(),
+        ..Default::default()
+    }));
+    let mut session = MediaSessionState::new();
+    session.on_session_changed("Chrome".into());
+    session.on_media_properties_changed("Fixture track".into(), "Artist".into(), "".into());
+    session.on_timeline_changed(120_000, 31_000);
+    session.on_playback_info_changed(true);
+    session.position_updated_ms = Some(now);
+    let publish = |ad: &mut Adapter, session: &MediaSessionState| {
+        games::apply_media_update(ad, &window, session.to_media_track());
+        let card = window.get_game_activity_preview();
+        assert_eq!(window.get_account_profile().activities.row_count(), 1);
+        assert_eq!(
+            window.get_account_profile().activities.row_data(0).unwrap(),
+            card
+        );
+        assert_eq!(
+            window.get_profile_editor_activity().row_data(0).unwrap(),
+            card
+        );
+        card
+    };
+    let start = std::time::Instant::now();
+    assert!(!publish(&mut ad, &session).paused);
+    let elapsed = start.elapsed();
+    eprintln!("SMTC fixture to Slint activity cards: {:.2?}", elapsed);
+    assert!(elapsed < std::time::Duration::from_secs(1));
+    session.on_playback_info_changed(false);
+    assert_eq!(publish(&mut ad, &session).paused_position, 31);
+    let live = ad.app.state.discord_playing.take();
+    games::apply_media_update(&mut ad, &window, session.to_media_track());
+    let cached = window.get_profile_editor_activity().row_data(0).unwrap();
+    assert!(cached.paused);
+    assert_eq!(cached.paused_position, 31);
+    ad.app.state.discord_playing = live;
+    session.on_timeline_changed(120_000, 53_000);
+    assert_eq!(publish(&mut ad, &session).paused_position, 53);
+    session.on_playback_info_changed(true);
+    session.position_updated_ms = Some(now);
+    assert!(!publish(&mut ad, &session).paused);
+    session.on_media_properties_changed("Unrelated track".into(), "Artist".into(), "".into());
+    session.on_playback_info_changed(false);
+    assert!(!publish(&mut ad, &session).paused);
+
+    let music = ad.app.state.discord_playing.take();
+    let watching = yapfast_discord::activity::activities(&serde_json::json!([{
+        "type": 0, "name": "YouTube", "details": "Video title",
+        "state": "Channel", "timestamps": {"start": now - 3000, "end": now + 10_000}
+    }]));
+    ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
+        name: watching[0].name.to_string(),
+        started_ms: watching[0].start,
+        activity: Some(Arc::new(watching[0].clone())),
+    });
+    ad.app.state.account_profile = Some(Arc::new(yapfast_core::chat::Profile {
+        activities: watching,
+        ..Default::default()
+    }));
+    session.playback_type = PlaybackType::Video;
+    assert!(session.to_media_track().is_none());
+    games::apply_media_update(&mut ad, &window, session.to_media_track());
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_account_profile().activities.row_count(), 0);
+    assert_eq!(window.get_profile_editor_activity().row_count(), 0);
+
+    // Chromium reports Music even for ordinary video.
+    session.on_session_changed("A12BC34DE56F7890".into());
+    session.playback_type = PlaybackType::Music;
+    games::apply_media_update(&mut ad, &window, session.to_media_track());
+    assert!(!window.get_has_game_activity_preview());
+    ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
+        name: "Fixture game".into(),
+        started_ms: Some(now),
+        activity: None,
+    });
+    games::apply_media_update(&mut ad, &window, session.to_media_track());
+    assert_eq!(window.get_game_activity_preview().name, "Fixture game");
+
+    ad.app.state.discord_playing = music;
+    session.on_media_properties_changed("Fixture track".into(), "Artist".into(), "".into());
+    assert!(publish(&mut ad, &session).paused);
+    ad.activity_manager.set_rule("SoundCloud", false, 0, None);
+    games::apply_media_update(&mut ad, &window, session.to_media_track());
+    assert!(!window.get_has_game_activity_preview());
+
+    session.on_session_closed();
+    ad.app.state.discord_playing = None;
+    ad.app.state.account_profile = None;
+    games::apply_media_update(&mut ad, &window, session.to_media_track());
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_account_profile().activities.row_count(), 0);
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn wallpaper_rule_filters_cached_activity_and_late_rpc_after_reload() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let make_adapter = || {
+        Adapter::new(
+            Arc::new(BackgroundRuntime::new().unwrap()),
+            directory.path().into(),
+            &window,
+        )
+        .unwrap()
+    };
+    let activities = yapfast_discord::activity::activities(&serde_json::json!([
+        {"type": 0, "name": "Wallpaper Engine"},
+        {"type": 0, "name": "Another Game"}
+    ]));
+    let [wallpaper, fallback] = activities.as_ref() else {
+        panic!("two activity fixtures expected");
+    };
+    let publish = |ad: &mut Adapter, start, has_fallback| {
+        let mut cached = vec![wallpaper.clone()];
+        if has_fallback {
+            cached.push(fallback.clone());
+        }
+        ad.app.state.account_profile = Some(Arc::new(yapfast_core::chat::Profile {
+            activities: cached.into(),
+            ..Default::default()
+        }));
+        ad.app.state.discord_playing = Some(yapfast_core::chat::Playing {
+            name: "Wallpaper Engine".into(),
+            started_ms: Some(start),
+            activity: Some(Arc::new(wallpaper.clone())),
+        });
+        games::refresh_game_activity(ad, &window);
+        ad.refresh_own_activity(&window);
+    };
+    let adapter = make_adapter();
+    bind_callbacks(&window, &adapter);
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.discord_user = Some("1".into());
+        ad.app.state.discord_show_game = true;
+        let member = |id: &str| yapfast_core::chat::ChatMember {
+            id: id.into(),
+            name: id.into(),
+            bot: false,
+            username: None,
+            role: Role::Member,
+            avatar: None,
+            decoration: None,
+            nameplate: None,
+            boosting_since: None,
+            style: None,
+            tag: None,
+            group: None,
+            presence: None,
+            color: None,
+            activity: wallpaper.line(),
+            activities: vec![wallpaper.clone()].into(),
+            roles: Default::default(),
+            timed_out_until: None,
+            group_icon: None,
+            role_icon: None,
+        };
+        ad.app.state.members = Some(Ok(vec![member("1"), member("2")]));
+        ad.show_members(&window);
+        assert_eq!(window.get_roster().row_data(0).unwrap().activity_icon, 1);
+    }
+    publish(&mut adapter.borrow_mut(), 100, true);
+    assert_eq!(window.get_game_activity_preview().name, "Wallpaper Engine");
+    window.invoke_toggle_app_activity(r"C:\Steam\wallpaper64.exe".into(), false);
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_roster().row_data(0).unwrap().activity_icon, 0);
+    assert_eq!(window.get_roster().row_data(1).unwrap().activity_icon, 1);
+    let rows = || {
+        window
+            .get_account_profile()
+            .activities
+            .iter()
+            .map(|row| row.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(), ["Another Game"]);
+    let mut media = yapfast_core::activity::windows_smtc::MediaSessionState::new();
+    media.on_session_changed("com.richardhbtz.soundcloud-rpc".into());
+    media.playback_type = yapfast_core::activity::windows_smtc::PlaybackType::Music;
+    media.on_media_properties_changed("Other track".into(), "".into(), "".into());
+    media.on_playback_info_changed(true);
+    games::apply_media_update(&mut adapter.borrow_mut(), &window, media.to_media_track());
+    assert_eq!(window.get_game_activity_preview().name, "Other track");
+    games::apply_media_update(&mut adapter.borrow_mut(), &window, None);
+    publish(&mut adapter.borrow_mut(), 200, false);
+    assert!(rows().is_empty());
+    assert!(
+        window
+            .get_detected_apps()
+            .iter()
+            .any(|row| row.running && !row.enabled)
+    );
+
+    let reloaded = make_adapter();
+    bind_callbacks(&window, &reloaded);
+    publish(&mut reloaded.borrow_mut(), 300, true);
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(rows(), ["Another Game"]);
+    window.invoke_toggle_app_activity("Wallpaper Engine".into(), true);
+    assert_eq!(window.get_game_activity_preview().name, "Wallpaper Engine");
 }

@@ -452,6 +452,12 @@ pub(super) fn command(
         }
         return None;
     }
+    if let Command::Discord(DiscordCommand::MusicPlayback(playback)) = command {
+        if let Ok(discord) = discord {
+            discord.set_music_playback(playback);
+        }
+        return None;
+    }
     if let Command::Discord(DiscordCommand::ShowGame(shown)) = command {
         match discord {
             Ok(discord) => {

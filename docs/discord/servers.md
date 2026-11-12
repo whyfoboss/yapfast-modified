@@ -1,5 +1,11 @@
 # Servers
 
+## Server rail
+
+Drag a server above or below another entry to change the order on this
+device. Servers inside an open folder can be reordered within that folder.
+Folder membership follows Discord.
+
 ## Permissions and roles
 
 What the account may do in a server is its @everyone role's permissions

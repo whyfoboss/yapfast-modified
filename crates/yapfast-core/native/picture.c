@@ -16,6 +16,17 @@ struct yapfast_picture {
   int v_stride;
 };
 
+/* Packed I420 keeps the decoder's samples intact across the process boundary. */
+void yapfast_i420_pack(const struct yapfast_picture *picture, unsigned char *out,
+                       int width, int height) {
+  int chroma = (width + 1) / 2;
+  unsigned char *u = out + (size_t)width * height;
+  unsigned char *v = u + (size_t)chroma * ((height + 1) / 2);
+  I420Scale(picture->y, picture->y_stride, picture->u, picture->u_stride,
+            picture->v, picture->v_stride, picture->width, picture->height,
+            out, width, u, chroma, v, chroma, width, height, kFilterBilinear);
+}
+
 /* Scales `picture` into `scratch`, an I420 buffer of `width` by `height`,
  * unless it's that size already, and converts it to RGBA in `rgba`, whose
  * rows are `stride` bytes apart. */

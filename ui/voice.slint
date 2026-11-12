@@ -4,6 +4,7 @@ import { ActionButton, IconButton, Avatar, CallButton, VolumeSlider, MenuItem } 
 import { EmojiCell, EmojiFace } from "messages.slint";
 
 export struct PersonRow {
+    decoration-url: string,
     id: string, name: string, status: string, muted: bool, deafened: bool, speaking: bool, connected: bool, initial: string, tint: color, color: color, has-color: bool, picture: image,
     /// Sharing their screen.
     live: bool,
@@ -667,6 +668,8 @@ export component StreamPip inherits Rectangle {
 // click, and a stream it shows stops from its top right.
 component StageTile inherits Rectangle {
     in property <bool> focused;
+    in property <bool> speaking-video;
+    in property <image> video-frame;
     in property <bool> full;
     in property <string> label;
     /// Who watches the stream it shows.
@@ -676,6 +679,7 @@ component StageTile inherits Rectangle {
     in property <string> stop-label;
     /// Whether this tile is broadcasting and unwatched (can show stream action buttons on hover)
     in property <bool> can-watch: false;
+    in property <bool> loading;
     in property <bool> is-strip: false;
     in property <bool> is-multi-grid: false;
     callback clicked;
@@ -685,10 +689,18 @@ component StageTile inherits Rectangle {
     callback watch-stream;
     callback add-stream;
     out property <bool> has-hover: root.tile-hovered;
-    border-radius: root.full ? 0px : (root.is-strip ? 8px : 12px); clip: true;
+    border-radius: root.full ? 0px : (root.is-strip ? 8px : 12px);
     accessible-role: button; accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
     property <bool> tile-hovered: touch.has-hover || (root.stop-label != "" && stop-btn.hovered) || (root.focused && !root.is-multi-grid && fs-btn.hovered) || (root.viewers.length > 0 && stack.hovered) || (root.can-watch && (eye-touch.has-hover || watch-touch.has-hover));
+
+    if root.speaking-video && !root.full && root.video-frame.width > 0: Rectangle {
+        property <float> aspect: root.video-frame.width / max(1, root.video-frame.height);
+        width: min(root.width, root.height * self.aspect) + 4px;
+        height: min(root.height, root.width / self.aspect) + 4px;
+        border-radius: min(root.border-radius + 2px, min(self.width, self.height) / 2);
+        border-width: 2px; border-color: Theme.live;
+    }
 
     // TouchArea encompasses the tile, children, and overlay controls
     touch := TouchArea {
@@ -702,7 +714,22 @@ component StageTile inherits Rectangle {
             }
         }
 
-        @children
+        Rectangle {
+            border-radius: root.border-radius; clip: true;
+            @children
+        }
+        if root.loading && root.visible: Rectangle {
+            width: 24px; height: 24px;
+            accessible-role: text;
+            accessible-label: "Opening stream";
+            for dot in 8: Rectangle {
+                width: 3px; height: 3px; border-radius: 1.5px;
+                x: 10.5px + 9px * cos(dot * 45deg);
+                y: 10.5px + 9px * sin(dot * 45deg);
+                background: Theme.text;
+                opacity: 0.2 + 0.8 * Math.mod(dot - animation-tick() / 100ms, 8) / 8;
+            }
+        }
 
         // Overlay stream controls, hidden by default and smoothly fading in on hover.
         controls-overlay := Rectangle {
@@ -815,9 +842,11 @@ component TileChip inherits Rectangle {
     in property <length> tile-height;
     in property <bool> hover-only: false;
     in property <bool> hovered: false;
+    in property <bool> larger-compact-name: false;
     property <bool> is-compact: root.tile-height <= 110px;
+    in property <bool> avatar-clearance;
     x: root.is-compact ? 6px : 10px;
-    y: root.tile-height - self.height - (root.is-compact ? 6px : 10px);
+    y: root.tile-height - self.height - (root.is-compact ? (root.avatar-clearance ? 3px : 6px) : 10px);
     width: min(root.tile-width - (root.is-compact ? 12px : 20px), chip.preferred-width);
     height: root.is-compact ? 22px : 26px;
     border-radius: root.is-compact ? 4px : 6px;
@@ -835,7 +864,7 @@ component TileChip inherits Rectangle {
         @children
         Text {
             text: root.name; color: root.name-color;
-            font-size: root.is-compact ? 11px : 13px;
+            font-size: root.is-compact ? (root.larger-compact-name ? 12px : 11px) : 13px;
             font-weight: 700; vertical-alignment: center; overflow: elide;
         }
         if root.live: Middle { LivePill { } }
@@ -851,12 +880,20 @@ component TileChip inherits Rectangle {
 component StreamPicture inherits Rectangle {
     in property <image> frame;
     in property <string> status;
-    Image { width: parent.width; height: parent.height; source: root.frame; image-fit: contain; }
+    in property <length> corners;
+    if root.frame.width > 0 && root.frame.height > 0: Rectangle {
+        property <float> aspect: root.frame.width / root.frame.height;
+        width: min(root.width, root.height * self.aspect);
+        height: min(root.height, root.width / self.aspect);
+        border-radius: root.corners; clip: true;
+        Image { width: parent.width; height: parent.height; source: root.frame; image-fit: contain; }
+    }
 }
 
 // The call's participants as tiles in a grid. A click on one shows it large,
 // with the others in rows beneath, until a click beside it.
 export component ParticipantGrid inherits Flickable {
+    in property <bool> stage-hovered;
     in property <[PersonRow]> participants;
     /// Each participant's newest camera picture, in the same order.
     in property <[image]> frames;
@@ -897,6 +934,7 @@ export component ParticipantGrid inherits Flickable {
     in property <bool> full;
     /// Presentation mode: Grid Mode (multiple streams in grid) vs Focus Mode (one large stream).
     in-out property <bool> grid-mode: false;
+    in-out property <bool> compact: false;
     /// Show the tile at this place large, or none for -1.
     callback focus-tile(int);
     callback full-screen(bool);
@@ -936,23 +974,31 @@ export component ParticipantGrid inherits Flickable {
 
     property <int> extra: (root.sharing ? 1 : 0) + root.stream-tiles.length;
     property <int> count: root.participants.length + self.extra;
-    property <bool> focusing: root.focused >= 0 && root.focused < self.count;
+    property <bool> focusing: !root.compact && root.focused >= 0 && root.focused < self.count;
     property <int> active-count: root.has-active-streams ? (root.watched-stream-count > 0 ? root.watched-stream-count : 1) : self.count;
     property <int> grid-lead: 0;
 
     property <int> large-slot: root.focusing ? root.focused : root.single-watched-slot;
-    property <bool> is-multi-grid: root.has-active-streams && root.grid-mode && root.watched-stream-count >= 2;
-    property <bool> is-focus-mode: root.has-active-streams && !self.is-multi-grid;
+    property <bool> is-multi-grid: !root.compact && root.has-active-streams && root.grid-mode && root.watched-stream-count >= 2;
+    property <bool> is-focus-mode: !root.compact && root.has-active-streams && !self.is-multi-grid;
     property <int> total-call-items: (root.sharing ? 1 : 0) + root.stream-tiles.length + root.participants.length;
     property <int> grid-strip-count: max(0, self.total-call-items - self.active-count);
+    // A camera-less streamer normally shares their slot with the screen.
+    // Focus keeps that slot on stage and adds their ordinary participant tile.
+    property <int> focused-person-index: self.large-slot - self.extra;
+    property <PersonRow> focused-person: root.participants[self.focused-person-index];
+    property <bool> show-focused-profile: self.is-focus-mode && !self.full
+        && self.focused-person-index >= 0 && self.focused-person-index < self.participants.length
+        && self.focused-person.live && !self.focused-person.local && !self.focused-person.video
+        && self.focused-person.watched;
     property <int> strip-count: (root.is-focus-mode || (!root.has-active-streams && root.focusing))
-        ? max(0, self.total-call-items - 1)
+        ? max(0, self.total-call-items - 1 + (self.show-focused-profile ? 1 : 0))
         : (root.is-multi-grid ? self.grid-strip-count : 0);
 
     // Focus & Grid Mode strip geometry: normal size preserved everywhere
     property <length> strip-gap: 8px;
     property <length> strip-max-h-by-w: self.strip-count > 0 ? (self.avail-w - max(0, self.strip-count - 1) * self.strip-gap) / self.strip-count / 1.7 : 0px;
-    property <length> strip-thumb-h: self.strip-count > 0 ? min(104px, max(68px, min(self.avail-h * 0.22, self.strip-max-h-by-w))) : 0px;
+    property <length> strip-thumb-h: self.strip-count > 0 ? max(1px, min(104px, max(68px, self.avail-h * 0.22), self.strip-max-h-by-w)) : 0px;
     property <length> strip-thumb-w: min(180px, self.strip-thumb-h * 1.7);
     property <length> strip-total-w: self.strip-count > 0 ? (self.strip-count * self.strip-thumb-w + max(0, self.strip-count - 1) * self.strip-gap) : 0px;
     property <length> strip-start-x: max(self.inset, (self.width - self.strip-total-w) / 2);
@@ -1024,10 +1070,10 @@ export component ParticipantGrid inherits Flickable {
     property <length> gn-start-x: (self.width - self.gn-tot-w) / 2;
     property <length> gn-start-y: self.top-inset + (self.stage-avail-h - self.gn-tot-h) / 2;
 
-    property <length> tile-width: root.has-active-streams ? self.g4-w : self.normal-tile-width;
-    property <length> tile-height: root.has-active-streams ? self.g4-h : self.normal-tile-height;
-    property <int> columns: root.has-active-streams ? (root.is-focus-mode ? 1 : (self.active-count <= 2 ? self.active-count : 2)) : self.normal-columns;
-    property <length> first-row: root.has-active-streams ? self.top-inset : self.normal-first-row;
+    property <length> tile-width: root.has-active-streams && !root.compact ? self.g4-w : self.normal-tile-width;
+    property <length> tile-height: root.has-active-streams && !root.compact ? self.g4-h : self.normal-tile-height;
+    property <int> columns: root.has-active-streams && !root.compact ? (root.is-focus-mode ? 1 : (self.active-count <= 2 ? self.active-count : 2)) : self.normal-columns;
+    property <length> first-row: root.has-active-streams && !root.compact ? self.top-inset : self.normal-first-row;
     property <length> focus-width: self.focus-w;
     property <length> focus-height: self.focus-h;
     content-height: self.height;
@@ -1118,11 +1164,11 @@ export component ParticipantGrid inherits Flickable {
     // A click beside the large tile shows the grid again.
     TouchArea {
         width: root.width; height: root.content-height;
-        clicked => { if root.focusing && !root.full { root.focus-tile(-1); } }
+        clicked => { if !root.full && root.is-focus-mode { root.compact = true; } else if root.focusing && !root.full && !root.has-active-streams { root.focus-tile(-1); } }
     }
     if root.sharing: StageTile {
         property <int> slot: 0;
-        property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
+        property <bool> is-large: root.has-active-streams && !root.compact ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
         property <bool> in-strip: root.is-focus-mode && !self.is-large;
         property <int> strip-index: 0;
         property <int> active-slot: 0;
@@ -1132,14 +1178,14 @@ export component ParticipantGrid inherits Flickable {
         width: root.tile-w-size(self.is-large, self.in-strip, self.active-slot);
         height: root.tile-h-size(self.is-large, self.in-strip, self.active-slot);
         visible: !root.full || self.is-large || (root.is-multi-grid && !self.in-strip);
-        focused: root.is-focus-mode ? self.is-large : (root.focused-active == 0);
+        focused: !root.compact && (root.is-focus-mode ? self.is-large : (root.focused-active == 0));
         full: root.full;
         is-multi-grid: root.is-multi-grid;
         background: #000000;
         label: "Your screen, " + root.share-status;
         viewers: root.share-viewers; viewer-names: root.share-viewer-names;
         clicked => {
-            if root.is-focus-mode {
+            if root.compact { root.compact = false; root.focus-tile(self.slot); } else if root.is-focus-mode {
                 if !self.is-large { root.focus-tile(0); }
             } else if root.is-multi-grid {
                 if root.focused-active != 0 {
@@ -1165,15 +1211,15 @@ export component ParticipantGrid inherits Flickable {
     for index[position] in root.stream-tiles: stream := StageTile {
         property <int> slot: position + (root.sharing ? 1 : 0);
         property <PersonRow> person: root.participants[index];
-        property <bool> watched: self.person.watched || (self.person.id == root.watch-user && root.has-active-streams);
+        property <bool> watched: self.person.watched;
         property <image> stream-pic: (root.is-focus-mode && (stream.is-large || stream.focused) && stream.person.id == root.watch-user && root.watch-frame.width > 0)
             ? root.watch-frame
             : (root.stream-frames.length > index && root.stream-frames[index].width > 0
                 ? root.stream-frames[index]
                 : @image-url(""));
         property <bool> video-ready: self.watched && self.person.stream-ready;
-        property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
-        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.video-ready) : (root.focusing && !self.is-large);
+        property <bool> is-large: root.has-active-streams && !root.compact ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
+        property <bool> in-strip: root.has-active-streams && !root.compact ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
         property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : (self.person.unwatched-index >= 0 ? self.person.unwatched-index : (self.slot < root.large-slot ? self.slot : (self.slot - 1)));
         property <int> active-slot: (root.sharing ? 1 : 0) + self.person.watched-index;
         property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
@@ -1183,24 +1229,26 @@ export component ParticipantGrid inherits Flickable {
         width: self.is-active ? root.tile-w-size(self.is-large, self.in-strip, self.active-slot) : 0px;
         height: self.is-active ? root.tile-h-size(self.is-large, self.in-strip, self.active-slot) : 0px;
         visible: self.is-active && (!root.full || self.is-large || (root.is-multi-grid && !self.in-strip));
-        focused: root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active);
+        focused: !root.compact && (root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active));
         full: root.full;
         is-strip: self.in-strip;
         is-multi-grid: root.is-multi-grid;
+        video-frame: self.stream-pic; speaking-video: self.video-ready && self.person.speaking;
         background: self.video-ready ? #000000 : Theme.raised;
-        label: self.video-ready ? self.person.name + "'s screen" : "Watch " + self.person.name + "'s stream";
+        label: self.watched ? self.person.name + "'s screen" : "Watch " + self.person.name + "'s stream";
         viewers: self.video-ready ? root.watch-viewers : [];
         viewer-names: self.video-ready ? root.watch-viewer-names : "";
-        stop-label: self.video-ready ? "Stop watching" : "";
-        can-watch: !self.video-ready;
+        stop-label: self.watched ? "Stop watching" : "";
+        can-watch: !self.watched;
+        loading: self.watched && !self.video-ready;
         watch-stream => { root.watch-stream(self.person.id); }
         add-stream => { root.add-stream(self.person.id); }
         clicked => {
             if !self.watched {
                 root.watch-stream(self.person.id);
-            } else if self.watched && !self.video-ready {
-                root.stop-watching(self.person.id);
-            } else if self.video-ready {
+            } else if root.compact {
+                root.compact = false; root.focus-tile(self.slot);
+            } else if self.watched {
                 if root.is-focus-mode {
                     if !self.is-large { root.focus-tile(self.slot); }
                 } else if root.is-multi-grid {
@@ -1215,9 +1263,10 @@ export component ParticipantGrid inherits Flickable {
         full-screen(on) => { root.full-screen(on); }
         if stream.video-ready: StreamPicture {
             frame: stream.stream-pic;
+            corners: stream.border-radius;
             status: stream.person.stream-status != "" ? stream.person.stream-status : root.watch-status;
         }
-        if !stream.video-ready: VerticalLayout {
+        if !stream.watched: VerticalLayout {
             alignment: center; spacing: 10px;
             Image { height: 30px; source: @image-url("icons/screen-share.svg"); image-fit: contain; colorize: #b5b8c1; }
         }
@@ -1239,22 +1288,25 @@ export component ParticipantGrid inherits Flickable {
             Image { source: @image-url("icons/screen-share.svg"); width: 14px; image-fit: contain; colorize: #ffffff; }
         }
     }
-    for person[position] in root.participants: tile := StageTile {
-        property <int> slot: position + root.extra;
-        property <image> frame: person.video ? root.frames[position] : @image-url("");
+    for index in (root.participants.length + (root.show-focused-profile ? 1 : 0)): tile := StageTile {
+        property <bool> focused-profile: index == root.participants.length;
+        property <int> position: self.focused-profile ? root.focused-person-index : index;
+        property <PersonRow> person: root.participants[self.position];
+        property <int> slot: self.position + root.extra;
+        property <image> frame: tile.person.video ? root.frames[self.position] : @image-url("");
         property <bool> filmed: self.frame.width > 0;
-        property <bool> streams-here: person.live && !person.local && !person.video;
-        property <bool> watched: self.streams-here && (person.watched || (person.id == root.watch-user && root.has-active-streams));
-        property <image> stream-pic: (root.is-focus-mode && (tile.is-large || tile.focused) && person.id == root.watch-user && root.watch-frame.width > 0)
+        property <bool> streams-here: !self.focused-profile && tile.person.live && !tile.person.local && !tile.person.video;
+        property <bool> watched: self.streams-here && tile.person.watched;
+        property <image> stream-pic: (root.is-focus-mode && (tile.is-large || tile.focused) && tile.person.id == root.watch-user && root.watch-frame.width > 0)
             ? root.watch-frame
-            : (root.stream-frames.length > position && root.stream-frames[position].width > 0
-                ? root.stream-frames[position]
+            : (root.stream-frames.length > self.position && root.stream-frames[self.position].width > 0
+                ? root.stream-frames[self.position]
                 : @image-url(""));
-        property <bool> video-ready: self.watched && person.stream-ready;
-        property <bool> is-large: root.has-active-streams ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot);
-        property <bool> in-strip: root.has-active-streams ? (root.is-focus-mode ? !self.is-large : !self.video-ready) : (root.focusing && !self.is-large);
-        property <int> strip-index: (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : (person.unwatched-index >= 0 ? person.unwatched-index : (self.slot < root.large-slot ? self.slot : (self.slot - 1)));
-        property <int> active-slot: (root.sharing ? 1 : 0) + person.watched-index;
+        property <bool> video-ready: self.watched && tile.person.stream-ready;
+        property <bool> is-large: !self.focused-profile && (root.has-active-streams && !root.compact ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot));
+        property <bool> in-strip: root.has-active-streams && !root.compact ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
+        property <int> strip-index: self.focused-profile ? root.strip-count - 1 : (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : (tile.person.unwatched-index >= 0 ? tile.person.unwatched-index : (self.slot < root.large-slot ? self.slot : (self.slot - 1)));
+        property <int> active-slot: (root.sharing ? 1 : 0) + tile.person.watched-index;
         property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
         property <bool> is-active: true;
         x: self.is-active ? root.tile-x-pos(self.slot, self.is-large, self.in-strip, self.strip-index, self.active-slot) : -1000px;
@@ -1262,24 +1314,26 @@ export component ParticipantGrid inherits Flickable {
         width: self.is-active ? root.tile-w-size(self.is-large, self.in-strip, self.active-slot) : 0px;
         height: self.is-active ? root.tile-h-size(self.is-large, self.in-strip, self.active-slot) : 0px;
         visible: self.is-active && (!root.full || self.is-large || (root.is-multi-grid && !self.in-strip));
-        focused: root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active);
+        focused: !root.compact && (root.is-focus-mode ? self.is-large : (self.watched && self.active-slot == root.focused-active));
         full: root.full;
         is-strip: self.in-strip;
         is-multi-grid: root.is-multi-grid;
+        video-frame: self.video-ready ? self.stream-pic : @image-url(""); speaking-video: self.video-ready && tile.person.speaking;
         background: self.filmed || self.video-ready ? #000000 : Theme.raised;
-        label: person.name + ", " + person.status + (person.video ? ", camera on" : "");
+        label: self.watched && (self.is-large || self.loading) ? tile.person.name + "'s screen" : tile.person.name + ", " + tile.person.status + (tile.person.video ? ", camera on" : "");
         viewers: self.video-ready ? root.watch-viewers : [];
         viewer-names: self.video-ready ? root.watch-viewer-names : "";
-        stop-label: self.video-ready ? "Stop watching" : "";
-        can-watch: self.streams-here && !self.video-ready;
-        watch-stream => { root.watch-stream(person.id); }
-        add-stream => { root.add-stream(person.id); }
+        stop-label: self.watched ? "Stop watching" : "";
+        can-watch: self.streams-here && !self.watched;
+        loading: self.watched && !self.video-ready;
+        watch-stream => { root.watch-stream(tile.person.id); }
+        add-stream => { root.add-stream(tile.person.id); }
         clicked => {
             if self.streams-here && !self.watched {
-                root.watch-stream(person.id);
-            } else if self.watched && !self.video-ready {
-                root.stop-watching(person.id);
-            } else if self.video-ready {
+                root.watch-stream(tile.person.id);
+            } else if root.compact && self.watched {
+                root.compact = false; root.focus-tile(self.slot);
+            } else if self.watched {
                 if root.is-focus-mode {
                     if !self.is-large { root.focus-tile(self.slot); }
                 } else if root.is-multi-grid {
@@ -1288,23 +1342,36 @@ export component ParticipantGrid inherits Flickable {
                     }
                 }
             } else if !self.streams-here && !self.watched {
-                root.show-voice-person(root.voice-channel, person.id);
+                root.show-voice-person(root.voice-channel, tile.person.id);
             }
         }
-        right-clicked(x, y) => { root.open-volume(person, x, y); }
-        stop => { root.stop-watching(person.id); }
+        right-clicked(x, y) => { root.open-volume(tile.person, x, y); }
+        stop => { root.stop-watching(tile.person.id); }
         full-screen(on) => { root.full-screen(on); }
 
         if tile.filmed: Image { width: tile.width; height: tile.height; source: tile.frame; image-fit: contain; }
         if tile.video-ready: StreamPicture {
             frame: tile.stream-pic;
-            status: person.stream-status != "" ? person.stream-status : root.watch-status;
+            corners: tile.border-radius;
+            status: tile.person.stream-status != "" ? tile.person.stream-status : root.watch-status;
         }
-        if !tile.filmed && !tile.video-ready: Avatar {
-            size: root.is-focus-mode && tile.is-large ? min(96px, min(parent.height * 0.35, parent.width * 0.35)) : min(48px, min(parent.height * 0.5, parent.width * 0.5));
-            initial: person.initial; tint: person.tint; picture: person.picture;
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 - 4px;
-            opacity: person.connected ? 1 : 0.5;
+        if !tile.filmed && !tile.watched: Avatar {
+            property <float> decoration-scale: tile.person.decoration-url != "" ? 1.2 : 1;
+            property <bool> main-avatar: !tile.in-strip;
+            property <length> available-size: min(66px, (person-chip.y - 2px) / self.decoration-scale, parent.width * 0.62);
+            property <length> live-clearance: tile.streams-here
+                && (parent.width - self.available-size * self.decoration-scale) / 2 < 40px
+                ? min(26px, max(0px, person-chip.y - 10px)) : 0px;
+            property <length> centered-space: 2 * (person-chip.y - parent.height / 2 - 2px);
+            size: max(1px, self.main-avatar
+                ? min(80px, self.centered-space / self.decoration-scale, parent.width * 0.62)
+                : min(self.available-size, (person-chip.y - self.live-clearance - 2px) / self.decoration-scale));
+            initial: tile.person.initial; tint: tile.person.tint; picture: tile.person.picture;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            property <bool> on-stage: tile.visible && tile.y + tile.height + root.content-y > 0px && tile.y + root.content-y < root.height;
+            decoration-url: self.on-stage ? tile.person.decoration-url : ""; animate: self.on-stage && tile.has-hover;
+            opacity: tile.person.connected ? 1 : 0.5;
         }
         // Small crisp red LIVE badge at top-left for unwatched broadcasting tiles, or watched tiles waiting for frames
         if tile.streams-here && !tile.video-ready: Rectangle {
@@ -1318,29 +1385,44 @@ export component ParticipantGrid inherits Flickable {
         }
         // Speaking ring border
         Rectangle {
-            border-radius: tile.border-radius; border-width: person.speaking ? 2px : 0px; border-color: Theme.live;
+            border-radius: tile.border-radius; border-width: tile.person.speaking && !tile.video-ready ? 2px : 0px; border-color: Theme.live;
         }
-        if person.local && root.camera-starting: Rectangle {
+        if tile.person.local && root.camera-starting: Rectangle {
             x: 10px; y: 10px; height: 26px;
             width: starting-label.preferred-width + 20px; border-radius: 13px;
             background: #000000a6; opacity: (0.6 + 0.4 * sin(animation-tick() / 1ms * 0.36deg));
             starting-label := Text { text: "Starting camera..."; color: #ffffff; font-size: 13px; font-weight: 700; }
         }
-        TileChip {
+        person-chip := TileChip {
             tile-width: parent.width; tile-height: parent.height;
-            name: person.name; live: tile.is-large && person.live && (person.local || !person.video);
-            name-color: person.has-color ? person.color : #ffffff;
-            note: person.status != "Muted" && person.status != "Deafened" && person.status != "Speaking" && person.status != "Listening" ? person.status : "";
-            hover-only: tile.video-ready;
-            hovered: tile.has-hover;
-            if person.muted && !person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
-            if person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
+            avatar-clearance: !tile.filmed && !tile.video-ready;
+            name: tile.person.name; live: tile.is-large && tile.person.live && (tile.person.local || !tile.person.video);
+            name-color: tile.person.has-color ? tile.person.color : #ffffff;
+            note: tile.person.status != "Muted" && tile.person.status != "Deafened" && tile.person.status != "Speaking" && tile.person.status != "Listening" ? tile.person.status : "";
+            larger-compact-name: root.is-focus-mode && tile.in-strip;
+            hover-only: tile.video-ready || (root.is-focus-mode && tile.in-strip);
+            hovered: root.is-focus-mode && tile.in-strip ? root.stage-hovered : tile.has-hover;
+            if tile.person.muted && !tile.person.deafened: Image { source: @image-url("icons/mic-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
+            if tile.person.deafened: Image { source: @image-url("icons/headphone-off.svg"); width: 12px; image-fit: contain; colorize: Theme.danger; }
+        }
+        if tile.person.muted || tile.person.deafened: Rectangle {
+            x: person-chip.x; y: person-chip.y;
+            width: tile.height <= 110px ? 24px : 28px; height: person-chip.height;
+            border-radius: person-chip.border-radius; background: #000000a6;
+            opacity: 1 - person-chip.opacity;
+            visible: self.opacity > 0;
+            Image {
+                width: 12px; height: 12px;
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                source: tile.person.deafened ? @image-url("icons/headphone-off.svg") : @image-url("icons/mic-off.svg");
+                image-fit: contain; colorize: Theme.danger;
+            }
         }
     }
     // Layout switcher (Focus / Grid) when streams are being watched: compact vertical stack at top-right
     if root.has-active-streams && !root.full: Rectangle {
         x: root.width - self.width - 12px;
-        y: 44px;
+        y: 10px;
         width: 74px;
         height: 52px;
         z: 10;
@@ -1369,7 +1451,7 @@ export component ParticipantGrid inherits Flickable {
                 focus-touch := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
-                        root.grid-mode = false;
+                        root.compact = false; root.grid-mode = false;
                         root.set-layout-mode(true);
                     }
                 }
@@ -1395,7 +1477,7 @@ export component ParticipantGrid inherits Flickable {
                 grid-touch := TouchArea {
                     mouse-cursor: MouseCursor.pointer;
                     clicked => {
-                        root.grid-mode = true;
+                        root.compact = false; root.grid-mode = true;
                         root.set-layout-mode(false);
                     }
                 }

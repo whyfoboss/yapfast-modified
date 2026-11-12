@@ -137,7 +137,7 @@ chmod +x "$work/bin/lib"
   windows="clang-cl --target=x86_64-pc-windows-msvc"
   build windows-x86_64 llvm-nm --toolchain=msvc --cc="$windows" --cxx="$windows" --ld=lld-link \
     --ar=lib --nm=llvm-nm --target-os=win64 --arch=x86_64 --enable-cross-compile \
-    --enable-ffnvcodec --enable-nvenc --enable-amf --enable-encoder="$WINDOWS_ENCODERS" \
+    --enable-ffnvcodec --enable-nvenc --enable-amf --enable-d3d11va --enable-encoder="$WINDOWS_ENCODERS" \
     --enable-decoder=hevc
 )
 

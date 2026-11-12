@@ -636,6 +636,7 @@ enum Request {
     Status(String),
     /// Sharing the game played changed in the settings.
     ShowGame(bool),
+    MusicPlayback(Option<crate::own_activity::MusicPlayback>),
     /// Nobody has used Yapfast since then, in Unix milliseconds, or someone
     /// is using it again; and whether it may show idle.
     Inactive(Option<u64>, bool),
@@ -814,6 +815,7 @@ impl Discord {
                 ),
                 presence,
                 activity,
+                music_playback: None,
                 show_game,
                 inactive: None,
                 viewing: None,
@@ -2058,6 +2060,10 @@ impl Discord {
         self.api.set_show_game(shown).await?;
         let _ = self.requests.send(Request::ShowGame(shown));
         Ok(())
+    }
+
+    pub fn set_music_playback(&self, playback: Option<crate::own_activity::MusicPlayback>) {
+        let _ = self.requests.send(Request::MusicPlayback(playback));
     }
 
     /// Tells the session nobody has used Yapfast since `since`, in Unix

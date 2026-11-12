@@ -615,13 +615,18 @@ impl Assembler {
             if !gap {
                 self.expected = Some(packet.sequence.wrapping_add(1));
             }
-            return Pushed::default();
+            self.waiting |= gap;
+            return Pushed {
+                frame: None,
+                lost: gap,
+            };
         }
         self.expected = Some(packet.sequence.wrapping_add(1));
-        let mut lost = false;
+        let mut lost = gap;
         if self.timestamp != Some(packet.timestamp) {
             // The last frame never saw its marker.
-            lost = !self.frame.is_empty() || !self.obu.is_empty();
+            lost |= self.timestamp.is_some();
+            self.waiting |= lost;
             self.frame.clear();
             self.obu.clear();
             self.obu_open = false;
@@ -646,6 +651,8 @@ impl Assembler {
             self.damaged = true;
         }
         if !packet.marker {
+            lost |= self.damaged;
+            self.waiting |= lost;
             return Pushed { frame: None, lost };
         }
         if self.codec == Codec::Av1 {
@@ -1674,6 +1681,44 @@ mod tests {
             .last()
             .unwrap();
         assert_eq!(last.frame.map(|frame| frame.keyframe), Some(true));
+    }
+
+    #[test]
+    fn an_unfinished_frame_invalidates_the_reference_chain() {
+        let mut assembler = Assembler::new(Codec::H264);
+        let mut other = Assembler::new(Codec::H264);
+        let key = [0x65, 1];
+        let delta = [0x61, 1];
+        let first = packet(1, 100, true, &key);
+        assert!(assembler.push(&parse(&first).unwrap()).frame.is_some());
+        assert!(other.push(&parse(&first).unwrap()).frame.is_some());
+
+        let unfinished = packet(2, 200, false, &delta);
+        assert!(assembler.push(&parse(&unfinished).unwrap()).frame.is_none());
+        let next = packet(3, 300, true, &delta);
+        let pushed = assembler.push(&parse(&next).unwrap());
+        assert!(pushed.lost && pushed.frame.is_none());
+        let other_delta = packet(2, 200, true, &delta);
+        assert!(other.push(&parse(&other_delta).unwrap()).frame.is_some());
+
+        let recovery = packet(4, 400, true, &key);
+        assert!(
+            assembler
+                .push(&parse(&recovery).unwrap())
+                .frame
+                .unwrap()
+                .keyframe
+        );
+        let after = packet(5, 500, true, &delta);
+        let pushed = assembler.push(&parse(&after).unwrap());
+        assert!(!pushed.lost && pushed.frame.is_some());
+
+        let gap = packet(7, 600, false, &delta);
+        let pushed = assembler.push(&parse(&gap).unwrap());
+        assert!(
+            pushed.lost && pushed.frame.is_none(),
+            "a gap can be reported before the marker"
+        );
     }
 
     #[test]

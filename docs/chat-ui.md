@@ -340,6 +340,15 @@ errors make it taller than the minimum window. SSO and OAuth are still pending.
   over the conversation are open: first the search, then the channel's reply or
   edit, then the thread's beside it, then the new thread's form.
   Cancelling an edit restores the draft it replaced.
+- The timeline and thread show message actions while the pointer is over the
+  message or its buttons. Scrolling clears pointer hover. Keyboard selection
+  in the timeline also shows actions. A pending message stays muted while
+  sending. If the outbox allows cancellation, its context
+  menu offers Cancel. A failed message still shows its error and Retry.
+- Received Discord voice messages have an inline Play/Pause button and a
+  playback clock in both timelines. The download button stays available.
+  Ordinary Ogg files use the file card. One attachment plays at a time,
+  using the configured output device.
 - Attach files with the system file dialog, paste them with Ctrl+V: files
   copied in a file manager, or a picture copied from a browser or a screenshot
   tool, or drop them on the window from a file manager. A drag over the
@@ -501,7 +510,10 @@ The window follows Discord's arrangement:
   speaker on green at its icon's top right, so the call stays in sight from
   anywhere; a closed folder shows it for its servers. The rail is built again
   for a voice event only when the call starts, ends or moves.
-  Hovering shows the server's name. A right click on a server, or the Menu
+  Hovering shows the server's name, sliding horizontally from its icon when
+  Better Animations is enabled. The Settings tooltip slides up from its gear.
+  The connected voice row stays highlighted while browsing text channels.
+  A right click on a server, or the Menu
   key or Shift+F10 on a focused one, opens its menu: Mark as read when any of
   its channels is unread, then Copy link and Copy ID. A Discord server's
   menu also has, while Discord is connected, Invite to server where the
@@ -534,7 +546,8 @@ The window follows Discord's arrangement:
   the category from that.
   DMs show the person's avatar. Participants of the call you are in appear under
   its voice channel, with a green ring while they speak and a muted icon; for
-  Discord, who is in every other voice channel shows too, with a LIVE tag for a
+  Discord, the gateway roster stays visible in every channel while the local
+  call connects. Who is in every other voice channel shows too, with a LIVE tag for a
   screen share and a camera icon. You, in a channel on another client such as
   your phone, show dimmed until hovered, without icons, and the tooltip says
   "Connected on another client". Every row takes the hover tone, and clicking

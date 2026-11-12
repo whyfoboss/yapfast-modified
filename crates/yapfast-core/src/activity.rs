@@ -41,13 +41,20 @@ pub struct AppIdentity {
 /// A media session track (from SMTC, Spotify, or compatible player).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MediaTrack {
+    /// An ambiguous session can enrich an identified music RPC, but cannot win on its own.
+    #[serde(default)]
+    pub requires_music_rpc: bool,
     pub title: String,
     pub artist: String,
     pub album: String,
     pub duration_ms: u64,
     pub position_ms: u64,
+    #[serde(default)]
+    pub position_updated_ms: Option<u64>,
     pub is_playing: bool,
     pub thumbnail_url: Option<String>,
+    #[serde(skip)]
+    pub thumbnail: Option<std::sync::Arc<crate::chat::Picture>>,
     pub url: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
@@ -162,6 +169,7 @@ pub struct ActivityManager {
     pub registered_apps: BTreeMap<String, AppIdentity>,
     pub rules: BTreeMap<String, GameActivityRule>,
     pub active_media: Option<MediaTrack>,
+    simulated_media: Option<MediaTrack>,
     pub preferred_app_id: Option<String>,
     pub global_sharing_enabled: bool,
     pub active_scenario: Option<SimulatedScenario>,
@@ -174,6 +182,7 @@ impl Default for ActivityManager {
             registered_apps: BTreeMap::new(),
             rules: BTreeMap::new(),
             active_media: None,
+            simulated_media: None,
             preferred_app_id: None,
             global_sharing_enabled: true,
             active_scenario: None,
@@ -237,6 +246,22 @@ impl ActivityManager {
         }
     }
 
+    /// Finds a rule by its configured identity or a known executable alias.
+    pub fn rule_for(&self, name: &str) -> Option<&GameActivityRule> {
+        let key = activity_key(name);
+        if key != "wallpaper engine" {
+            return self.rules.get(&key);
+        }
+        self.rules
+            .values()
+            .filter(|rule| activity_key(&rule.executable) == key)
+            .min_by_key(|rule| (rule.enabled, rule.executable.as_str()))
+    }
+
+    pub fn activity_enabled(&self, name: &str) -> bool {
+        self.rule_for(name).is_none_or(|rule| rule.enabled)
+    }
+
     /// Removes an application rule and its registered entry.
     pub fn remove_app(&mut self, id: &str) {
         let key = id.to_lowercase();
@@ -264,6 +289,10 @@ impl ActivityManager {
 
     /// Sets a simulated scenario for Fake Discord or manual testing.
     pub fn set_simulated_scenario(&mut self, scenario: Option<SimulatedScenario>) {
+        if self.active_scenario.is_some() && scenario.is_none() {
+            self.registered_apps.clear();
+            self.simulated_media = None;
+        }
         self.active_scenario = scenario;
         if let Some(s) = scenario {
             let now = std::time::SystemTime::now()
@@ -277,7 +306,7 @@ impl ActivityManager {
     /// Populates scenario apps and media state into the manager.
     pub fn load_scenario_state(&mut self, scenario: SimulatedScenario, now_ms: u64) {
         self.registered_apps.clear();
-        self.active_media = None;
+        self.simulated_media = None;
 
         match scenario {
             SimulatedScenario::SingleGame => {
@@ -459,27 +488,33 @@ impl ActivityManager {
                 }
             }
             SimulatedScenario::MusicPlaying => {
-                self.active_media = Some(MediaTrack {
+                self.simulated_media = Some(MediaTrack {
+                    requires_music_rpc: false,
                     title: "Starboy".into(),
                     artist: "The Weeknd".into(),
                     album: "Starboy".into(),
                     duration_ms: 230_000,
                     position_ms: 68_000,
+                    position_updated_ms: Some(now_ms),
                     is_playing: true,
                     thumbnail_url: Some("icons/volume-2.svg".into()),
+                    thumbnail: None,
                     url: Some("https://open.spotify.com".into()),
                     source: Some("Spotify".into()),
                 });
             }
             SimulatedScenario::MusicPaused => {
-                self.active_media = Some(MediaTrack {
+                self.simulated_media = Some(MediaTrack {
+                    requires_music_rpc: false,
                     title: "Blinding Lights".into(),
                     artist: "The Weeknd".into(),
                     album: "After Hours".into(),
                     duration_ms: 200_000,
                     position_ms: 104_000,
+                    position_updated_ms: Some(now_ms),
                     is_playing: false,
                     thumbnail_url: Some("icons/volume-2.svg".into()),
+                    thumbnail: None,
                     url: Some("https://open.spotify.com".into()),
                     source: Some("Spotify".into()),
                 });
@@ -502,14 +537,17 @@ impl ActivityManager {
                     small_text: None,
                 };
                 self.registered_apps.insert(app.id.clone(), app);
-                self.active_media = Some(MediaTrack {
+                self.simulated_media = Some(MediaTrack {
+                    requires_music_rpc: false,
                     title: "Starboy".into(),
                     artist: "The Weeknd".into(),
                     album: "Starboy".into(),
                     duration_ms: 230_000,
                     position_ms: 68_000,
+                    position_updated_ms: Some(now_ms),
                     is_playing: true,
                     thumbnail_url: Some("icons/volume-2.svg".into()),
+                    thumbnail: None,
                     url: Some("https://open.spotify.com".into()),
                     source: Some("Spotify".into()),
                 });
@@ -567,7 +605,12 @@ impl ActivityManager {
         let mut candidates: Vec<&AppIdentity> = self
             .registered_apps
             .values()
-            .filter(|app| app.running && app.enabled)
+            .filter(|app| {
+                app.running
+                    && self
+                        .rule_for(&app.id)
+                        .map_or(app.enabled, |rule| rule.enabled)
+            })
             .collect();
 
         // 3. If a preferred application is running and enabled, it takes precedence
@@ -599,9 +642,9 @@ impl ActivityManager {
             return SelectedActivity::Game(app);
         }
 
-        // 5. Fallback to active media track if running (or if in a media test scenario)
-        if let Some(media) = &self.active_media
-            && (media.is_playing || self.active_scenario == Some(SimulatedScenario::MusicPaused))
+        if let Some(media) = self
+            .enabled_media()
+            .filter(|track| !track.requires_music_rpc)
         {
             return SelectedActivity::Media(media.clone());
         }
@@ -609,11 +652,49 @@ impl ActivityManager {
         SelectedActivity::None
     }
 
-    /// Converts the selected activity into a Discord `Activity` structure
-    /// so production Slint components (`ActivityCard` and `ProfileCard`) render it identically.
+    pub fn enabled_media(&self) -> Option<&MediaTrack> {
+        let media = if self.active_scenario.is_some() {
+            &self.simulated_media
+        } else {
+            &self.active_media
+        };
+        media.as_ref().filter(|track| {
+            track
+                .source
+                .as_ref()
+                .is_none_or(|source| self.activity_enabled(source))
+        })
+    }
+
     #[cfg(feature = "discord")]
     pub fn to_discord_activity(&self, now_ms: u64) -> Option<Activity> {
-        match self.resolve(now_ms) {
+        self.resolve(now_ms).into_discord_activity(now_ms)
+    }
+}
+
+/// Windows detection and Discord can name the same app differently.
+#[cfg(feature = "discord")]
+pub use yapfast_discord::game_detection::custom_games::activity_key;
+
+#[cfg(not(feature = "discord"))]
+pub fn activity_key(name: &str) -> String {
+    let basename = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_lowercase();
+    match basename.strip_suffix(".exe").unwrap_or(&basename) {
+        "wallpaper32" | "wallpaper64" | "wallpaperui" | "webwallpaper32" | "wallpaper engine" => {
+            "wallpaper engine".into()
+        }
+        _ => name.to_lowercase(),
+    }
+}
+
+#[cfg(feature = "discord")]
+impl SelectedActivity {
+    pub fn into_discord_activity(self, now_ms: u64) -> Option<Activity> {
+        match self {
             SelectedActivity::SharingDisabled | SelectedActivity::None => None,
             SelectedActivity::Game(app) => Some(Activity {
                 kind: yapfast_discord::activity::Kind::Playing,
@@ -633,8 +714,11 @@ impl ActivityManager {
                 emoji: None,
             }),
             SelectedActivity::Media(track) => {
-                let start_ms = now_ms.saturating_sub(track.position_ms);
-                let end_ms = start_ms + track.duration_ms;
+                let start_ms = track
+                    .position_updated_ms
+                    .unwrap_or(now_ms)
+                    .saturating_sub(track.position_ms);
+                let end_ms = start_ms.saturating_add(track.duration_ms);
                 let player_name = track.source.as_deref().unwrap_or("Spotify");
                 let is_spotify = player_name.eq_ignore_ascii_case("spotify");
 
@@ -846,13 +930,16 @@ mod tests {
 
         // 1. Live music from SoundCloud
         let soundcloud_track = MediaTrack {
+            requires_music_rpc: false,
             title: "Bass Cannon".into(),
             artist: "Excision".into(),
             album: "X Rated".into(),
             duration_ms: 210_000,
             position_ms: 30_000,
+            position_updated_ms: None,
             is_playing: true,
             thumbnail_url: None,
+            thumbnail: None,
             url: None,
             source: Some("SoundCloud".into()),
         };
@@ -907,16 +994,24 @@ mod tests {
             _ => panic!("Media must be restored once game closes"),
         }
 
-        // 4. Music paused -> suppressed in live mode
+        // Paused media stays selected until the source clears it.
         let mut paused_track = manager.active_media.clone().unwrap();
         paused_track.is_playing = false;
         manager.set_media_track(Some(paused_track));
-        assert_eq!(manager.resolve(now), SelectedActivity::None);
+        assert!(
+            matches!(manager.resolve(now), SelectedActivity::Media(track) if !track.is_playing && track.position_ms == 30_000)
+        );
 
         // 5. Global sharing turned off -> SharingDisabled
         let mut playing_track = manager.active_media.clone().unwrap();
         playing_track.is_playing = true;
+        playing_track.position_ms = 32_000;
         manager.set_media_track(Some(playing_track));
+        assert!(
+            matches!(manager.resolve(now), SelectedActivity::Media(track) if track.is_playing && track.position_ms == 32_000)
+        );
+        manager.set_media_track(None);
+        assert_eq!(manager.resolve(now), SelectedActivity::None);
         manager.set_global_sharing(false);
         assert_eq!(manager.resolve(now), SelectedActivity::SharingDisabled);
     }

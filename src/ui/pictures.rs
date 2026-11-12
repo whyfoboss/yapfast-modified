@@ -766,6 +766,7 @@ mod tests {
         PREVIEWS.set(Previews::default());
         let attachments: Vec<_> = (0..40)
             .map(|index| yapfast_core::chat::Attachment {
+                voice_ms: None,
                 name: format!("{index}.png"),
                 size: None,
                 image: true,
@@ -830,6 +831,7 @@ mod tests {
         });
         let attachment = |name: &str, image: bool, preview: Option<&Arc<Picture>>| {
             yapfast_core::chat::Attachment {
+                voice_ms: None,
                 name: name.into(),
                 size: None,
                 image,
@@ -886,6 +888,7 @@ mod tests {
             ..Default::default()
         });
         let attachment = |placement| yapfast_core::chat::Attachment {
+            voice_ms: None,
             name: "bridge.png".into(),
             size: None,
             image: true,

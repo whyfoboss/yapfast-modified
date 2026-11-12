@@ -292,7 +292,8 @@ async fn shows_the_example_environment() {
         .await
         .unwrap();
     let frames = tokio::task::spawn_blocking(move || {
-        let receiver = StreamReceiver::start(watched, vec![Codec::H264, Codec::Vp8]).unwrap();
+        let mut receiver = StreamReceiver::start(watched, vec![Codec::H264, Codec::Vp8]).unwrap();
+        let sounds = receiver.take_sounds().unwrap();
         let deadline = std::time::Instant::now() + WAIT;
         let mut frames = vec![];
         while frames.len() < 12 {
@@ -305,6 +306,74 @@ async fn shows_the_example_environment() {
                 frames.push(frame);
             }
         }
+        let requests = || {
+            let (status, body) = control(server, "GET", "/_control/video");
+            assert_eq!(status, 200);
+            let video: serde_json::Value = serde_json::from_str(&body).unwrap();
+            video["watchers"][0]["keyframeRequests"].as_u64().unwrap()
+        };
+        assert_eq!(
+            control(server, "POST", "/_control/stream-video?paused=1").0,
+            200
+        );
+        while receiver.next(Duration::from_millis(120)).is_some() {}
+        let before = requests();
+        assert!(receiver.next(Duration::from_millis(650)).is_none());
+        assert_eq!(requests(), before, "an intact static picture needs no PLI");
+
+        receiver.request_keyframe();
+        let wait_for_requests = |target| {
+            let deadline = std::time::Instant::now() + WAIT;
+            while requests() < target {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "no PLI while video is idle"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        };
+        wait_for_requests(before + 1);
+        receiver.request_keyframe();
+        wait_for_requests(before + 2);
+        wait_for_requests(before + 3);
+        while sounds.try_recv().is_ok() {}
+        assert!(sounds.recv_timeout(Duration::from_secs(1)).is_ok());
+
+        assert_eq!(
+            control(server, "POST", "/_control/stream-video?paused=0").0,
+            200
+        );
+        let recovered = receiver
+            .next(WAIT)
+            .expect("video should recover in the same receiver");
+        assert!(
+            recovered.keyframe,
+            "the first usable frame must be a keyframe"
+        );
+        assert!(
+            receiver.next(WAIT).is_some(),
+            "video continues after recovery"
+        );
+
+        // Stop draining the bounded decoder queue. The first overflow must
+        // invalidate the reference chain and trigger recovery on its own.
+        let before = requests();
+        wait_for_requests(before + 1);
+        assert_eq!(
+            control(server, "POST", "/_control/stream-video?paused=1").0,
+            200
+        );
+        while receiver.next(Duration::from_millis(120)).is_some() {}
+        assert_eq!(
+            control(server, "POST", "/_control/stream-video?paused=0").0,
+            200
+        );
+        assert!(
+            receiver
+                .next(WAIT)
+                .expect("overflow recovery frame")
+                .keyframe
+        );
         frames
     })
     .await

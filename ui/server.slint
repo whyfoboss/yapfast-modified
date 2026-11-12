@@ -5,7 +5,7 @@ import { Theme, Label, Middle, Popup } from "theme.slint";
 import { ActionButton, Avatar, IconButton, MenuItem, TextField, Motion, StatusText, ServerTagChip, PictureStore, StyledName, NameStyleRow } from "controls.slint";
 import { Choices, Picker, UnsavedBar } from "settings.slint";
 import { NameStyles } from "controls.slint";
-import { ProfileData, ProfileHeading, ProfileTitle, ActivityCard, ProfileBadge, ProfileBadgeRow, BoardCard, WishlistCard } from "people.slint";
+import { ProfileData, ProfileHeading, ProfileTitle, ActivityCard, ActivityRow, ProfileBadge, ProfileBadgeRow, BoardCard, WishlistCard } from "people.slint";
 
 // What an invite dialog shows: whom it invites where, and the link once
 // Discord made it.
@@ -1455,6 +1455,7 @@ component NameStyleWindow inherits Rectangle {
 }
 
 export component ProfileEditorDialog inherits Rectangle {
+    in property <[ActivityRow]> activities;
     in property <ProfileEditorPrompt> prompt;
     in-out property <string> name;
     in-out property <string> pronouns;
@@ -1754,52 +1755,46 @@ export component ProfileEditorDialog inherits Rectangle {
                                         edited(text) => { root.write(0, text); }
                                         accepted => { root.stop-editing(); }
                                     }
-                                    // The username, then the pronouns.
-                                    HorizontalLayout {
-                                        spacing: 6px; alignment: start;
-                                        Middle { Text { text: root.prompt.handle + (root.pronouns != "" || root.prompt.pronouns-fallback != "" || root.editing == 2 ? " ·" : ""); color: Theme.secondary; font-size: 14px; font-weight: 500; } }
-                                        if root.editing != 2: Middle {
-                                            Text {
-                                                text: root.pronouns != "" ? root.pronouns : root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add pronouns";
-                                                color: root.pronouns != "" || root.prompt.pronouns-fallback != "" ? Theme.secondary : Theme.muted;
-                                                font-size: 14px; font-weight: 500; overflow: elide;
-                                                HoverEdit {
-                                                    x: -5px; y: (parent.height - self.height) / 2; width: max(100px, parent.width + 10px + 24px); height: 32px;
-                                                    enabled: root.ready; pencil: true; label: "Edit pronouns";
-                                                    clicked => { root.edit(2); }
-                                                }
-                                            }
+                                    Rectangle {
+                                        height: 30px;
+                                        property <length> gap: root.prompt.handle == "" ? 0px : 4px;
+                                        handle := Text {
+                                            x: 0px; height: parent.height;
+                                            text: root.prompt.handle; color: Theme.secondary;
+                                            font-size: 14px; font-weight: 500; overflow: elide;
+                                            vertical-alignment: center;
+                                            width: min(self.preferred-width, max(0px, parent.width - pronouns-field.width - parent.gap));
                                         }
-                                        if root.editing == 2: TextField {
-                                            init => { self.focus-input(); }
-                                            width: 220px; min-height: 30px; text-size: 14px; pad: 8px;
-                                            placeholder: root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add your pronouns";
+                                        pronouns-field := TextField {
+                                            x: handle.width + parent.gap; height: parent.height;
+                                            width: min(220px, parent.width, max(112px, parent.width * 0.46));
+                                            min-height: 30px; text-size: 14px; pad: 4px;
+                                            enabled: root.ready || root.editing == 2;
+                                            fill: self.focused ? Theme.sunken : transparent;
+                                            placeholder: root.prompt.pronouns-fallback != "" ? root.prompt.pronouns-fallback : "Add pronouns";
                                             label: "Pronouns";
                                             text <=> root.pronouns;
+                                            changed focused => {
+                                                if self.focused {
+                                                    root.edit(2);
+                                                } else if root.editing == 2 {
+                                                    root.editing = 0;
+                                                }
+                                            }
                                             edited(text) => { root.write(1, text); }
                                             accepted => { root.stop-editing(); }
                                         }
-                                        if root.prompt.main && root.editing != 2 && root.prompt.tag-text != "": Middle {
+                                    }
+                                    for activity in root.activities: ActivityCard {
+                                        activity: activity;
+                                        open-link(url) => { root.open-link(url); }
+                                    }
+                                    if root.prompt.main && root.prompt.tag-text != "": HorizontalLayout {
+                                        spacing: 6px; alignment: start;
+                                        Middle {
                                             ServerTagChip { text: root.prompt.tag-text; badge: root.prompt.tag-icon; }
                                         }
-                                        // Badges
-                                        if root.prompt.main && root.editing != 2 && root.prompt.preview.badges.length > 0: Middle {
-                                            Rectangle {
-                                                height: 26px; border-radius: 8px; background: #00000059;
-                                                HorizontalLayout {
-                                                    padding-left: 4px; padding-right: 4px;
-                                                    for badge in root.prompt.preview.badges: Rectangle {
-                                                        width: 22px;
-                                                        ProfileBadge { width: 18px; height: 18px; badge: badge; open-link(link) => { root.open-link(link); } }
-                                                    }
-                                                }
-                                            }
-                                        }
                                     }
-                                }
-                                for activity in root.prompt.preview.activities: ActivityCard {
-                                    activity: activity;
-                                    open-link(url) => { root.open-link(url); }
                                 }
                                 VerticalLayout {
                                     spacing: 6px;

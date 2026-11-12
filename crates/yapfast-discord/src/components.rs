@@ -336,6 +336,7 @@ fn media(item: &Value, slot: usize, size: (u64, u64), spoiler: bool) -> Option<A
         .is_some_and(|kind| kind.starts_with("video/"));
     let side = |name: &str| u32::try_from(item[name].as_u64()?).ok();
     Some(Attachment {
+        voice_ms: None,
         name: crate::embed::file_name(url).unwrap_or("image").to_owned(),
         size: None,
         url: url.into(),
@@ -363,6 +364,7 @@ fn file(component: &Value, slot: usize, spoiler: bool) -> Option<Attachment> {
         .or_else(|| crate::embed::file_name(url))
         .unwrap_or("file");
     Some(Attachment {
+        voice_ms: None,
         name: name.to_owned(),
         size: component["size"].as_u64(),
         url: url.into(),

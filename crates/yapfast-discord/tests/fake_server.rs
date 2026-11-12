@@ -356,7 +356,7 @@ fn watch_frames(
         }
     }
     assert_eq!(receiver.link(), Link::Connected);
-    let heard: Vec<Vec<u8>> = sounds.try_iter().collect();
+    let heard: Vec<Vec<u8>> = sounds.try_iter().map(|sound| sound.data).collect();
     assert!(heard.len() >= 5, "only {} sounds arrived", heard.len());
     assert!(heard.iter().all(|sound| sound == &[0xf8, 0xff, 0xfe]));
     frames
@@ -879,13 +879,14 @@ async fn live_where<T>(
 /// A real SDK-shaped IPC exchange all the way to the fake Gateway, while
 /// Alice has a custom status. The normal service runner opts in with a private
 /// directory so this test never takes the desktop's Discord IPC socket.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::path::Path) {
     use serde_json::{Value, json};
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::UnixStream,
-    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[cfg(target_os = "linux")]
+    use tokio::net::UnixStream;
+    #[cfg(windows)]
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
     struct GameProcess {
         child: std::process::Child,
@@ -897,6 +898,7 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
             let _ = self.child.wait();
         }
     }
+    #[cfg(target_os = "linux")]
     let mut detected = if let Some(cache) = std::env::var_os("YAPFAST_DISCORD_GAMES_CACHE") {
         let executable = std::env::current_exe().unwrap();
         let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
@@ -935,13 +937,16 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
         None
     };
 
-    async fn send(stream: &mut UnixStream, opcode: u32, value: Value) {
+    #[cfg(windows)]
+    let mut detected: Option<GameProcess> = None;
+
+    async fn send(stream: &mut (impl AsyncWriteExt + Unpin), opcode: u32, value: Value) {
         let payload = serde_json::to_vec(&value).unwrap();
         stream.write_u32_le(opcode).await.unwrap();
         stream.write_u32_le(payload.len() as u32).await.unwrap();
         stream.write_all(&payload).await.unwrap();
     }
-    async fn receive(stream: &mut UnixStream) -> Value {
+    async fn receive(stream: &mut (impl AsyncReadExt + Unpin)) -> Value {
         timeout(Duration::from_secs(20), async {
             assert_eq!(stream.read_u32_le().await.unwrap(), 1);
             let size = stream.read_u32_le().await.unwrap();
@@ -953,10 +958,29 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
         .await
         .unwrap()
     }
-    async fn connect(directory: &std::path::Path) -> UnixStream {
-        let mut stream = UnixStream::connect(directory.join("discord-ipc-0"))
+    #[cfg(target_os = "linux")]
+    async fn open(directory: &std::path::Path) -> UnixStream {
+        UnixStream::connect(directory.join("discord-ipc-0"))
             .await
-            .unwrap();
+            .unwrap()
+    }
+    #[cfg(windows)]
+    async fn open(directory: &std::path::Path) -> NamedPipeClient {
+        let prefix = directory.file_name().unwrap().to_str().unwrap();
+        let name = format!(r"\\.\pipe\{prefix}-0");
+        timeout(WAIT, async {
+            loop {
+                if let Ok(stream) = ClientOptions::new().open(&name) {
+                    return stream;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the isolated RPC pipe did not start")
+    }
+    async fn connect(directory: &std::path::Path) -> impl AsyncReadExt + AsyncWriteExt + Unpin {
+        let mut stream = open(directory).await;
         send(
             &mut stream,
             0,
@@ -977,6 +1001,50 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
         serde_json::from_slice::<Value>(&pong).unwrap(),
         json!({"ping":1})
     );
+    let start = std::time::Instant::now();
+    for (nonce, details, url) in [
+        (
+            "slow",
+            "Slow artwork",
+            "https://example.com/slow-artwork.png",
+        ),
+        (
+            "missing",
+            "Missing artwork",
+            "https://example.com/missing-artwork.png",
+        ),
+    ] {
+        send(
+            &mut first,
+            1,
+            json!({"cmd":"SET_ACTIVITY","nonce":nonce,"args":{"pid":42,"activity":{
+                "details":details,"assets":{"small_image":url}
+            }}}),
+        )
+        .await;
+        assert_eq!(receive(&mut first).await["nonce"], nonce);
+        timeout(
+            Duration::from_secs(1),
+            snapshot_where(discord, |snapshot| {
+                snapshot
+                    .playing
+                    .as_ref()
+                    .and_then(|playing| playing.activity.as_ref())
+                    .is_some_and(|activity| {
+                        activity.details.as_deref() == Some(details)
+                            && activity.small_image.is_none()
+                    })
+            }),
+        )
+        .await
+        .expect("RPC metadata waited for artwork");
+        if nonce == "slow" {
+            eprintln!(
+                "RPC usable update to local snapshot: {} ms",
+                start.elapsed().as_millis()
+            );
+        }
+    }
     let activity = json!({"details":"In a match","timestamps":{"start":1700000000_u64},
         "assets":{"large_image":"game_cover","large_text":"Fixture",
             "small_image":"https://example.com/badge.png"},
@@ -1035,6 +1103,62 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
             .any(|a| a["details"] == "Second game")
     })
     .await;
+    let mut youtube = open(directory).await;
+    send(
+        &mut youtube,
+        0,
+        json!({"v":1,"client_id":"123456789012345682"}),
+    )
+    .await;
+    assert_eq!(receive(&mut youtube).await["evt"], "READY");
+    send(
+        &mut youtube,
+        1,
+        json!({"cmd":"SET_ACTIVITY","nonce":"youtube","args":{"pid":45,"activity":{
+            "type":0,"details":"Video title","state":"Channel"
+        }}}),
+    )
+    .await;
+    assert_eq!(receive(&mut youtube).await["nonce"], "youtube");
+    yapfast_discord::game_detection::custom_games::set_disabled(["Fixture Game".into()]);
+    presence_where(server, |p| {
+        p["activities"].as_array().is_some_and(|a| {
+            if detected.is_some() {
+                a.iter().any(|a| a["name"] == "Detected Fixture")
+            } else {
+                a.len() == 1 && a[0]["type"] == 4
+            }
+        })
+    })
+    .await;
+    yapfast_discord::game_detection::custom_games::set_disabled([]);
+    presence_where(server, |p| {
+        p["activities"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|a| a["details"] == "Second game"))
+    })
+    .await;
+    // Watching replaces this client's candidate and leaves the other game selected.
+    send(
+        &mut second,
+        1,
+        json!({"cmd":"SET_ACTIVITY","nonce":"video","args":{"pid":43,"activity":{
+            "type":3,"details":"Video title","state":"Channel",
+            "assets":{"large_image":"https://example.com/slow-artwork.png"}
+        }}}),
+    )
+    .await;
+    let acknowledged = receive(&mut second).await;
+    assert_eq!(acknowledged["nonce"], "video");
+    assert!(acknowledged["evt"].is_null());
+    snapshot_where(discord, |snapshot| {
+        snapshot
+            .playing
+            .as_ref()
+            .and_then(|playing| playing.activity.as_ref())
+            .is_some_and(|activity| activity.details.as_deref() == Some("In a match"))
+    })
+    .await;
     // Explicit clear restores the other connected application.
     send(
         &mut second,
@@ -1052,6 +1176,7 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
     })
     .await;
     drop(second);
+    drop(youtube);
     // Disconnect without a clear must remove the game, preserving custom status.
     drop(first);
     if detected.is_some() {
@@ -1129,6 +1254,65 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
         // eventually removes the game, preserving Alice's custom status.
         drop(detected.take());
     }
+    presence_where(server, |p| {
+        p["activities"]
+            .as_array()
+            .is_some_and(|a| a.len() == 1 && a[0]["type"] == 4)
+    })
+    .await;
+
+    let mut music = open(directory).await;
+    send(
+        &mut music,
+        0,
+        json!({"v":1,"client_id":"123456789012345681"}),
+    )
+    .await;
+    assert_eq!(receive(&mut music).await["evt"], "READY");
+    let track = json!({"type":2,"details":"Fixture track","state":"Fixture artist",
+        "timestamps":{"start":1800000000000_u64,"end":1800000072000_u64}});
+    send(
+        &mut music,
+        1,
+        json!({"cmd":"SET_ACTIVITY","nonce":"music","args":{"pid":46,"activity":track}}),
+    )
+    .await;
+    assert_eq!(receive(&mut music).await["nonce"], "music");
+    presence_where(server, |p| {
+        p["activities"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|a| a["name"] == "SoundCloud" && a["timestamps"]["start"] == 1800000000000_u64)
+        })
+    })
+    .await;
+    let mut playback = yapfast_discord::own_activity::MusicPlayback {
+        title: "Fixture track".into(),
+        artist: "Fixture artist".into(),
+        duration_ms: 72_000,
+        start_ms: None,
+    };
+    discord.set_music_playback(Some(playback.clone()));
+    presence_where(server, |p| {
+        p["activities"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|a| a["name"] == "SoundCloud" && a.get("timestamps").is_none())
+        })
+    })
+    .await;
+    playback.start_ms = Some(1_800_000_001_000);
+    discord.set_music_playback(Some(playback));
+    presence_where(server, |p| {
+        p["activities"].as_array().is_some_and(|a| {
+            a.iter().any(|a| {
+                a["name"] == "SoundCloud"
+                    && a["timestamps"]["start"] == 1800000001000_u64
+                    && a["timestamps"]["end"] == 1800000073000_u64
+            })
+        })
+    })
+    .await;
+    drop(music);
+    discord.set_music_playback(None);
     presence_where(server, |p| {
         p["activities"]
             .as_array()
@@ -2819,6 +3003,33 @@ async fn shows_embeds_and_media() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn downloads_a_discord_voice_message() {
+    let fixture = Fixture::start("downloads_a_discord_voice_message").await;
+    let mut live = fixture.discord.live();
+    post_control(fixture.server, "/_control/voice-message", "");
+    let message = live_where(&mut live, |event| match event {
+        Live::Created(message)
+            if message
+                .attachments
+                .iter()
+                .any(|file| file.voice_ms.is_some()) =>
+        {
+            Some(message)
+        }
+        _ => None,
+    })
+    .await;
+    let file = &message.attachments[0];
+    assert_eq!(file.voice_ms, Some(650));
+    let bytes = fixture.discord.download(&file.url, 1 << 20).await.unwrap();
+    assert_eq!(
+        bytes,
+        include_bytes!("../../../testing/fixtures/voice-message.ogg")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
 async fn calls_and_goes_live() {
     let Fixture {
         _fake,
@@ -4001,7 +4212,7 @@ async fn shows_status_and_games() {
         presence["activities"][0]["state"] == "Testing Yapfast"
     })
     .await;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some(directory) = std::env::var_os("YAPFAST_DISCORD_RPC_DIR") {
         plays_through_rpc(&discord, server, std::path::Path::new(&directory)).await;
     }
@@ -6372,6 +6583,28 @@ async fn edits_the_main_profile_as_discords_client_does() {
     assert_eq!(own.bio, "Hi, I'm **Ally**");
     assert_eq!(own.pronouns, "she/her");
     assert_eq!(own.accent, Some(0x5865f2));
+    assert!(
+        discord
+            .save_main_profile(
+                &serde_json::json!({}),
+                &serde_json::json!({"pronouns": "x".repeat(41)}),
+                None,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(discord.own_profile(None).await.unwrap().pronouns, "she/her");
+    for pronouns in ["they/them", ""] {
+        discord
+            .save_main_profile(
+                &serde_json::json!({}),
+                &serde_json::json!({"pronouns": pronouns}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(discord.own_profile(None).await.unwrap().pronouns, pronouns);
+    }
     assert!(
         discord
             .save_main_profile(

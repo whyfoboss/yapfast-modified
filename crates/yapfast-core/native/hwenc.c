@@ -97,7 +97,7 @@ static int open_vaapi(struct yapfast_hwenc *h, AVCodecContext *codec, struct va_
 
 static int open_encoder(struct yapfast_hwenc *h, const AVCodec *found, struct va_device device,
                         unsigned codec_id, unsigned width, unsigned height, unsigned fps,
-                        unsigned kbps) {
+                        unsigned kbps, int directx) {
   int vaapi = device.path != NULL, amf = strstr(found->name, "_amf") != NULL;
   AVCodecContext *codec = h->codec = avcodec_alloc_context3(found);
   if (!codec) return AVERROR(ENOMEM);
@@ -154,8 +154,18 @@ static int open_encoder(struct yapfast_hwenc *h, const AVCodec *found, struct va
     av_opt_set(options, "rc", "vbr", 0);
     av_opt_set_int(options, "zerolatency", 1, 0);
     av_opt_set_int(options, "delay", 0, 0);
+    /* With no B-frames or lookahead, input and output need at most two surfaces. */
+    av_opt_set_int(options, "surfaces", 2, 0);
     av_opt_set_int(options, "forced-idr", 1, 0);
     if (codec_id == CODEC_H264) av_opt_set(options, "profile", "main", 0);
+  }
+  if (directx) {
+    AVDictionary *device_options = NULL;
+    av_dict_set(&device_options, "vendor_id", "0x10de", 0);
+    ret = av_hwdevice_ctx_create(&codec->hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA,
+                                 NULL, device_options, 0);
+    av_dict_free(&device_options);
+    if (ret < 0) return ret;
   }
   ret = avcodec_open2(codec, found, NULL);
   if (ret < 0) return ret;
@@ -225,7 +235,19 @@ static struct yapfast_hwenc *try_open(struct opening *o, const AVCodec *found,
   struct yapfast_hwenc *h = av_mallocz(sizeof *h);
   if (!h) return NULL;
   first_error[0] = 0;
-  int ret = open_encoder(h, found, device, o->codec_id, o->width, o->height, o->fps, o->kbps);
+  int ret;
+#ifdef _WIN32
+  if (strstr(found->name, "_nvenc")) {
+    ret = open_encoder(h, found, device, o->codec_id, o->width, o->height, o->fps, o->kbps, 1);
+    if (ret >= 0) {
+      snprintf(o->report, o->report_size, "%s (D3D11)", label);
+      return h;
+    }
+    close_encoder(h);
+  }
+#endif
+  first_error[0] = 0;
+  ret = open_encoder(h, found, device, o->codec_id, o->width, o->height, o->fps, o->kbps, 0);
   if (ret >= 0) {
     snprintf(o->report, o->report_size, "%s", label);
     return h;

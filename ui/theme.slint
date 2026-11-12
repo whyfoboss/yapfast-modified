@@ -83,7 +83,7 @@ export global Tip {
     in-out property <string> text;
     in-out property <length> x;
     in-out property <length> y;
-    /// 0 above the anchor, 1 to its right, 2 below it.
+    /// 0 above, 1 right, 2 below, 3 right of a server tile, 4 above Settings.
     in-out property <int> side;
     /// Whether it pops up with a fade, as a badge's does, not at once.
     in-out property <bool> pop;
@@ -161,8 +161,9 @@ export global Popup {
     out property <duration> duration-enter: Looks.better-animations ? 200ms : 0ms;
     out property <duration> duration-exit: Looks.better-animations ? 135ms : 0ms;
     out property <duration> duration: Looks.better-animations ? 200ms : 0ms;
-    out property <duration> menu-enter: Looks.better-animations ? 120ms : 0ms;
+    out property <duration> menu-enter: Looks.better-animations ? 140ms : 0ms;
     out property <duration> tooltip-enter: Looks.better-animations ? 100ms : 0ms;
+    out property <duration> anchor-tooltip-enter: Looks.better-animations ? 140ms : 0ms;
     out property <duration> popover-enter: Looks.better-animations ? 160ms : 0ms;
     out property <duration> hover-enter: Looks.better-animations ? 160ms : 0ms;
     out property <duration> hover-exit: Looks.better-animations ? 130ms : 0ms;
@@ -188,12 +189,13 @@ export global Popup {
 // way out ends, which the popup's `if` waits for.
 export component PopupMotion {
     in property <bool> open;
+    in property <duration> entrance: Popup.duration-enter;
     out property <float> amount: self.open ? 1 : 0;
     out property <bool> shown: self.open || (Looks.better-animations && self.amount > 0);
     init => { if self.open { self.amount = 1; } }
     changed open => { self.amount = self.open ? 1 : 0; }
     animate amount {
-        duration: self.open ? Popup.duration-enter : Popup.duration-exit;
+        duration: self.open ? self.entrance : Popup.duration-exit;
         easing: ease-out;
     }
 }

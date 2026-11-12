@@ -346,6 +346,7 @@ export global VideoPlayer {
     callback resize(length, length);
     /// Plays or pauses the video playing.
     callback toggle();
+    callback stop();
     callback seek(float);
     callback mute(bool);
     /// Sets how loud it plays, unmuting it; 0 mutes it.
@@ -518,7 +519,7 @@ component VideoCell inherits Rectangle {
 }
 
 /// A file, or an image without a preview, as a card.
-export struct FileCell { index: int, name: string, detail: string }
+export struct FileCell { index: int, name: string, detail: string, voice: bool, duration: string }
 /// A block of a message's or card's text, as Discord's client lays them
 /// out: Markdown (0), a heading (1 to 3), subtext (4) or fenced code (5).
 /// Slint's Markdown draws none but the first. A `quoted` block is behind a
@@ -788,7 +789,7 @@ export struct MessageRow {
     expanded: bool,
     /// Says a card is hidden, for a message that is only one, with link previews off.
     hidden-card: string,
-    delivery: string, delivery-failed: bool, can-retry: bool, can-cancel: bool,
+    delivery: string, delivery-sending: bool, delivery-failed: bool, can-retry: bool, can-cancel: bool,
     can-reply: bool, can-edit: bool, can-delete: bool, can-react: bool, can-forward: bool,
     /// Among the conversation's pinned messages, and whether this account
     /// may pin it or unpin it.
@@ -1283,10 +1284,41 @@ export component EmojiPicker inherits Rectangle {
     }
 }
 
+export component MessageHover inherits Rectangle {
+    out property <string> item;
+    property <string> row-target;
+    property <string> bar-target;
+    public function enter(id: string, toolbar: bool) {
+        if toolbar { root.bar-target = id; }
+        else { root.row-target = id; }
+        root.update();
+    }
+    public function leave(id: string, toolbar: bool) {
+        if toolbar && root.bar-target == id { root.bar-target = ""; }
+        if !toolbar && root.row-target == id { root.row-target = ""; }
+        root.update();
+    }
+    function update() {
+        if root.bar-target != "" { root.item = root.bar-target; }
+        else if root.row-target != "" { root.item = root.row-target; }
+    }
+    public function clear() {
+        root.row-target = "";
+        root.bar-target = "";
+        root.item = "";
+    }
+    // A move can leave the row and enter its floating buttons in the same event.
+    Timer {
+        interval: 1ms; running: root.item != "" && root.row-target == "" && root.bar-target == "";
+        triggered => { root.item = ""; }
+    }
+}
+
 // A message's actions, from its hover bar's "More" button or a right click:
 // frequent reactions, then what can be done with it. A right click on a
 // picture, video or link adds what can be done with that.
 export component MessageMenu inherits Rectangle {
+    in property <bool> opens-above;
     in property <MessageRow> menu-message;
     /// Text selected in the message, as copied; empty for none.
     in property <string> selection;
@@ -1315,6 +1347,7 @@ export component MessageMenu inherits Rectangle {
     callback copy-text(string);
     callback pin-message(string);
     callback request-delete(string);
+    callback cancel-send(string);
     /// Asks to make sure before closing this account's poll.
     callback end-poll(string);
     /// Threads can start from the conversation's messages.
@@ -1331,12 +1364,16 @@ export component MessageMenu inherits Rectangle {
     property <float> enter-amount: Looks.better-animations ? 0 : 1;
     init => { self.enter-amount = 1; }
     animate enter-amount { duration: Popup.menu-enter; easing: ease-out; }
-    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
-    transform-scale: Looks.better-animations ? Popup.menu-scale(self.enter-amount) : 1.0;
+    opacity: Looks.better-animations ? self.enter-amount : 1.0;
+    y: Looks.better-animations ? (1 - self.enter-amount) * (root.opens-above ? 8px : -8px) : 0px;
     background: Theme.menu; border-color: Theme.menu-line; border-width: 1px; border-radius: 8px;
     drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
     menu-content := VerticalLayout {
         padding: 6px; spacing: 2px;
+        if root.menu-message.can-cancel: MenuItem {
+            text: "Cancel"; icon: @image-url("icons/x.svg");
+            clicked => { root.cancel-send(root.menu-message.item); }
+        }
         if root.menu-message.deleted: MenuItem {
             text: "Hide this deleted message"; icon: @image-url("icons/eye-off.svg");
             clicked => { root.hide-deleted-message(root.menu-message.item); }
@@ -1524,6 +1561,8 @@ export component MessageStickers inherits HorizontalLayout {
 // A file, or an image without a preview, as a card with a way to save it.
 export component FileCard inherits HorizontalLayout {
     in property <FileCell> file;
+    in property <string> item;
+    property <bool> active: root.file.voice && VideoPlayer.item == root.item && VideoPlayer.index == root.file.index;
     in property <bool> preview;
     /// The message's delivery state, empty once it's sent.
     in property <string> delivery;
@@ -1534,11 +1573,27 @@ export component FileCard inherits HorizontalLayout {
         background: Theme.sidebar; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
         file-card := HorizontalLayout {
             padding: 12px; padding-right: 8px; spacing: 12px;
-            Image { source: @image-url("icons/file.svg"); width: 30px; image-fit: contain; colorize: Theme.accent; }
+            if !root.file.voice: Image { source: @image-url("icons/file.svg"); width: 30px; image-fit: contain; colorize: Theme.accent; }
+            if root.file.voice: IconButton {
+                icon: root.active && VideoPlayer.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+                label: root.active && VideoPlayer.playing ? "Pause voice message" : "Play voice message";
+                enabled: !root.preview && root.delivery == "";
+                clicked => {
+                    if root.active && !VideoPlayer.ended && VideoPlayer.error == "" { VideoPlayer.toggle(); }
+                    else { VideoPlayer.play(root.item, root.file.index, 1px, 1px); }
+                }
+            }
+            if root.active && !VideoPlayer.ended && VideoPlayer.error == "": IconButton {
+                icon: @image-url("icons/circle-stop.svg"); label: "Stop voice message";
+                clicked => { VideoPlayer.stop(); }
+            }
             VerticalLayout {
                 alignment: center; horizontal-stretch: 1;
                 Text { text: root.file.name; color: Theme.text; font-weight: 500; overflow: elide; }
-                if root.file.detail != "": Label { text: root.file.detail; }
+                if root.file.voice: Label {
+                    text: root.active ? (VideoPlayer.error != "" ? VideoPlayer.error : VideoPlayer.loading ? "Loading…" : VideoPlayer.time) : root.file.duration;
+                }
+                if !root.file.voice && root.file.detail != "": Label { text: root.file.detail; }
             }
             IconButton {
                 icon: @image-url("icons/download.svg"); label: "Save " + root.file.name;
@@ -1872,7 +1927,7 @@ export component CardView inherits HorizontalLayout {
                 }
                 // Only a media row has files.
                 for file in row.files: FileCard {
-                    file: file; preview: root.preview; delivery: root.delivery;
+                    file: file; item: root.item; preview: root.preview; delivery: root.delivery;
                     save => { root.save-attachment(root.item, file.index); }
                 }
                 // With the layout's spacing either side, a small gap is 16
@@ -2369,7 +2424,6 @@ export component MessageContent inherits VerticalLayout {
     callback open-thread(string);
     callback react(string, string);
     callback retry(string);
-    callback cancel-send(string);
     callback reveal-attachment(string, int);
     callback view-image(string, int);
     callback save-attachment(string, int);
@@ -2580,7 +2634,7 @@ export component MessageContent inherits VerticalLayout {
                 open(index, x, y, width, height) => { root.open-sticker(message.item, index, x, y, width, height); }
             }
             for file in message.files: FileCard {
-                file: file; preview: root.preview; delivery: message.delivery;
+                file: file; item: message.item; preview: root.preview; delivery: message.delivery;
                 save => { root.save-attachment(message.item, file.index); }
             }
             if message.hidden-card != "": Text {
@@ -2615,11 +2669,10 @@ export component MessageContent inherits VerticalLayout {
                     clicked => { root.react(message.item, reaction.key); }
                 }
             }
-            if message.delivery != "": HorizontalLayout {
+            if message.delivery != "" && !message.delivery-sending: HorizontalLayout {
                 spacing: 4px; alignment: start;
                 Text { text: message.delivery; color: message.delivery-failed ? Theme.danger : Theme.muted; font-size: 13px; vertical-alignment: center; wrap: word-wrap; }
                 if message.can-retry: ActionButton { text: "Retry"; ghost: true; small: true; clicked => { root.retry(message.item); } }
-                if message.can-cancel: ActionButton { text: "Cancel"; ghost: true; small: true; clicked => { root.cancel-send(message.item); } }
             }
         }
     }

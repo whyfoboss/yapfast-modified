@@ -44,6 +44,7 @@ pub(super) struct Shared {
     pub(super) presence: Value,
     /// The game this account plays, as Rich Presence or detection says.
     pub(super) activity: watch::Receiver<Option<Arc<Value>>>,
+    pub(super) music_playback: Option<crate::own_activity::MusicPlayback>,
     /// Whether the account shares it, which runs or stops what finds it.
     pub(super) show_game: watch::Sender<bool>,
     /// Nobody has used Yapfast since then, in Unix milliseconds, and whether
@@ -83,6 +84,7 @@ pub(super) async fn run(
             crate::own_activity::merge(
                 &mut shared.presence,
                 shared.activity.borrow().as_deref().filter(|_| playing),
+                shared.music_playback.as_ref(),
             );
             Gateway::connect(&token, shared.presence.clone(), &mut reconnects).await
         };
@@ -184,6 +186,7 @@ fn refuse(request: Request, shared: &mut Shared) {
         Request::Inactive(since, show_idle) => {
             shared.inactive = since.map(|since| (since, show_idle));
         }
+        Request::MusicPlayback(playback) => shared.music_playback = playback,
         // The settings changed already; what finds the game stops or
         // runs now, and the next READY says the same.
         Request::ShowGame(shown) => {
@@ -515,6 +518,10 @@ impl Session<'_> {
                 self.shared.inactive = since.map(|since| (since, show_idle));
                 self.show_presence().await
             }
+            Request::MusicPlayback(playback) => {
+                self.shared.music_playback = playback;
+                self.show_presence().await
+            }
             Request::ShowGame(shown) => {
                 // As with the status, the settings update that follows agrees.
                 self.tracker.show_game = shown;
@@ -700,7 +707,11 @@ impl Session<'_> {
         let activity = self.shared.activity.borrow_and_update().clone();
         let activity = activity.filter(|_| self.tracker.show_game);
         self.show_playing(activity.as_deref());
-        crate::own_activity::merge(&mut presence, activity.as_deref());
+        crate::own_activity::merge(
+            &mut presence,
+            activity.as_deref(),
+            self.shared.music_playback.as_ref(),
+        );
         if presence != self.shared.presence {
             self.gateway.update_presence(presence.clone()).await?;
             self.shared

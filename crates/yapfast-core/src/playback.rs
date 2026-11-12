@@ -110,7 +110,7 @@ impl Playback {
                 sound,
             })) => {
                 self.video.loading = false;
-                self.video.duration_ms = duration_ms;
+                self.video.duration_ms = duration_ms.or(self.video.duration_ms);
                 self.video.size = Some((width, height));
                 self.video.sound = sound;
             }

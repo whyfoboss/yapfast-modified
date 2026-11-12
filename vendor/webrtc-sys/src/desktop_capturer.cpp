@@ -17,6 +17,9 @@
 #include "livekit/desktop_capturer.h"
 
 #include "modules/desktop_capture/desktop_capture_options.h"
+#ifdef _WIN64
+#include "modules/desktop_capture/desktop_and_cursor_composer.h"
+#endif
 
 using SourceList = webrtc::DesktopCapturer::SourceList;
 
@@ -71,6 +74,13 @@ std::unique_ptr<DesktopCapturer> new_desktop_capturer(
   if (!capturer) {
     return nullptr;
   }
+#ifdef _WIN64
+  if (options.include_cursor) {
+    // Keep the native cursor where available and compose it on fallback frames.
+    capturer = std::make_unique<webrtc::DesktopAndCursorComposer>(
+        std::move(capturer), webrtc_options);
+  }
+#endif
   return std::make_unique<DesktopCapturer>(std::move(capturer));
 }
 

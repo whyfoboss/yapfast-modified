@@ -4,13 +4,15 @@ import { IconButton, PingToggle, ActionButton, MessagesSkeleton, TextField } fro
 import { FoundRow, FoundCard } from "header.slint";
 import { SettingsSwitch } from "settings.slint";
 import { Composer, StagedFile, StagedTile, MentionRow, MentionList, EmojiSuggestions } from "composer.slint";
-import { EmojiCell, EmojiButton, MessageRow, MessageContent, HistoryEdge } from "messages.slint";
+import { EmojiCell, EmojiButton, MessageRow, MessageContent, MessageHover, HistoryEdge } from "messages.slint";
 
 /// A Discord thread beside the open channel, in place of its member list, as
 /// Discord opens a thread from a message: its messages and a composer, with a
 /// way to show it in place of the channel.
 export component ThreadPanel inherits Rectangle {
     in property <string> name;
+    in property <string> room-id;
+    changed room-id => { thread-hover.clear(); }
     in property <[MessageRow]> messages;
     /// Its timeline came.
     in property <bool> ready;
@@ -44,9 +46,7 @@ export component ThreadPanel inherits Rectangle {
     in property <string> emoji-font;
     in property <length> message-font-size;
     in property <[EmojiCell]> bar-reactions;
-    /// The window's message under the pointer, and those its popups are for,
-    /// whose actions stay.
-    in-out property <string> active-item;
+    thread-hover := MessageHover { width: 0px; height: 0px; }
     in property <string> react-item;
     in property <string> menu-item;
     in property <string> confirm-delete;
@@ -88,7 +88,6 @@ export component ThreadPanel inherits Rectangle {
     callback open-link(string);
     callback open-thread(string);
     callback retry(string);
-    callback cancel-send(string);
     callback reveal-attachment(string, int);
     /// Long messages fold, and Show more or Show less was clicked on one:
     /// its item, and whether it shows whole now.
@@ -143,6 +142,7 @@ export component ThreadPanel inherits Rectangle {
     property <length> list-content: thread-list.content-height;
     property <length> list-viewport: thread-list.height;
     changed list-position => {
+        thread-hover.clear();
         if thread-list.content-y <= min(0px, thread-list.height - thread-list.content-height) + 0.5px { root.follow-latest = true; }
     }
     changed list-viewport => { if root.follow-latest { root.scroll-to-latest(); } }
@@ -157,7 +157,7 @@ export component ThreadPanel inherits Rectangle {
     changed top-index => { root.viewport(root.top-index, root.bottom-index); }
     changed bottom-index => { root.viewport(root.top-index, root.bottom-index); }
     property <int> count: root.messages.length;
-    changed count => { root.viewport(root.top-index, root.bottom-index); }
+    changed count => { thread-hover.clear(); root.viewport(root.top-index, root.bottom-index); }
     property <int> view-tick;
 
     VerticalLayout {
@@ -183,9 +183,21 @@ export component ThreadPanel inherits Rectangle {
             vertical-stretch: 1;
             thread-list := ListView {
                 width: parent.width; height: parent.height;
-                scrolled => { root.follow-latest = false; }
-                for message[index] in root.messages: Rectangle {
-                    property <bool> lit: root.active-item == message.item;
+                scrolled => { thread-hover.clear(); root.follow-latest = false; }
+                for message[index] in root.messages: message-row := Rectangle {
+                    property <bool> lit: thread-hover.item == message.item;
+                    property <string> row-item: message.item;
+                    property <string> hovered-item;
+                    changed row-item => {
+                        thread-hover.leave(self.hovered-item, false);
+                        thread-hover.leave(self.hovered-item, true);
+                    }
+                    function hover-row(toolbar: bool) {
+                        self.hovered-item = message.item;
+                        thread-hover.enter(message.item, toolbar);
+                    }
+                    property <length> body: (index == 0 ? col.padding-top + 42px : 0px) + (message.day != "" ? 26px : 0px);
+                    property <length> tail: index == root.messages.length - 1 ? 20px : 0px;
                     property <length> view-y: self.y + thread-list.content-y;
                     property <int> view-tick: root.view-tick;
                     function report-view() {
@@ -197,19 +209,27 @@ export component ThreadPanel inherits Rectangle {
                     changed height => { self.report-view(); }
                     changed view-tick => { self.report-view(); }
                     height: col.preferred-height;
-                    background: self.lit ? Theme.row-hover : transparent;
+                    Rectangle {
+                        y: parent.body; height: parent.height - parent.body - parent.tail;
+                        background: parent.lit ? Theme.row-hover : transparent;
+                    }
                     if message.highlighted: Rectangle {
                         y: index == 0 ? col.padding-top + 42px : 0px;
                         background: row-pointer.has-hover ? Theme.mentioned-hover : Theme.mentioned;
                         Rectangle { x: 0px; width: 2px; background: Theme.accent; }
                     }
                     row-pointer := TouchArea {
-                        changed has-hover => { if self.has-hover { root.active-item = message.item; } }
-                        clicked => { root.active-item = message.item; }
+                        property <bool> on-body: self.mouse-y >= parent.body && self.mouse-y < self.height - parent.tail;
+                        function update-hover() {
+                            if self.has-hover && self.on-body { parent.hover-row(false); }
+                            else { thread-hover.leave(parent.hovered-item, false); }
+                        }
+                        changed has-hover => { self.update-hover(); }
+                        changed on-body => { self.update-hover(); }
+                        moved => { self.update-hover(); }
                         pointer-event(event) => {
                             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down
-                                && message.delivery == "" {
-                                root.active-item = message.item;
+                                && (message.delivery == "" || (self.on-body && message.can-cancel)) {
                                 root.open-menu(message, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0px, 0px);
                             }
                         }
@@ -229,7 +249,7 @@ export component ThreadPanel inherits Rectangle {
                                 Rectangle { horizontal-stretch: 1; Rectangle { height: 1px; background: Theme.line; } }
                             }
                             MessageContent {
-                                message: message; active-item: root.active-item; reactions-enabled: root.reactions-enabled;
+                                message: message; active-item: thread-hover.item; reactions-enabled: root.reactions-enabled;
                                 emoji-font: root.emoji-font; message-font-size: root.message-font-size;
                                 end-padding: 16px; collapse-long: root.collapse-long;
                                 // The view keeps the message's top: it stops following
@@ -253,14 +273,14 @@ export component ThreadPanel inherits Rectangle {
                                 open-sticker(item, index, x, y, width, height) => { root.open-sticker(item, index, x, y, width, height); }
                                 react(item, key) => { root.react(item, key); }
                                 retry(item) => { root.retry(item); }
-                                cancel-send(item) => { root.cancel-send(item); }
                                 reveal-attachment(id, index) => { root.reveal-attachment(id, index); }
                                 view-image(id, index) => { root.view-image(id, index); }
                                 save-attachment(id, index) => { root.save-attachment(id, index); }
                                 media-menu(id, index, video, x, y) => {
                                     if message.delivery == "" {
-                                        root.active-item = message.item;
                                         root.open-media-menu(message, index, video, x, y);
+                                    } else if message.can-cancel {
+                                        root.open-menu(message, x, y, 0px, 0px);
                                     }
                                 }
                             }
@@ -268,14 +288,20 @@ export component ThreadPanel inherits Rectangle {
                     }
                     // The row's actions float over its top edge, as in the timeline,
                     // with fewer reactions for the narrower panel.
-                    if (self.lit || root.react-item == message.item || root.menu-item == message.item || root.confirm-delete == message.item) && !message.deleted && message.delivery == "": message-bar := Rectangle {
+                    if (self.lit || root.react-item == message.item || root.menu-item == message.item || root.confirm-delete == message.item) && !message.deleted && message.delivery == "": message-bar := TouchArea {
                         x: parent.width - self.width - 12px; y: index == 0 ? 4px : -16px;
                         width: actions.preferred-width; height: actions.preferred-height;
-                        background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
-                        drop-shadow-blur: 10px; drop-shadow-color: #00000059; drop-shadow-offset-y: 2px;
+                        Rectangle {
+                            background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
+                            drop-shadow-blur: 10px; drop-shadow-color: #00000059; drop-shadow-offset-y: 2px;
+                        }
                         // Shift's quick actions, as in the timeline.
                         property <bool> quick: root.shift-held && root.react-item != message.item && root.menu-item != message.item;
                         property <bool> deletes: self.quick && message.can-delete && root.composer-enabled;
+                        changed has-hover => {
+                            if self.has-hover { message-row.hover-row(true); }
+                            else { thread-hover.leave(message-row.hovered-item, true); }
+                        }
                         actions := HorizontalLayout {
                             padding: 3px; spacing: 0px;
                             if root.confirm-delete == message.item: HorizontalLayout {

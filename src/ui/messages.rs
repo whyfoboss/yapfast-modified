@@ -673,6 +673,13 @@ pub(super) fn message_row_within_with_role_colors(
                 };
                 FileCell {
                     index: index as i32,
+                    voice: attachment.voice_ms.is_some(),
+                    duration: attachment
+                        .voice_ms
+                        .filter(|duration| *duration > 0)
+                        .map_or_else(SharedString::default, |duration| {
+                            super::refresh::video_time(0, Some(u64::from(duration))).into()
+                        }),
                     name: attachment.name.clone().into(),
                     detail: detail.into(),
                 }
@@ -694,15 +701,14 @@ pub(super) fn message_row_within_with_role_colors(
             )),
         })
         .collect();
-    let (delivery, can_retry, can_cancel) = match message.delivery {
-        Delivery::Sent => ("", false, false),
-        Delivery::Sending => ("Sending...", false, true),
+    let (delivery, can_retry) = match message.delivery {
+        Delivery::Sent => ("", false),
+        Delivery::Sending => ("Sending...", false),
         Delivery::Waiting => (
             "Not sent yet. Yapfast sends it when the connection returns.",
             false,
-            true,
         ),
-        Delivery::Failed => ("Not sent. The server refused this message.", true, true),
+        Delivery::Failed => ("Not sent. The server refused this message.", true),
     };
     let reply_author = message
         .reply
@@ -814,7 +820,8 @@ pub(super) fn message_row_within_with_role_colors(
         delivery: delivery.into(),
         delivery_failed: message.delivery == Delivery::Failed,
         can_retry,
-        can_cancel,
+        can_cancel: message.can_cancel_send(),
+        delivery_sending: message.delivery == Delivery::Sending,
         can_reply: message.can_reply,
         can_edit: message.can_edit,
         can_delete: message.can_delete,

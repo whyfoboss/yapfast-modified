@@ -1180,6 +1180,7 @@ struct Layout {
     collapsed: HashMap<String, std::collections::BTreeSet<String>>,
     /// The rail's open folders, by folder ID.
     open_folders: std::collections::BTreeSet<String>,
+    server_rail_order: Vec<String>,
     /// How often this device added each reaction, for the frequent reactions.
     reactions: HashMap<String, u32>,
     /// The stickers this device sent, and how often, for Frequently Used.
@@ -1538,6 +1539,22 @@ impl Layout {
                 .collect::<Vec<_>>(),
         )));
         discord::set_custom_games(&self.game_executables);
+        #[cfg(feature = "discord")]
+        yapfast_core::yapfast_discord::game_detection::custom_games::set_disabled(
+            self.game_activity_rules
+                .iter()
+                .filter(|rule| !rule.enabled)
+                .flat_map(|rule| {
+                    [
+                        Some(&rule.executable),
+                        Some(&rule.name),
+                        rule.custom_name.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                }),
+        );
     }
 
     /// A sound's own volume as a percentage: 100% unless adjusted.
@@ -2030,6 +2047,8 @@ struct Adapter {
     root: PathBuf,
     layout: Layout,
     pub activity_manager: yapfast_core::activity::ActivityManager,
+    #[cfg(feature = "discord")]
+    published_music: Option<yapfast_core::yapfast_discord::own_activity::MusicPlayback>,
     /// The rows of the emoji picker's grid that may hold pictures it drew, first
     /// and last: see `fill_shown_glyphs`.
     emoji_rows_filled: (usize, usize),
@@ -2443,6 +2462,8 @@ impl Adapter {
                 rows: Vec::new(),
                 sidebar: None,
                 account_profile_shown: None,
+                #[cfg(feature = "discord")]
+                published_music: None,
                 switcher: None,
                 nav_transition: NavTransition::default(),
                 places: Vec::new(),
@@ -2742,6 +2763,10 @@ impl Adapter {
             events.abort();
         }
         self.backend = None;
+        #[cfg(feature = "discord")]
+        {
+            self.published_music = None;
+        }
     }
 
     fn execute(&mut self, effects: Vec<Effect>) {

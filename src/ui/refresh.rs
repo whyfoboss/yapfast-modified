@@ -878,7 +878,12 @@ impl Adapter {
             .map(|room| (room.id.as_str(), &**room))
             .collect();
         self.rail_call = call_room(state).map(str::to_owned);
-        let rail = rail(state, &rooms_by_id, &self.layout.open_folders);
+        let rail = rail(
+            state,
+            &rooms_by_id,
+            &self.layout.open_folders,
+            &self.layout.server_rail_order,
+        );
         update_model_by_id(&self.models.servers, rail, |row| row.id.clone());
         let mut listed_text = false;
         let mut listed_voice = false;
@@ -1270,6 +1275,13 @@ impl Adapter {
 
     /// The account at the bottom of the sidebar, and the notice.
     fn show_account(&mut self, window: &YapfastWindow) {
+        if self.app.state.discord_user.is_some() {
+            self.activity_manager
+                .set_global_sharing(self.app.state.discord_show_game);
+        }
+        games::sync_live_game(self);
+        #[cfg(feature = "discord")]
+        games::publish_music_playback(self);
         let state = &self.app.state;
         let account = state.account.as_deref().unwrap_or("Preview");
         let account_name = state
@@ -1312,7 +1324,7 @@ impl Adapter {
             _ => false,
         };
         if !same {
-            let mut data = own.as_ref().map_or_else(ProfileData::default, |own| {
+            let data = own.as_ref().map_or_else(ProfileData::default, |own| {
                 let view = ProfileView {
                     profile: yapfast_core::chat::Profile::clone(&own.profile),
                     ..Default::default()
@@ -1324,17 +1336,27 @@ impl Adapter {
                     self.layout.role_colors_everywhere,
                 )
             });
-            #[cfg(feature = "discord")]
-            if let Some(activity) = self.activity_manager.to_discord_activity(games::now_ms()) {
-                let mut rows: Vec<ActivityRow> = data.activities.iter().collect();
-                if rows.is_empty() {
-                    rows.push(profile::activity_row(&activity));
-                    data.activities = ModelRc::new(VecModel::from(rows));
-                }
-            }
             window.set_account_profile(data);
         }
         self.account_profile_shown = own;
+        #[cfg(feature = "discord")]
+        {
+            let empty = Default::default();
+            let fallback = state
+                .account_profile
+                .as_ref()
+                .map_or(&empty, |profile| &profile.activities);
+            let mut data = window.get_account_profile();
+            let rows = games::own_activity_rows(
+                &self.activity_manager,
+                state.discord_playing.as_ref(),
+                fallback,
+            );
+            if !data.activities.iter().eq(rows.iter()) {
+                data.activities = rows;
+                window.set_account_profile(data);
+            }
+        }
         let look = window.global::<AccountLook>();
         let cosmetics = state.cosmetics;
         look.set_decoration_url(
@@ -1367,11 +1389,23 @@ impl Adapter {
         window.set_account_status_emoji(status_emoji.flatten().unwrap_or_default().into());
         // The game Yapfast shows as playing, as the activity icon Discord puts
         // before the status: alone it names the game, before a status it adds a bullet.
-        let playing = state
-            .discord_playing
-            .as_ref()
-            .filter(|_| state.online && !state.preview && state.discord_show_game);
-        window.set_account_activity_icon(i32::from(playing.is_some()));
+        let playing = state.discord_playing.as_ref().filter(|playing| {
+            state.online
+                && !state.preview
+                && state.discord_show_game
+                && self.activity_manager.activity_enabled(&playing.name)
+        });
+        #[cfg(feature = "discord")]
+        let music = playing.is_some_and(|playing| {
+            yapfast_core::yapfast_discord::activity::music_integration(&playing.name)
+        });
+        #[cfg(not(feature = "discord"))]
+        let music = false;
+        window.set_account_activity_icon(if music {
+            2
+        } else {
+            i32::from(playing.is_some())
+        });
         window.set_account_activity_bullet(playing.is_some() && custom_status.is_some());
         window.set_account_status(
             if state.preview {
@@ -1395,14 +1429,26 @@ impl Adapter {
         } else {
             window.set_show_game(self.activity_manager.global_sharing_enabled);
         }
-        let playing = state.discord_playing.as_ref();
-        window.set_game_activity_name(playing.map_or("", |playing| &playing.name).into());
+        window.set_game_activity_name(
+            playing
+                .filter(|_| !music)
+                .map_or("", |playing| &playing.name)
+                .into(),
+        );
         window.set_discord_status(state.discord_presence.as_deref().unwrap_or("online").into());
         window.set_storage(state.storage.unwrap_or_default().into());
         window.set_notice(state.notice.as_deref().unwrap_or_default().into());
-        if window.get_settings_open() && window.get_settings_section() == 8 {
+        if (window.get_settings_open() && window.get_settings_section() == 8)
+            || state.profile_editor.is_some()
+        {
             games::refresh_game_activity(self, window);
         }
+    }
+
+    pub(super) fn refresh_own_activity(&mut self, window: &YapfastWindow) {
+        self.show_account(window);
+        self.show_profile(window);
+        self.show_editor_activity(window);
     }
 
     /// The rows of the inbox popout's open tab, from what the client already
@@ -2106,7 +2152,7 @@ impl Adapter {
     }
 
     /// The member list, the reactions offered on messages, and a role's card.
-    fn show_members(&mut self, window: &YapfastWindow) {
+    pub(super) fn show_members(&mut self, window: &YapfastWindow) {
         let state = &self.app.state;
         let role_colors = self.layout.role_colors_everywhere;
         let cosmetics = state.cosmetics;
@@ -2147,10 +2193,39 @@ impl Adapter {
                 .iter()
                 .enumerate()
                 .map(|(index, member)| {
-                    let (activity_icon, activity_bullet, named) =
-                        subline(&member.activities, member.activity.as_deref());
-                    let (activity, activity_emoji) =
-                        activity_line(named.as_deref().or(member.activity.as_deref()));
+                    let activities = &*member.activities;
+                    let line = member.activity.as_deref();
+                    #[cfg(feature = "discord")]
+                    let filtered;
+                    #[cfg(feature = "discord")]
+                    let fallback;
+                    #[cfg(feature = "discord")]
+                    let (activities, line) = if state.discord_user.as_deref()
+                        == Some(member.id.as_str())
+                    {
+                        filtered = activities
+                            .iter()
+                            .filter(|activity| {
+                                state.discord_show_game
+                                    && activity.eligible_for_own_presence()
+                                    && self.activity_manager.activity_enabled(&activity.name)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let line = if line.is_some_and(|line| {
+                            profile::names_an_activity(line, &member.activities)
+                        }) {
+                            fallback = filtered.iter().find_map(yapfast_core::chat::Activity::line);
+                            fallback.as_deref()
+                        } else {
+                            line
+                        };
+                        (filtered.as_slice(), line)
+                    } else {
+                        (activities, line)
+                    };
+                    let (activity_icon, activity_bullet, named) = subline(activities, line);
+                    let (activity, activity_emoji) = activity_line(named.as_deref().or(line));
                     MemberRow {
                         activity_icon,
                         activity_bullet,
@@ -2823,6 +2898,7 @@ impl Adapter {
             if window.get_profile_editor_open() {
                 window.set_profile_editor_open(false);
                 window.set_profile_editor_prompt(ProfileEditorPrompt::default());
+                window.set_profile_editor_activity(ModelRc::default());
             }
             return;
         };
@@ -3056,6 +3132,31 @@ impl Adapter {
             changed: editor.change().is_some(),
             preview,
         });
+        self.show_editor_activity(window);
+    }
+
+    pub(super) fn show_editor_activity(&mut self, window: &YapfastWindow) {
+        let Some(editor) = self.app.state.profile_editor.as_ref() else {
+            return;
+        };
+        let empty = Default::default();
+        let fallback = editor
+            .profile
+            .as_ref()
+            .map_or(&empty, |profile| &profile.fallback.activities);
+        #[cfg(feature = "discord")]
+        let rows = games::own_activity_rows(
+            &self.activity_manager,
+            self.app.state.discord_playing.as_ref(),
+            fallback,
+        );
+        #[cfg(not(feature = "discord"))]
+        let rows = profile::activity_rows(fallback);
+        let shown = window.get_profile_editor_activity();
+        if !shown.iter().eq(rows.iter()) {
+            window.set_profile_editor_activity(rows);
+        }
+        self.tick_activities(window);
     }
 
     /// Asks before leaving a Discord server or group DM, as Discord's
@@ -3909,7 +4010,7 @@ impl Adapter {
         if messages_changed || selection_changed || reset || pictures_arrived || restyle {
             if selection_changed || reset {
                 window.set_react_item(SharedString::default());
-                window.set_active_item(SharedString::default());
+                window.invoke_clear_message_hover();
                 window.set_jump_item(SharedString::default());
             }
             let marks = Marks {
@@ -4070,6 +4171,13 @@ impl Adapter {
         );
         window.set_has_active_streams(!voice.watching.is_empty() || voice.sharing.is_some());
         let active_focus_user = focused_user.or(primary_watching);
+        if window.get_watch_user().as_str() != active_focus_user.unwrap_or_default() {
+            let frame = active_focus_user
+                .and_then(|user| voice.participants.iter().position(|person| person.id == user))
+                .and_then(|index| self.models.stream_frames.row_data(index))
+                .unwrap_or_default();
+            window.set_watch_frame(frame);
+        }
         window.set_watch_user(active_focus_user.unwrap_or_default().into());
         let pip = stage.pip(self.call_focus.as_ref(), primary_watching);
         window.set_pip_kind(match pip {
@@ -4101,7 +4209,12 @@ impl Adapter {
                 .iter()
                 .map(|room| (room.id.as_str(), &**room))
                 .collect();
-            let rail = rail(state, &rooms_by_id, &self.layout.open_folders);
+            let rail = rail(
+                state,
+                &rooms_by_id,
+                &self.layout.open_folders,
+                &self.layout.server_rail_order,
+            );
             update_model_by_id(&self.models.servers, rail, |row| row.id.clone());
         }
         let timed = matches!(state.voice.phase, Phase::Connected | Phase::Reconnecting)
@@ -4374,7 +4487,25 @@ impl Adapter {
                             } else {
                                 SharedString::default()
                             };
+                        #[cfg(feature = "discord")]
+                        let decoration = if person.local {
+                            state.account_decoration.clone()
+                        } else {
+                            state.discord_names.as_ref().and_then(|names| {
+                                let (guild, _) =
+                                    yapfast_core::discord::parse_room(voice.room.as_deref()?)?;
+                                names.read().decoration(Some(guild), &person.id)
+                            })
+                        };
                         PersonRow {
+                            #[cfg(feature = "discord")]
+                            decoration_url: state
+                                .cosmetics
+                                .decoration(decoration.as_deref())
+                                .unwrap_or_default()
+                                .into(),
+                            #[cfg(not(feature = "discord"))]
+                            decoration_url: Default::default(),
                             id: person.id.clone().into(),
                             local: person.local,
                             name: display_part(&person.user).into(),
@@ -4744,14 +4875,12 @@ impl Adapter {
             self.layout.role_colors_everywhere,
         );
         #[cfg(feature = "discord")]
-        if state.relation(&view.profile.id) == Relation::Me
-            && let Some(activity) = self.activity_manager.to_discord_activity(games::now_ms())
-        {
-            let mut rows: Vec<ActivityRow> = data.activities.iter().collect();
-            if rows.is_empty() {
-                rows.push(profile::activity_row(&activity));
-                data.activities = ModelRc::new(VecModel::from(rows));
-            }
+        if state.relation(&view.profile.id) == Relation::Me {
+            data.activities = games::own_activity_rows(
+                &self.activity_manager,
+                state.discord_playing.as_ref(),
+                &view.profile.activities,
+            );
         }
         if let Some(data) = changed_profile(&window.get_profile(), data) {
             window.set_profile(data);
@@ -4948,14 +5077,100 @@ fn rail(
     state: &AppState,
     rooms_by_id: &HashMap<&str, &yapfast_core::chat::ChatRoom>,
     open_folders: &std::collections::BTreeSet<String>,
+    order: &[String],
 ) -> Vec<ServerRow> {
     let mut rail = unread_dm_rows(state);
     rail.push(ServerRow {
         divider: true,
         ..Default::default()
     });
-    rail.extend(rail_rows(state, rooms_by_id, open_folders));
+    rail.extend(rail_rows(state, rooms_by_id, open_folders, order));
     rail
+}
+
+fn rail_group(server: &yapfast_core::chat::ChatServer) -> &str {
+    server
+        .folder
+        .as_ref()
+        .map_or(server.id.as_str(), |folder| folder.id.as_str())
+}
+
+fn ordered_servers<'a>(
+    state: &'a AppState,
+    order: &[String],
+) -> Vec<&'a yapfast_core::chat::ChatServer> {
+    let mut servers: Vec<_> = state.servers.iter().map(Arc::as_ref).collect();
+    if !order.is_empty() {
+        let ranks: HashMap<_, _> = order
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| (id.as_str(), rank))
+            .collect();
+        let mut groups = HashMap::new();
+        for (index, server) in servers.iter().enumerate() {
+            groups.entry(rail_group(server)).or_insert(index);
+        }
+        servers.sort_by_cached_key(|server| {
+            let group = rail_group(server);
+            (
+                ranks.get(group).copied().unwrap_or(usize::MAX),
+                groups[group],
+                ranks.get(server.id.as_str()).copied().unwrap_or(usize::MAX),
+            )
+        });
+    }
+    servers
+}
+
+pub(super) fn move_rail_server(
+    state: &AppState,
+    saved: &[String],
+    source: &str,
+    target: &str,
+    before: bool,
+) -> Option<Vec<String>> {
+    let servers = ordered_servers(state, saved);
+    let moved = servers.iter().find(|server| server.id == source)?;
+    let destination = servers.iter().find(|server| server.id == target);
+    let anchor = if moved.folder.is_some() {
+        // Keep Discord folder membership intact when moving its children.
+        destination
+            .filter(|server| server.folder == moved.folder)?
+            .id
+            .as_str()
+    } else if let Some(server) = destination {
+        rail_group(server)
+    } else {
+        servers
+            .iter()
+            .find(|server| rail_group(server) == target)
+            .map(|server| rail_group(server))?
+    };
+    if anchor == source {
+        return None;
+    }
+    let mut ids = Vec::new();
+    let mut previous = None;
+    for server in servers {
+        let group = rail_group(server);
+        if previous != Some(group) {
+            ids.push(group.to_owned());
+            previous = Some(group);
+        }
+        if server.folder.is_some() {
+            ids.push(server.id.clone());
+        }
+    }
+    let from = ids.iter().position(|id| id == source)?;
+    let to = ids.iter().position(|id| id == anchor)?;
+    let to = to + usize::from(!before);
+    let to = to - usize::from(from < to);
+    if to == from {
+        return None;
+    }
+    let moved = ids.remove(from);
+    ids.insert(to, moved);
+    Some(ids)
 }
 
 /// The rail's rows: each server, and each folder with its servers after it
@@ -4964,6 +5179,7 @@ pub(super) fn rail_rows(
     state: &AppState,
     rooms_by_id: &HashMap<&str, &yapfast_core::chat::ChatRoom>,
     open_folders: &std::collections::BTreeSet<String>,
+    order: &[String],
 ) -> Vec<ServerRow> {
     // A server's channels: whether any is unread, and its mentions. One its
     // channel list leaves out marks it only by mentions, as in Discord.
@@ -4990,7 +5206,7 @@ pub(super) fn rail_rows(
         call.is_some_and(|room| server.channels.iter().any(|channel| channel == room))
     };
     let mut rows = Vec::with_capacity(state.servers.len());
-    let mut servers = state.servers.iter().peekable();
+    let mut servers = ordered_servers(state, order).into_iter().peekable();
     while let Some(server) = servers.next() {
         let Some(folder) = &server.folder else {
             let (unread, mentions) = marks(server);

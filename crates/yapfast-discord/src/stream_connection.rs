@@ -295,9 +295,16 @@ pub struct SentSoFar {
 /// connection.
 pub struct StreamReceiver {
     frames: channel::Receiver<ReceivedFrame>,
-    sounds: Option<channel::Receiver<Vec<u8>>>,
+    sounds: Option<channel::Receiver<ReceivedSound>>,
     shared: Arc<Shared>,
     _stop: oneshot::Sender<()>,
+}
+
+pub struct ReceivedSound {
+    pub ssrc: u32,
+    pub sequence: u16,
+    pub timestamp: u32,
+    pub data: Vec<u8>,
 }
 
 impl StreamReceiver {
@@ -341,7 +348,7 @@ impl StreamReceiver {
 
     /// The stream's sound, decrypted Opus frames, for a player of its own.
     /// It ends with the connection.
-    pub fn take_sounds(&mut self) -> Option<channel::Receiver<Vec<u8>>> {
+    pub fn take_sounds(&mut self) -> Option<channel::Receiver<ReceivedSound>> {
         self.sounds.take()
     }
 
@@ -707,6 +714,18 @@ struct Streamer {
 }
 
 impl Streamer {
+    fn retransmission(&self, packet: &rtp::Packet<'_>) -> bool {
+        self.rtx.map_or_else(
+            || {
+                self.video.is_some()
+                    && [Codec::Vp8, Codec::H264, Codec::H265, Codec::Av1]
+                        .into_iter()
+                        .any(|codec| codec.payload_types().1 == packet.payload_type)
+            },
+            |rtx| packet.ssrc == rtx,
+        )
+    }
+
     fn learn(&mut self, op: u64, data: &Value) {
         match op {
             // Video: the streamer's SSRCs.
@@ -717,16 +736,44 @@ impl Streamer {
                         .filter(|&ssrc| ssrc != 0)
                         .map(|ssrc| ssrc as u32)
                 };
-                self.video = ssrc(&data["video_ssrc"]).or(self.video);
-                self.rtx = ssrc(&data["rtx_ssrc"]).or(self.rtx);
+                let mut video = ssrc(&data["video_ssrc"]);
+                let mut rtx = ssrc(&data["rtx_ssrc"]);
                 if let Some(streams) = data["streams"].as_array() {
-                    for stream in streams {
-                        if stream["type"] == "video" || stream["type"] == "screen" {
-                            self.video = ssrc(&stream["ssrc"]).or(self.video);
-                            self.rtx = ssrc(&stream["rtx_ssrc"]).or(self.rtx);
+                    let offered = streams
+                        .iter()
+                        .filter_map(|stream| {
+                            let media = ssrc(&stream["ssrc"])?;
+                            let kind = stream["type"].as_str()?;
+                            (matches!(kind, "video" | "screen") && stream["active"] != false)
+                                .then_some((media, stream))
+                        })
+                        .max_by_key(|(media, stream)| {
+                            (
+                                stream["active"] == true,
+                                stream["quality"].as_u64().unwrap_or(0),
+                                Some(*media) == video,
+                                Some(*media) == self.video,
+                            )
+                        });
+                    if let Some((media, stream)) = offered {
+                        if Some(media) != video {
+                            rtx = None;
                         }
+                        video = Some(media);
+                        rtx = ssrc(&stream["rtx_ssrc"]).or(rtx);
+                    } else if streams
+                        .iter()
+                        .any(|stream| stream["active"] == false && ssrc(&stream["ssrc"]) == video)
+                    {
+                        // The top-level SSRC can name a paused layer.
+                        return;
                     }
                 }
+                if video.is_some() && video != self.video {
+                    self.rtx = None;
+                }
+                self.video = video.or(self.video);
+                self.rtx = rtx.or(self.rtx);
             }
             // Session update: the codec may change.
             14 => {
@@ -796,6 +843,16 @@ struct Video {
     reported: (u32, u32),
 }
 
+impl Video {
+    fn push_ordered(&mut self, codec: Codec, packet: &rtp::Packet<'_>) -> (rtp::Pushed, bool) {
+        let changed = self.assembler.codec() != codec;
+        if changed {
+            self.assembler = Assembler::new(codec);
+        }
+        (self.assembler.push(packet), changed)
+    }
+}
+
 async fn receive_stream(
     server: &StreamServer,
     user: u64,
@@ -805,7 +862,7 @@ async fn receive_stream(
     // Where whole video frames and the sound's Opus frames go.
     (frames, sounds): (
         channel::SyncSender<ReceivedFrame>,
-        channel::SyncSender<Vec<u8>>,
+        channel::SyncSender<ReceivedSound>,
     ),
     mut stopped: oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -826,7 +883,7 @@ async fn receive_stream(
     let mut asked = Instant::now() - KEYFRAME_REQUESTS;
     let interval = connection.interval;
     let mut heartbeat = tokio::time::interval_at(Instant::now() + interval, interval);
-    let mut keyframes = tokio::time::interval(KEYFRAME_REQUESTS);
+    let mut recovering = false;
     // Gives up on missing packets and asks for them again even while
     // nothing arrives.
     let mut repairs = tokio::time::interval(Duration::from_millis(20));
@@ -840,7 +897,6 @@ async fn receive_stream(
     // Frames handed to the decoder when the log last looked.
     let mut flowing = 0;
     loop {
-        let mut lost = false;
         tokio::select! {
             _ = &mut stopped => {
                 let _ = connection.ws.close(None).await;
@@ -854,10 +910,17 @@ async fn receive_stream(
                         text.truncate(400);
                         tracing::debug!(op, data = %text, "the stream server said");
                     }
+                    let previous = streamer.video;
                     streamer.learn(op, &data);
+                    if streamer.video != previous {
+                        tracing::info!(target: "yapfast_stream", codec = ?streamer.codec,
+                            "stream video source changed");
+                        incoming.clear();
+                        last_report = None;
+                        recovering = true;
+                    }
                 }
             }
-            _ = keyframes.tick() => {}
             _ = repairs.tick() => {}
             _ = reports.tick() => {
                 let Some(media) = streamer.video else { continue };
@@ -886,6 +949,14 @@ async fn receive_stream(
                 connection.udp.send(&report).await?;
             }
             _ = log.tick() => {
+                tracing::info!(target: "yapfast_stream", packets = received.packets,
+                    video = received.video, audio = received.sounds,
+                    assembled = received.frames, queued = received.decoded, rejected = received.other,
+                    unparsed = received.unparsed, unopened = received.unopened,
+                    unreadable = received.unreadable, late = received.late, lost = received.given_up,
+                    dropped = received.behind,
+                    requests = received.keyframe_requests, codec = ?streamer.codec,
+                    payload_types = ?received.payload_types, "stream transport");
                 tracing::debug!(?received, "stream received");
                 if received.decoded == flowing {
                     tracing::info!(
@@ -934,12 +1005,16 @@ async fn receive_stream(
                     received.sounds += 1;
                     match connection.dave.decrypt_opus(streamer_id, packet.payload.to_vec()) {
                         // A full queue drops sound the player can't keep up with.
-                        Some(sound) => drop(sounds.try_send(sound)),
+                        Some(data) => drop(sounds.try_send(ReceivedSound {
+                            ssrc: packet.ssrc,
+                            sequence: packet.sequence, timestamp: packet.timestamp, data,
+                        })),
                         None => received.unheard += 1,
                     }
                     continue;
                 }
-                let held = if streamer.rtx.is_some() && Some(packet.ssrc) == streamer.rtx {
+                let resent = streamer.retransmission(&packet);
+                let mut held = if resent {
                     received.resent += 1;
                     match streamer.video.and_then(|video| rtp::Held::unwrap_rtx(&packet, video)) {
                         Some(held) => held,
@@ -955,6 +1030,12 @@ async fn receive_stream(
                     received.other += 1;
                     continue;
                 };
+                if streamer.video.is_some_and(|media| media != held.ssrc) {
+                    received.other += 1;
+                    continue;
+                }
+                // Keep the codec inferred at arrival across session updates and reordering.
+                held.payload_type = codec.payload_types().0;
                 received.video += 1;
                 streamer.video.get_or_insert(held.ssrc);
                 // Packets can name any SSRC: past a few, a new one isn't
@@ -968,10 +1049,6 @@ async fn receive_stream(
                     assembler: Assembler::new(codec),
                     reported: (0, 0),
                 });
-                if video.assembler.codec() != codec {
-                    video.assembler = Assembler::new(codec);
-                }
-                let resent = Some(packet.ssrc) == streamer.rtx;
                 match video.reorder.insert(held, std::time::Instant::now()) {
                     rtp::Arrival::New if !resent => {}
                     rtp::Arrival::New | rtp::Arrival::Recovered if resent => received.recovered += 1,
@@ -980,33 +1057,52 @@ async fn receive_stream(
                 }
             }
         }
+        if let Some(media) = streamer.video
+            && shared.keyframe.swap(false, Ordering::Relaxed)
+        {
+            recovering = true;
+            if let Some(video) = incoming.get_mut(&media) {
+                video.assembler.wait_for_keyframe();
+            }
+        }
         let now = std::time::Instant::now();
         for (&ssrc, video) in &mut incoming {
-            let codec = video.assembler.codec();
+            if Some(ssrc) != streamer.video {
+                continue;
+            }
             let (ready, skipped) = video.reorder.ready(now);
             received.given_up += skipped;
             for held in ready {
-                let pushed = video.assembler.push(&held.packet());
-                lost |= pushed.lost;
+                let Some(codec) = streamer.codec(&held.packet()) else {
+                    continue;
+                };
+                let (pushed, changed) = video.push_ordered(codec, &held.packet());
+                recovering |= changed || pushed.lost;
                 let Some(frame) = pushed.frame else { continue };
                 received.frames += 1;
                 let Some(data) = connection.dave.decrypt(streamer_id, frame.data) else {
                     received.unreadable += 1;
+                    video.assembler.wait_for_keyframe();
+                    recovering = true;
                     continue;
                 };
-                received.decoded += 1;
+                let keyframe = frame.keyframe;
                 let frame = ReceivedFrame {
                     codec,
                     data,
                     keyframe: frame.keyframe,
                 };
-                if let Err(channel::TrySendError::Full(_)) = frames.try_send(frame) {
-                    // The decoder is behind; wait for a keyframe if repeatedly overflowing.
-                    received.behind += 1;
-                    if received.behind.is_multiple_of(8) {
-                        video.assembler.wait_for_keyframe();
-                        lost = true;
+                match frames.try_send(frame) {
+                    Ok(()) => {
+                        received.decoded += 1;
+                        recovering &= !keyframe;
                     }
+                    Err(channel::TrySendError::Full(_)) => {
+                        received.behind += 1;
+                        video.assembler.wait_for_keyframe();
+                        recovering = true;
+                    }
+                    Err(channel::TrySendError::Disconnected(_)) => return Ok(()),
                 }
             }
             let missing = video.reorder.to_ask(now);
@@ -1018,11 +1114,10 @@ async fn receive_stream(
             }
         }
         // Ask for a keyframe after a loss, or when the decoder asked.
-        if (lost || shared.keyframe.load(Ordering::Relaxed))
+        if recovering
             && asked.elapsed() >= KEYFRAME_REQUESTS
             && let Some(media) = streamer.video
         {
-            shared.keyframe.store(false, Ordering::Relaxed);
             asked = Instant::now();
             received.keyframe_requests += 1;
             let mut request = rtp::picture_loss(connection.ssrc, media);
@@ -1068,5 +1163,105 @@ mod tests {
             "retransmissions aren't frames"
         );
         assert_eq!(streamer.codec(&packet(30, 96)), None);
+        streamer.learn(12, &json!({"video_ssrc": 13}));
+        assert!(streamer.retransmission(&packet(14, Codec::H264.payload_types().1)));
+        assert!(!streamer.retransmission(&packet(13, Codec::H264.payload_types().0)));
+        assert_eq!(
+            streamer.rtx, None,
+            "the old video RTX belongs to the old source"
+        );
+    }
+
+    #[test]
+    fn an_inactive_layer_cannot_replace_the_active_video_and_rtx() {
+        let mut streamer = Streamer::default();
+        streamer.learn(12, &json!({"video_ssrc": 11, "rtx_ssrc": 12}));
+        streamer.learn(
+            12,
+            &json!({
+                "video_ssrc": 11, "rtx_ssrc": 12,
+                "streams": [
+                    {"type":"video","ssrc":11,"rtx_ssrc":12,"active":true,"quality":100},
+                    {"type":"video","ssrc":13,"rtx_ssrc":14,"active":false,"quality":100}
+                ]
+            }),
+        );
+        assert_eq!((streamer.video, streamer.rtx), (Some(11), Some(12)));
+        streamer.learn(
+            12,
+            &json!({
+                "video_ssrc": 11, "rtx_ssrc": 12,
+                "streams": [
+                    {"type":"video","ssrc":11,"rtx_ssrc":12,"active":false},
+                    {"type":"video","ssrc":13,"rtx_ssrc":14,"active":true}
+                ]
+            }),
+        );
+        assert_eq!((streamer.video, streamer.rtx), (Some(13), Some(14)));
+    }
+
+    #[test]
+    fn codec_changes_follow_rtp_order_and_keep_delivering_frames() {
+        let streamer = Streamer {
+            video: Some(11),
+            ..Streamer::default()
+        };
+        let mut video = Video {
+            reorder: rtp::Reorder::default(),
+            assembler: Assembler::new(Codec::H264),
+            reported: (0, 0),
+        };
+        let now = std::time::Instant::now();
+        let packet = |sequence, codec: Codec, payload: &[u8]| rtp::Held {
+            payload_type: codec.payload_types().0,
+            marker: true,
+            sequence,
+            timestamp: u32::from(sequence) * 3000,
+            ssrc: 11,
+            payload: payload.to_vec(),
+        };
+        let drain = |video: &mut Video| {
+            video
+                .reorder
+                .ready(now)
+                .0
+                .into_iter()
+                .map(|held| {
+                    let packet = held.packet();
+                    let codec = streamer.codec(&packet).unwrap();
+                    let (pushed, _) = video.push_ordered(codec, &packet);
+                    (codec, pushed.frame.expect("ordered frame").keyframe)
+                })
+                .collect::<Vec<_>>()
+        };
+        video
+            .reorder
+            .insert(packet(1, Codec::H264, &[0x65, 1]), now);
+        assert_eq!(drain(&mut video), [(Codec::H264, true)]);
+        video
+            .reorder
+            .insert(packet(3, Codec::Vp8, &[0x10, 0x10]), now);
+        assert!(drain(&mut video).is_empty());
+        let retransmitted = rtp::Packet {
+            payload_type: Codec::H264.payload_types().1,
+            marker: true,
+            sequence: 50,
+            timestamp: 6000,
+            ssrc: 12,
+            payload: &[0, 2, 0x61, 1],
+        };
+        assert!(streamer.retransmission(&retransmitted));
+        let repaired = rtp::Held::unwrap_rtx(&retransmitted, 11).unwrap();
+        assert_eq!(video.reorder.insert(repaired, now), rtp::Arrival::Recovered);
+        assert_eq!(
+            drain(&mut video),
+            [(Codec::H264, false), (Codec::Vp8, true)]
+        );
+        for sequence in 4..100 {
+            video
+                .reorder
+                .insert(packet(sequence, Codec::Vp8, &[0x10, 0x11]), now);
+            assert_eq!(drain(&mut video), [(Codec::Vp8, false)]);
+        }
     }
 }

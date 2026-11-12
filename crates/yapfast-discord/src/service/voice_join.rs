@@ -107,6 +107,7 @@ impl VoiceJoin {
             Event::VoiceStateUpdate
                 if data["user_id"] == me
                     && waiting.answers(data)
+                    && data["channel_id"] == waiting.channel.as_str()
                     && tracker
                         .session
                         .as_deref()
@@ -179,6 +180,13 @@ mod tests {
             ),
         );
         assert!(join.waiting(), "the phone's voice state doesn't answer it");
+        let mut old_channel = state("here");
+        old_channel["channel_id"] = json!("12");
+        join.apply(&tracker, &dispatch(Event::VoiceStateUpdate, old_channel));
+        assert!(
+            join.waiting(),
+            "another channel's voice state doesn't answer it"
+        );
         join.apply(&tracker, &dispatch(Event::VoiceStateUpdate, state("here")));
         let server = answer.try_recv().unwrap().unwrap();
         assert_eq!(server.session_id, "here");

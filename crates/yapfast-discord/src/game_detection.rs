@@ -77,6 +77,8 @@ async fn run(
     .await?;
     let mut detector = Detector::new(initial, steam::roots());
     detector.set_executables(&custom_games.borrow_and_update());
+    let mut disabled = custom_games::subscribe_disabled();
+    detector.set_disabled(&disabled.borrow_and_update());
     let mut ticks = tokio::time::interval(interval());
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A list from the cache is asked for again once it's a day old, and
@@ -93,6 +95,11 @@ async fn run(
             result = custom_games.changed() => {
                 if result.is_err() { return Ok(()); }
                 detector.set_executables(&custom_games.borrow_and_update());
+                ticks.reset_immediately();
+            }
+            result = disabled.changed() => {
+                if result.is_err() { return Ok(()); }
+                detector.set_disabled(&disabled.borrow_and_update());
                 ticks.reset_immediately();
             }
             result = &mut refresh, if due => {
@@ -212,6 +219,7 @@ struct Detector {
     selection: Selection,
     generation: u64,
     executables: Vec<(String, Arc<GameInfo>)>,
+    disabled: Vec<String>,
 }
 
 fn custom_match(
@@ -334,6 +342,7 @@ impl Detector {
             selection: Selection::default(),
             generation: 0,
             executables: Vec::new(),
+            disabled: Vec::new(),
         }
     }
 
@@ -361,6 +370,18 @@ impl Detector {
             .collect();
         self.generation = self.generation.wrapping_add(1);
         self.selection = Selection::default();
+    }
+
+    fn set_disabled(&mut self, names: &[String]) {
+        self.disabled = names.to_vec();
+        if self
+            .selection
+            .active
+            .as_ref()
+            .is_some_and(|active| custom_games::is_disabled(names, &active.found.game.name))
+        {
+            self.selection.active = None;
+        }
     }
 
     fn scan(&mut self, now_ms: u64) -> Option<Arc<Value>> {
@@ -507,13 +528,20 @@ impl Detector {
         }
         self.selection.update(
             self.known.iter().filter_map(|(&pid, known)| {
-                known.game.as_ref().map(|game| Found {
-                    identity: Identity {
-                        pid,
-                        started: known.started,
-                    },
-                    game: game.clone(),
-                })
+                known
+                    .game
+                    .as_ref()
+                    .filter(|game| {
+                        !crate::activity::browser_media_source(&game.name)
+                            && !custom_games::is_disabled(&self.disabled, &game.name)
+                    })
+                    .map(|game| Found {
+                        identity: Identity {
+                            pid,
+                            started: known.started,
+                        },
+                        game: game.clone(),
+                    })
             }),
             now_ms,
         )
@@ -736,6 +764,13 @@ mod tests {
         let shown = detector.scan(crate::service::now_ms()).unwrap();
         assert_eq!(shown["name"], "Native Fixture");
         assert_eq!(shown["application_id"], "42");
+        detector.set_disabled(&["native fixture".into()]);
+        assert!(detector.scan(crate::service::now_ms()).is_none());
+        detector.set_disabled(&[]);
+        assert_eq!(
+            detector.scan(crate::service::now_ms()).unwrap()["name"],
+            "Native Fixture"
+        );
         detector.set_executables(&[custom(name, "My custom title")]);
         let shown = detector.scan(crate::service::now_ms()).unwrap();
         assert_eq!(shown["name"], "My custom title");

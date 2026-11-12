@@ -47,7 +47,7 @@ import { ActionButton, IconButton, PingToggle, DeviceToggle, Avatar, TextField, 
 import { PersonRow, CallLink, CallLinkCard, LinkTouch, SignalIcon, VoiceDock, StreamPip, CallInvite, JoinVoice, ParticipantGrid, CallControls, IncomingCall, SwitchDialog, InputLevel, ShareMenu, ShareScreen, VolumeMenu, Soundboard, SoundRow } from "voice.slint";
 import { ServerRow, RoomRow, StatusDot, ServerRail, ServerHeader, RoomList } from "rail.slint";
 import { StagedFile, StagedTile, Composer, MentionRow, MentionList, EmojiSuggestions, RequestBar } from "composer.slint";
-import { EmojiCell, EmojiRow, EmojiTile, EmojiSection, RailSection, EmojiCard, EmojiCardView, MessageStickerCard, MessageStickerCardView, MessageRow, ReactionToggle, EmojiButton, EmojiPicker, MessageMenu, MessageGallery, MessageStickers, FileCard, MessageContent, EmbedView, BotTag, NoConversation, ConversationStart, HistoryEdge, UnreadBar, PresentBar, ImageViewer, VideoViewer, VideoPlayer, Polls } from "messages.slint";
+import { EmojiCell, EmojiRow, EmojiTile, EmojiSection, RailSection, EmojiCard, EmojiCardView, MessageStickerCard, MessageStickerCardView, MessageRow, ReactionToggle, EmojiButton, EmojiPicker, MessageHover, MessageMenu, MessageGallery, MessageStickers, FileCard, MessageContent, EmbedView, BotTag, NoConversation, ConversationStart, HistoryEdge, UnreadBar, PresentBar, ImageViewer, VideoViewer, VideoPlayer, Polls } from "messages.slint";
 import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable, DetectedAppRow, PluginsSettings } from "settings.slint";
 import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ServerCard, RoleCard, ActivityRow } from "people.slint";
 import { RequestRow, FriendRow, FriendsScreen, HeaderTab, RequestsScreen, AddFriendDialog } from "friends.slint";
@@ -291,6 +291,7 @@ export component YapfastWindow inherits Window {
     // server's; see ProfileEditorDialog.
     in property <bool> profile-editor-open;
     in property <ProfileEditorPrompt> profile-editor-prompt;
+    in property <[ActivityRow]> profile-editor-activity;
     in-out property <string> profile-editor-name;
     in-out property <string> profile-editor-pronouns;
     in-out property <string> profile-editor-bio;
@@ -425,7 +426,7 @@ export component YapfastWindow inherits Window {
     in property <styled-text> room-topic;
     in property <styled-text> room-topic-full;
     property <bool> topic-open;
-    changed room-id => { root.topic-open = false; }
+    changed room-id => { root.topic-open = false; timeline-hover.clear(); }
     /// The open Discord server channel's notifications, which the header's
     /// bell offers, slashed while the channel is muted.
     in property <bool> can-notify;
@@ -712,7 +713,11 @@ export component YapfastWindow inherits Window {
     public function paste-composer-text() { composer.paste-text(); }
     in property <string> confirm-delete;
     in-out property <string> react-item;
-    in-out property <string> active-item;
+    out property <string> active-item: root.browsing ? root.keyed-message.item : timeline-hover.item;
+    timeline-hover := MessageHover { width: 0px; height: 0px; }
+    public function clear-message-hover() { timeline-hover.clear(); }
+    property <int> hover-message-count: root.messages.length;
+    changed hover-message-count => { timeline-hover.clear(); }
     // Where the active message is in the timeline, so the keyboard can step from it.
     in-out property <int> active-index: -1;
     // The message list has the keyboard: Up and Down step through messages and
@@ -734,7 +739,7 @@ export component YapfastWindow inherits Window {
     }
     function step-message(index: int) {
         root.active-index = max(0, min(root.messages.length - 1, index));
-        root.active-item = root.messages[root.active-index].item;
+        timeline-hover.clear();
     }
     /// The reactions this device uses most: three on the hover bar, four in the menu.
     in property <[EmojiCell]> bar-reactions;
@@ -962,6 +967,9 @@ export component YapfastWindow inherits Window {
     in property <int> single-watched-slot: -1;
     /// Presentation mode for multi-stream: Grid Mode vs Focus Mode.
     in-out property <bool> voice-grid-mode: false;
+    out property <bool> compact-call: false;
+    changed voice-channel => { root.compact-call = false; }
+    changed has-active-streams => { if !root.has-active-streams { root.compact-call = false; } }
     /// The large tile fills the screen, over the whole window.
     in-out property <bool> stage-full: false;
     changed call-focus => { if root.call-focus < 0 { root.stage-full = false; } }
@@ -1419,6 +1427,7 @@ export component YapfastWindow inherits Window {
     callback retry-sync;
     callback navigate-dms;
     callback navigate-server(string);
+    callback reorder-server(string, string, bool);
     /// A folder on the rail was clicked: open or close it.
     callback toggle-folder(string);
     callback select-room(string);
@@ -1771,7 +1780,7 @@ export component YapfastWindow inherits Window {
     function settle-lead() { root.lead = max(0px, timeline.height - (timeline.content-height - root.lead)); }
     changed timeline-viewport => { root.settle-lead(); if root.follow-latest { root.scroll-to-latest(); } }
     // The end of a window of older messages isn't the newest, so it isn't followed.
-    changed timeline-position => { root.follow-at-end(); }
+    changed timeline-position => { timeline-hover.clear(); root.follow-at-end(); }
     // At the end of the newest messages, the list follows them. A jump that settles
     // there, in a conversation too short to scroll, doesn't move the list.
     public function follow-at-end() {
@@ -2080,13 +2089,11 @@ export component YapfastWindow inherits Window {
     property <bool> menu-person;
     // A message author's card, beside their avatar or name, and their menu.
     function author-card(item: string, sender: string, x: length, y: length, width: length, height: length) {
-        root.active-item = item;
         root.anchor-profile(x, y, width, height);
         root.profile-at-pointer = true;
         root.show-profile(sender);
     }
     function author-menu(item: string, sender: string, x: length, y: length) {
-        root.active-item = item;
         root.open-context-menu(sender, true, x, y);
     }
     // The menu open is the one a server's header opened, whose chevron turns.
@@ -2492,7 +2499,9 @@ export component YapfastWindow inherits Window {
             : root.anchor-y + 4px + self.height <= root.height - 8px ? root.anchor-y : max(8px, root.anchor-y - self.height - 4px);
         close-policy: PopupClosePolicy.close-on-click-outside;
         menu-content := MessageMenu {
+            opens-above: root.anchor-pointer && message-menu.y < root.anchor-y;
             menu-message: root.menu-message; selection: root.menu-selection; menu-can-react: root.menu-can-react; menu-reactions: root.menu-reactions;
+            cancel-send(item) => { root.cancel-send(item); message-menu.close(); }
             can-start-thread: root.can-start-threads && !root.menu-aside;
             start-thread(item) => { root.new-thread(item, "message"); message-menu.close(); }
             view-thread(room) => { root.open-aside(room); message-menu.close(); }
@@ -2561,6 +2570,7 @@ export component YapfastWindow inherits Window {
                         toggle-folder(id) => { root.toggle-folder(id); }
                         open-dm(id) => { root.open-conversation(id); }
                         open-server-menu(id, x, y) => { root.open-context-menu(id, false, x, y); }
+                        reorder-server(source, target, before) => { root.reorder-server(source, target, before); }
                         can-join: root.can-join-server;
                         join-server => { root.open-join-server(); }
                     }
@@ -2654,7 +2664,7 @@ export component YapfastWindow inherits Window {
                                 friends-open: root.friends-open; requests-current: root.requests-current; requests-badge: root.requests-badge;
                                 browse-offered: root.browse-offered && !ClientStyle.enabled; browsing: root.browse-open;
                                 open-browse => { root.open-browse(); }
-                                voice-channel: root.voice-channel; participants: root.participants; sidebar-empty: root.sidebar-empty;
+                                voice-channel: root.voice-tone == 1 ? root.voice-channel : ""; participants: root.participants; sidebar-empty: root.sidebar-empty;
                                 select-room(id) => { root.select-room(id); }
                                 open-voice(id) => { root.open-conversation(id); }
                                 wave(user) => { root.message-from-profile(user, "\u{1F44B}"); }
@@ -2806,7 +2816,7 @@ export component YapfastWindow inherits Window {
                                 clicked => { root.retry-sync(); }
                             }
                             cog := IconButton {
-                                icon: @image-url("icons/settings.svg"); label: "Settings";
+                                icon: @image-url("icons/settings.svg"); label: "Settings"; tip-side: 4;
                                 clicked => { root.settings-open = true; root.refresh-devices(); }
                             }
                         }
@@ -3144,7 +3154,11 @@ export component YapfastWindow inherits Window {
                             }
                             if root.voice-here: VerticalLayout {
                                 spacing: 0px;
-                                if !root.stage-full: ParticipantGrid {
+                                if !root.stage-full: stage-hover := TouchArea {
+                                  vertical-stretch: 1;
+                                  ParticipantGrid {
+                                    width: parent.width; height: parent.height;
+                                    stage-hovered: stage-hover.has-hover;
                                     participants: root.participants; frames: root.participant-frames;
                                     stream-frames: root.stream-frames;
                                     camera-starting: root.camera-starting; sharing: root.sharing; share-live: root.share-live;
@@ -3159,6 +3173,7 @@ export component YapfastWindow inherits Window {
                                     single-watched-slot: root.single-watched-slot;
                                     voice-channel: root.voice-channel;
                                     grid-mode: root.voice-grid-mode;
+                                    compact <=> root.compact-call;
                                     focus-tile(slot) => { root.focus-tile(slot); }
                                     full-screen(on) => { root.stage-full = on; }
                                     watch-stream(id) => { root.watch-stream(id); }
@@ -3173,6 +3188,7 @@ export component YapfastWindow inherits Window {
                                     tiles(columns, width, height, gap, top, scrolled, shown, focused, focus-width, focus-height) => {
                                         root.call-tiles(columns, width, height, gap, top, scrolled, shown, focused, focus-width, focus-height);
                                     }
+                                  }
                                 }
                                 CallControls {
                                     muted: root.muted; deafened: root.deafened; voice-ready: root.voice-ready; voice-leaving: root.voice-leaving;
@@ -3236,7 +3252,7 @@ export component YapfastWindow inherits Window {
                                 key-pressed(event) => {
                                     if root.chat-motion-phase == 1 { return reject; }
                                     if root.messages.length == 0 { return reject; }
-                                    if root.confirm-delete != "" && root.confirm-delete == root.active-item {
+                                    if root.confirm-delete != "" && root.confirm-delete == root.keyed-message.item {
                                         if event.text == Key.Return { root.confirm-delete-message(); return accept; }
                                         if event.text == Key.Escape { root.cancel-delete(); return accept; }
                                     }
@@ -3272,23 +3288,24 @@ export component YapfastWindow inherits Window {
                                     }
                                     return reject;
                                 }
-                                // Leaving the timeline puts the last hovered message's bar away, as
-                                // Discord does, unless something opened from it still needs it. The
-                                // list takes the pointer when a press starts, which only ends its
-                                // rows' hover, not this.
-                                TouchArea {
+                                Rectangle {
                                     width: parent.width; height: parent.height;
-                                    property <bool> mouse-inside: self.mouse-x >= 0px && self.mouse-x <= self.width && self.mouse-y >= 0px && self.mouse-y <= self.height;
-                                    changed has-hover => {
-                                        if !self.has-hover && !self.mouse-inside && !root.browsing && root.menu-item == "" && root.react-item == "" && root.confirm-delete == "" {
-                                            root.active-item = "";
-                                        }
-                                    }
                                     timeline := ListView {
                                         width: parent.width; height: parent.height;
-                                        scrolled => { root.follow-latest = false; }
-                                        for message[index] in root.messages: Rectangle {
-                                            property <bool> lit: root.active-item == message.item;
+                                        scrolled => { timeline-hover.clear(); root.follow-latest = false; }
+                                        for message[index] in root.messages: message-row := Rectangle {
+                                            property <bool> keyboard-selected: root.browsing && root.keyed-message.item == message.item;
+                                            property <bool> lit: self.keyboard-selected || timeline-hover.item == message.item;
+                                            property <string> row-item: message.item;
+                                            property <string> hovered-item;
+                                            changed row-item => {
+                                                timeline-hover.leave(self.hovered-item, false);
+                                                timeline-hover.leave(self.hovered-item, true);
+                                            }
+                                            function hover-row(toolbar: bool) {
+                                                self.hovered-item = message.item;
+                                                timeline-hover.enter(message.item, toolbar);
+                                            }
                                             property <bool> jumped: root.jump-item != "" && root.jump-item == message.item;
                                             property <int> jump-tick: root.jump-tick;
                                             changed jump-tick => {
@@ -3304,9 +3321,8 @@ export component YapfastWindow inherits Window {
                                             }
                                             // The keyboard's message stays in view, with room for the next one,
                                             // so stepping on finds it built.
-                                            changed lit => {
-                                                if self.lit && root.browsing {
-                                                    root.active-index = index;
+                                            changed keyboard-selected => {
+                                                if self.keyboard-selected {
                                                     if self.y + timeline.content-y < root.keyboard-margin {
                                                         root.follow-latest = false;
                                                         timeline.content-y = min(0px, root.keyboard-margin - self.y);
@@ -3315,7 +3331,7 @@ export component YapfastWindow inherits Window {
                                                     }
                                                 }
                                             }
-                                            property <bool> keyed: self.lit && root.keyboard-popup != "";
+                                            property <bool> keyed: self.keyboard-selected && root.keyboard-popup != "";
                                             changed keyed => {
                                                 if self.keyed {
                                                     root.anchor(self.absolute-position.x + self.width - 16px, self.absolute-position.y + self.body - 16px, 0px, 32px, false);
@@ -3365,30 +3381,24 @@ export component YapfastWindow inherits Window {
                                                 Rectangle { x: 0px; width: 2px; background: Theme.accent; }
                                             }
                                             // The keyboard's message has a marigold edge.
-                                            if self.lit && root.browsing: Rectangle { x: 0px; y: parent.body; width: 3px; height: parent.height - parent.body; background: Theme.accent; }
+                                            if self.keyboard-selected: Rectangle { x: 0px; y: parent.body; width: 3px; height: parent.height - parent.body; background: Theme.accent; }
                                             // The pointer area wraps the row, so hovering selectable text still counts.
-                                            // The last hovered or clicked message keeps its actions: the list takes
-                                            // the pointer when a press starts, which ends hover, so a hover-only bar
-                                            // would vanish before its button saw the click.
                                             row-pointer := TouchArea {
                                                 y: parent.top; height: parent.height - parent.top;
                                                 // The notice and dividers above the message aren't it: the pointer
                                                 // over them doesn't call up its bar.
-                                                property <bool> on-body: self.mouse-y >= parent.body - parent.top;
-                                                changed has-hover => { if self.has-hover && self.on-body { root.active-item = message.item; root.active-index = index; } }
-                                                clicked => { root.active-item = message.item; root.active-index = index; }
+                                                property <bool> on-body: self.mouse-y >= parent.body - parent.top && self.mouse-y < self.height - parent.tail;
+                                                function update-hover() {
+                                                    if self.has-hover && self.on-body { parent.hover-row(false); }
+                                                    else { timeline-hover.leave(parent.hovered-item, false); }
+                                                }
+                                                changed has-hover => { self.update-hover(); }
+                                                changed on-body => { self.update-hover(); }
+                                                moved => { self.update-hover(); }
                                                 // A right click opens the same menu as the hover bar's More button.
                                                 pointer-event(event) => {
-                                                    if event.kind == PointerEventKind.move && parent.head > 0px {
-                                                        if self.on-body {
-                                                            if root.active-item != message.item { root.active-item = message.item; root.active-index = index; }
-                                                        } else if root.active-item == message.item && !root.browsing && root.menu-item == "" && root.react-item == "" && root.confirm-delete == "" {
-                                                            root.active-item = "";
-                                                        }
-                                                    }
                                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.down
-                                                        && message.delivery == "" {
-                                                        root.active-item = message.item;
+                                                        && (message.delivery == "" || (self.on-body && message.can-cancel)) {
                                                         root.anchor(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0px, 0px, true);
                                                         root.open-menu(message);
                                                     }
@@ -3454,7 +3464,6 @@ export component YapfastWindow inherits Window {
                                                         open-thread(room) => { root.open-aside(room); }
                                                         react(item, key) => { root.react(item, key); }
                                                         retry(item) => { root.retry(item); }
-                                                        cancel-send(item) => { root.cancel-send(item); }
                                                         reveal-attachment(id, index) => { root.reveal-attachment(id, index); }
                                                         view-image(id, index) => { root.view-image(id, index); }
                                                         open-sticker(item, index, x, y, width, height) => {
@@ -3464,10 +3473,10 @@ export component YapfastWindow inherits Window {
                                                         save-attachment(id, index) => { root.save-attachment(id, index); }
                                                         // A right click on a picture opens the message's menu with it.
                                                         media-menu(id, index, video, x, y) => {
-                                                            if message.delivery == "" {
-                                                                root.active-item = message.item;
+                                                            if message.delivery == "" || message.can-cancel {
                                                                 root.anchor(x, y, 0px, 0px, true);
-                                                                root.open-message-menu(message, index, video);
+                                                                if message.delivery == "" { root.open-message-menu(message, index, video); }
+                                                                else { root.open-menu(message); }
                                                             }
                                                         }
                                                     }
@@ -3482,17 +3491,23 @@ export component YapfastWindow inherits Window {
                                             }
                                             // Actions, the reaction picker and delete confirmation float over the
                                             // row's top edge, so opening them never moves the timeline.
-                                            if (self.lit || root.react-item == message.item || root.menu-item == message.item || root.confirm-delete == message.item) && !message.deleted && message.delivery == "": message-bar := Rectangle {
+                                            if (self.lit || root.react-item == message.item || root.menu-item == message.item || root.confirm-delete == message.item) && !message.deleted && message.delivery == "": message-bar := TouchArea {
                                                 x: parent.width - self.width - 16px; y: parent.body + (index == 0 && parent.head == 0px ? 4px : -16px);
                                                 width: actions.preferred-width; height: actions.preferred-height;
-                                                background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
-                                                drop-shadow-blur: 10px; drop-shadow-color: #00000059; drop-shadow-offset-y: 2px;
+                                                Rectangle {
+                                                    background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 8px;
+                                                    drop-shadow-blur: 10px; drop-shadow-color: #00000059; drop-shadow-offset-y: 2px;
+                                                }
                                                 // Holding Shift swaps the frequent reactions for Pin, Create Thread
                                                 // and, on your own message, Reply, adds Forward, and swaps More for a
                                                 // Delete that doesn't ask, as in Discord's client; not while the
                                                 // picker or menu is open.
                                                 property <bool> quick: root.shift-held && root.react-item != message.item && root.menu-item != message.item;
                                                 property <bool> deletes: self.quick && message.can-delete && root.composer-enabled;
+                                                changed has-hover => {
+                                                    if self.has-hover { message-row.hover-row(true); }
+                                                    else { timeline-hover.leave(message-row.hovered-item, true); }
+                                                }
                                                 actions := HorizontalLayout {
                                                     padding: 3px; spacing: 0px;
                                                     if root.confirm-delete == message.item: HorizontalLayout {
@@ -3899,7 +3914,7 @@ export component YapfastWindow inherits Window {
                         toggle-spoiler(index) => { root.aside-toggle-spoiler(index); }
                         paste => { root.aside-paste(); }
                         emoji-font: root.emoji-font; message-font-size: root.message-font-size; bar-reactions: root.bar-reactions;
-                        active-item <=> root.active-item; react-item: root.react-item; menu-item: root.menu-item; confirm-delete: root.confirm-delete;
+                        room-id: root.aside-room; react-item: root.react-item; menu-item: root.menu-item; confirm-delete: root.confirm-delete;
                         shift-held: root.shift-held;
                         forward-allowed: root.forward-allowed;
                         pin-message(item) => { root.pin-message(item); }
@@ -3951,7 +3966,6 @@ export component YapfastWindow inherits Window {
                         open-link(link) => { root.open-link(link); }
                         open-thread(room) => { root.open-aside(room); }
                         retry(item) => { root.retry(item); }
-                        cancel-send(item) => { root.cancel-send(item); }
                         reveal-attachment(id, index) => { root.reveal-attachment(id, index); }
                         view-image(id, index) => { root.view-image(id, index); }
                         open-sticker(item, index, x, y, width, height) => {
@@ -4502,6 +4516,7 @@ export component YapfastWindow inherits Window {
     // never leaves its badge to hide the tooltip.
     profile-motion := PopupMotion {
         open: root.profile-open && !root.profile-large;
+        entrance: Popup.popover-enter;
         changed shown => { root.hide-badge-tips(); }
     }
     if profile-motion.shown: Rectangle {
@@ -4514,12 +4529,14 @@ export component YapfastWindow inherits Window {
             }
         }
         ProfileCard {
-            opacity: Popup.opacity(profile-motion.amount); transform-scale: Popup.scale(profile-motion.amount);
+            opacity: Looks.better-animations ? profile-motion.amount : 1;
+            transform-scale: Popup.popover-scale(profile-motion.amount);
             width: 300px; limit: root.height - root.title-height - 16px;
-            x: root.profile-at-pointer
+            property <length> anchor-side: root.profile-at-pointer
                 ? root.beside(root.profile-anchor-x, root.profile-anchor-width, self.width)
                 : root.width - ClientStyle.members-width - 8px - self.width;
-            y: max(root.title-height + 8px, min(root.height - self.height - 8px, (root.profile-at-pointer ? root.profile-anchor-y - 8px : root.profile-y - 16px))) + Popup.lift(profile-motion.amount);
+            x: self.anchor-side + (Looks.better-animations ? (1 - profile-motion.amount) * (root.profile-at-pointer && self.anchor-side > root.profile-anchor-x ? -8px : 8px) : 0px);
+            y: max(root.title-height + 8px, min(root.height - self.height - 8px, (root.profile-at-pointer ? root.profile-anchor-y - 8px : root.profile-y - 16px)));
             data: root.profile;
             enlarge => { root.enlarge-profile(); }
             close => { root.close-profile(); }
@@ -4729,6 +4746,7 @@ export component YapfastWindow inherits Window {
         open-link(url) => { root.open-link(url); }
         motion: profile-editor-motion.amount;
         prompt: root.profile-editor-prompt;
+        activities: root.profile-editor-activity;
         name <=> root.profile-editor-name; pronouns <=> root.profile-editor-pronouns;
         bio <=> root.profile-editor-bio; colour <=> root.profile-editor-colour;
         write(field, text) => { root.write-profile(field, text); }
@@ -5035,22 +5053,47 @@ export component YapfastWindow inherits Window {
         resize-window(direction) => { root.resize-window(direction); }
     }
     if Tip.text != "": tip-card := Rectangle {
-        property <length> w: tip-text.preferred-width + 20px;
+        property <length> w: self.server-tip ? min(tip-text.preferred-width + 20px, max(21px, root.width - Tip.x - 18px)) : tip-text.preferred-width + 20px;
         property <length> h: 32px;
         property <float> enter: Looks.better-animations ? 0 : 1;
         init => { self.enter = 1; }
-        animate enter { duration: Popup.tooltip-enter; easing: ease-out; }
-        property <length> base-x: Tip.side == 1 ? Tip.x + 10px : max(8px, min(root.width - self.w - 8px, Tip.x - self.w / 2));
-        property <length> base-y: Tip.side == 1 ? Tip.y - self.h / 2 : Tip.side == 0 ? max(4px, Tip.y - self.h - 6px) : Tip.y + 6px;
-        x: self.base-x + (Looks.better-animations ? (Tip.side == 1 ? (self.enter - 1.0) * 3px : 0px) : 0px);
-        y: self.base-y + (Looks.better-animations ? (Tip.side == 0 ? (1.0 - self.enter) * 3px : Tip.side == 2 ? (self.enter - 1.0) * 3px : 0px) : 0px);
+        property <bool> server-tip: Tip.side == 3;
+        property <bool> right: Tip.side == 1 || self.server-tip;
+        property <bool> settings-tip: Tip.side == 4;
+        property <bool> above: Tip.side == 0 || self.settings-tip;
+        property <string> anchor: self.server-tip || self.settings-tip
+            ? Tip.text + "|" + Tip.x / 1px + "|" + Tip.y / 1px + "|" + Tip.side : "";
+        property <bool> restarting;
+        changed anchor => {
+            if self.anchor != "" && Looks.better-animations {
+                self.restarting = true;
+                self.enter = 0;
+            }
+        }
+        Timer {
+            interval: 1ms;
+            running: tip-card.restarting;
+            triggered => { tip-card.restarting = false; tip-card.enter = 1; }
+        }
+        animate enter {
+            duration: self.restarting ? 0ms
+                : (self.server-tip || self.settings-tip ? Popup.anchor-tooltip-enter : Popup.tooltip-enter);
+            easing: ease-out;
+        }
+        property <length> base-x: self.right ? Tip.x + 10px : max(8px, min(root.width - self.w - 8px, Tip.x - self.w / 2));
+        property <length> base-y: self.right ? Tip.y - self.h / 2 : self.above ? max(4px, Tip.y - self.h - 6px) : Tip.y + 6px;
+        x: self.base-x + (Looks.better-animations && self.right ? (self.enter - 1.0) * (self.server-tip ? 9px : 3px) : 0px);
+        y: self.base-y + (Looks.better-animations ? (self.above ? (1.0 - self.enter) * (self.settings-tip ? 9px : 3px) : Tip.side == 2 ? (self.enter - 1.0) * 3px : 0px) : 0px);
         width: self.w; height: self.h;
         opacity: Looks.better-animations ? self.enter : 1.0;
-        transform-scale: Looks.better-animations ? (0.97 + 0.03 * self.enter) : 1.0;
+        transform-scale: Looks.better-animations && !self.server-tip && !self.settings-tip ? (0.97 + 0.03 * self.enter) : 1.0;
         transform-origin: { x: self.w / 2, y: self.h };
         border-radius: 6px; background: Theme.tooltip;
         drop-shadow-blur: 12px; drop-shadow-color: #00000080; drop-shadow-offset-y: 3px;
-        tip-text := Text { text: Tip.text; color: Theme.text; font-size: 14px; font-weight: 700; }
+        tip-text := Text {
+            x: 10px; width: parent.width - 20px; overflow: elide;
+            text: Tip.text; color: Theme.text; font-size: 14px; font-weight: 700;
+        }
     }
     if BadgeTip.title != "": BadgeTipCard {
         x: max(8px, min(root.width - self.width - 8px, BadgeTip.x - self.width / 2));

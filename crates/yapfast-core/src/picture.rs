@@ -25,6 +25,12 @@ pub(crate) struct RawPicture {
 }
 
 unsafe extern "C" {
+    fn yapfast_i420_pack(
+        picture: *const RawPicture,
+        out: *mut c_uchar,
+        width: c_int,
+        height: c_int,
+    );
     fn yapfast_i420_to_rgba(
         picture: *const RawPicture,
         scratch: *mut c_uchar,
@@ -48,6 +54,38 @@ pub struct I420<'a> {
 }
 
 impl<'a> I420<'a> {
+    pub(crate) fn packed_len(width: u32, height: u32) -> usize {
+        width as usize * height as usize
+            + 2 * width.div_ceil(2) as usize * height.div_ceil(2) as usize
+    }
+
+    pub(crate) fn from_packed(width: u32, height: u32, pixels: &'a [u8]) -> Self {
+        let (y, chroma) = pixels.split_at(width as usize * height as usize);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        Self {
+            width,
+            height,
+            y,
+            u,
+            v,
+            strides: [width, width.div_ceil(2), width.div_ceil(2)],
+        }
+    }
+
+    pub(crate) fn pack(&self, out: &mut [u8], width: u32, height: u32) {
+        self.check_planes();
+        assert_eq!(out.len(), Self::packed_len(width, height));
+        // SAFETY: the borrowed planes and destination hold the declared dimensions.
+        unsafe {
+            yapfast_i420_pack(
+                &self.raw(),
+                out.as_mut_ptr(),
+                width as c_int,
+                height as c_int,
+            )
+        }
+    }
+
     /// The planes `raw` points at, or none for an empty picture.
     ///
     /// # Safety
@@ -101,14 +139,7 @@ impl<'a> I420<'a> {
     /// once and keeps for the next picture.
     pub fn to_rgba(&self, scratch: &mut Vec<u8>, rgba: &mut [u8], width: u32, height: u32) {
         assert!(rgba.len() >= width as usize * height as usize * 4);
-        // libyuv reads each plane at its stride, trusting it to be there.
-        let (w, h) = (self.width as usize, self.height as usize);
-        let rows = [h, h.div_ceil(2), h.div_ceil(2)];
-        let widths = [w, w.div_ceil(2), w.div_ceil(2)];
-        for (index, plane) in [self.y, self.u, self.v].into_iter().enumerate() {
-            let stride = self.strides[index] as usize;
-            assert!(stride >= widths[index] && plane.len() >= stride * rows[index]);
-        }
+        self.check_planes();
         if (width, height) != (self.width, self.height) {
             let chroma = width.div_ceil(2) as usize * height.div_ceil(2) as usize;
             scratch.resize(width as usize * height as usize + 2 * chroma, 0);
@@ -125,6 +156,16 @@ impl<'a> I420<'a> {
                 width as c_int,
                 height as c_int,
             );
+        }
+    }
+
+    fn check_planes(&self) {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let rows = [h, h.div_ceil(2), h.div_ceil(2)];
+        let widths = [w, w.div_ceil(2), w.div_ceil(2)];
+        for (index, plane) in [self.y, self.u, self.v].into_iter().enumerate() {
+            let stride = self.strides[index] as usize;
+            assert!(stride >= widths[index] && plane.len() >= stride * rows[index]);
         }
     }
 }

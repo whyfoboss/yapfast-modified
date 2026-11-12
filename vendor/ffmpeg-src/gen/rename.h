@@ -1892,6 +1892,7 @@
 #define ff_hw_base_init_gop_structure yf_ff_hw_base_init_gop_structure
 #define ff_hwcontext_type_amf yf_ff_hwcontext_type_amf
 #define ff_hwcontext_type_cuda yf_ff_hwcontext_type_cuda
+#define ff_hwcontext_type_d3d11va yf_ff_hwcontext_type_d3d11va
 #define ff_hwcontext_type_vaapi yf_ff_hwcontext_type_vaapi
 #define ff_hwframe_map_create yf_ff_hwframe_map_create
 #define ff_hwframe_map_replace yf_ff_hwframe_map_replace

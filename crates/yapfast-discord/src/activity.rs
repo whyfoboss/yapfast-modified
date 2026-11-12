@@ -58,6 +58,22 @@ pub struct Activity {
 }
 
 impl Activity {
+    /// Eligibility of this account's imported presence. Other users retain all kinds.
+    pub fn eligible_for_own_presence(&self) -> bool {
+        if matches!(self.kind, Kind::Playing | Kind::Listening)
+            && (video_service(&self.name)
+                || browser_media_source(&self.name)
+                || self.url.as_deref().is_some_and(video_url))
+        {
+            return false;
+        }
+        match self.kind {
+            Kind::Watching => false,
+            Kind::Listening => music_integration(&self.name),
+            _ => true,
+        }
+    }
+
     /// The line Discord shows under a name for it, as for a member with no
     /// custom status, such as "Playing Factorio"; none for a Hang status.
     pub fn line(&self) -> Option<String> {
@@ -91,6 +107,103 @@ impl Activity {
             Kind::Hang => "Hanging out".into(),
         }
     }
+}
+
+fn video_service(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    [
+        "youtube",
+        "twitch",
+        "netflix",
+        "prime video",
+        "disney+",
+        "hulu",
+        "crunchyroll",
+        "vimeo",
+        "dailymotion",
+        "kick",
+        "tiktok",
+    ]
+    .iter()
+    .any(|service| {
+        name == *service
+            || name.strip_prefix(service).is_some_and(|suffix| {
+                matches!(suffix, " live" | " video" | " presence" | ".com" | ".tv")
+            })
+    })
+}
+
+pub(crate) fn video_url(address: &str) -> bool {
+    let Ok(url) = url::Url::parse(address) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host == "music.youtube.com" {
+        return false;
+    }
+    [
+        "youtube.com",
+        "youtu.be",
+        "twitch.tv",
+        "netflix.com",
+        "vimeo.com",
+        "dailymotion.com",
+        "disneyplus.com",
+        "primevideo.com",
+        "hulu.com",
+        "crunchyroll.com",
+        "kick.com",
+        "tiktok.com",
+    ]
+    .iter()
+    .any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|sub| sub.ends_with('.'))
+    })
+}
+
+pub fn music_integration(name: &str) -> bool {
+    [
+        "SoundCloud",
+        "Spotify",
+        "Apple Music",
+        "Cider",
+        "TIDAL",
+        "foobar2000",
+        "MusicBee",
+        "Deezer",
+    ]
+    .iter()
+    .any(|music| name.eq_ignore_ascii_case(music))
+}
+
+pub fn browser_media_source(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if matches!(name.as_str(), "arc" | "arc.exe" | "zen" | "zen.exe") {
+        return true;
+    }
+    [
+        "chrome",
+        "chromium",
+        "edge",
+        "msedge",
+        "firefox",
+        "brave",
+        "vivaldi",
+        "opera",
+        "waterfox",
+        "librewolf",
+        "browser",
+    ]
+    .iter()
+    .any(|browser| {
+        name.split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|part| part == *browser)
+    })
 }
 
 /// How the one line under a name shows an activity, as Discord's member list
@@ -155,7 +268,7 @@ pub fn activities(activities: &Value) -> Activities {
         .collect()
 }
 
-fn activity(activity: &Value) -> Option<Activity> {
+pub(crate) fn activity(activity: &Value) -> Option<Activity> {
     let kind = match activity["type"].as_u64()? {
         0 => Kind::Playing,
         1 => Kind::Streaming,

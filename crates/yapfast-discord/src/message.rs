@@ -315,6 +315,8 @@ impl Reply {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
+    #[serde(default)]
+    pub voice_ms: Option<u32>,
     pub name: String,
     pub size: Option<u64>,
     pub url: Arc<str>,
@@ -646,6 +648,14 @@ pub fn parse(value: &Value) -> Option<Message> {
             let url: Arc<str> = attachment["url"].as_str()?.into();
             let name = attachment["filename"].as_str()?;
             Some(Attachment {
+                voice_ms: (shown["flags"].as_u64().unwrap_or(0) & (1 << 13) != 0
+                    && kind.starts_with("audio/"))
+                .then(|| {
+                    attachment["duration_secs"]
+                        .as_f64()
+                        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                        .map_or(0, |seconds| (seconds * 1000.0) as u32)
+                }),
                 name: name.into(),
                 size: attachment["size"].as_u64(),
                 image,
@@ -718,6 +728,7 @@ pub fn parse(value: &Value) -> Option<Message> {
         let format = sticker["format_type"].as_u64().unwrap_or(STICKER_PNG);
         let url = ready::sticker(id, format);
         attachments.push(Attachment {
+            voice_ms: None,
             name: name.into(),
             size: None,
             url: url.as_str().into(),
@@ -2038,6 +2049,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn voice_messages_are_distinct_from_ogg_files() {
+        let mut message = json!({"id":"1","channel_id":"2","type":0,"content":"",
+            "author":{"id":"3","username":"sender"},"flags":8192,
+            "attachments":[{"id":"4","filename":"voice-message.ogg","url":"https://example.invalid/voice.ogg","content_type":"audio/ogg","duration_secs":0.65}]});
+        assert_eq!(parse(&message).unwrap().attachments[0].voice_ms, Some(650));
+        message["flags"] = json!(0);
+        assert_eq!(parse(&message).unwrap().attachments[0].voice_ms, None);
+    }
 
     #[test]
     fn a_pin_notice_links_to_the_message_pinned() {

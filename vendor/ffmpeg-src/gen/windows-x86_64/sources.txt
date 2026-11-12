@@ -133,6 +133,7 @@ libavutil/hmac.c
 libavutil/hwcontext_amf.c
 libavutil/hwcontext.c
 libavutil/hwcontext_cuda.c
+libavutil/hwcontext_d3d11va.c
 libavutil/hwcontext_stub.c
 libavutil/iamf.c
 libavutil/imgutils.c

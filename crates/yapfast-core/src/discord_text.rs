@@ -317,20 +317,37 @@ impl Chat {
             .channels
             .shown_mut(&video.room)
             .and_then(|channel| channel.attachment(&video.item, index))
-            .and_then(|attachment| Some((attachment.video_url.clone()?, attachment.size)));
-        let Some((url, size)) = found else {
+            .and_then(|attachment| {
+                let url = if attachment.voice_ms.is_some() {
+                    attachment.url.to_string()
+                } else {
+                    attachment.video_url.clone()?
+                };
+                Some((url, attachment.size, attachment.voice_ms))
+            });
+        let Some((url, size, voice_ms)) = found else {
             video.loading = false;
             video.error = Some("This video is no longer available.".into());
             let _ = events.send(Event::Video(Some(video)));
             return;
         };
+        let frame = if let Some(duration) = voice_ms {
+            video.duration_ms = (duration > 0).then_some(u64::from(duration));
+            video.size = Some((0, 0));
+            (0, 0)
+        } else {
+            frame
+        };
         let directory = yapfast_discord::cache::videos()
             .unwrap_or_else(|| std::env::temp_dir().join("yapfast-videos"));
         let discord = self.discord.clone();
+        let limit = if voice_ms.is_some() {
+            32 * 1024 * 1024
+        } else {
+            MAX_VIDEO_BYTES
+        };
         let download = move |mut file: std::fs::File| async move {
-            discord
-                .download_into(&url, &mut file, MAX_VIDEO_BYTES)
-                .await
+            discord.download_into(&url, &mut file, limit).await
         };
         match crate::playback::Playback::start(
             video.clone(),
@@ -413,7 +430,15 @@ impl Chat {
             Wake::Video(wake) => {
                 if let Some(playback) = &mut self.video {
                     playback.handle(wake);
+                    let done = playback.video.size == Some((0, 0))
+                        && (playback.video.ended || playback.video.error.is_some());
+                    if done {
+                        playback.video.frames = None;
+                    }
                     let _ = events.send(Event::Video(Some(playback.video.clone())));
+                    if done {
+                        self.video = None;
+                    }
                 }
             }
             Wake::Snapshot(None) | Wake::Live(None) => {}

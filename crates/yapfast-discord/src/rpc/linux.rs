@@ -170,6 +170,7 @@ async fn serve(
     let mut connected = HashSet::new();
     let mut next = 0_u64;
     let mut active = Vec::<(u64, Arc<Value>)>::new();
+    let mut disabled = crate::game_detection::custom_games::subscribe_disabled();
     loop {
         let removed = tokio::select! {
             biased;
@@ -197,26 +198,40 @@ async fn serve(
                 });
                 continue;
             }
-            Some((id, value)) = incoming.recv() => {
+            Some((id, value, artwork_only)) = incoming.recv() => {
                 // A client may finish between polling this queue and polling
                 // JoinSet. Its queued final update must not resurrect a game.
                 if !connected.contains(&id) {
                     continue;
                 }
-                active.retain(|(other, _)| *other != id);
-                if let Some(value) = value {
-                    active.push((id, value));
+                if artwork_only {
+                    if let Some((_, shown)) = active.iter_mut().find(|(other, _)| *other == id)
+                        && let Some(value) = value
+                    {
+                        *shown = value;
+                    }
+                } else {
+                    active.retain(|(other, _)| *other != id);
+                    if let Some(value) = value {
+                        active.push((id, value));
+                    }
                 }
                 None
             }
             Some(done) = clients.join_next(), if !clients.is_empty() => done.ok(),
+            _ = disabled.changed() => None,
         };
         if let Some(id) = removed {
             connected.remove(&id);
             active.retain(|(other, _)| *other != id);
         }
         activity.send_if_modified(|shown| {
-            let next = active.last().map(|(_, value)| value);
+            let disabled = disabled.borrow_and_update();
+            let next = active.iter().rev().find_map(|(_, value)| {
+                let name = value["name"].as_str()?;
+                (!crate::game_detection::custom_games::is_disabled(&disabled, name))
+                    .then_some(value)
+            });
             if shown.as_ref() == next {
                 false
             } else {

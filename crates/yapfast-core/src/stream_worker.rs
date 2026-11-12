@@ -581,8 +581,21 @@ impl Sink {
             Some(smaller) => smaller,
             None => &mut *picture,
         };
-        self.writer
-            .write(preview.0, preview.1, |pixels| to_rgba(shown, pixels));
+        let strides = shown.strides();
+        let (y, u, v) = shown.data();
+        self.writer.write_video(
+            crate::picture::I420 {
+                width: preview.0,
+                height: preview.1,
+                y,
+                u,
+                v,
+                strides: [strides.0, strides.1, strides.2],
+            },
+            preview.0,
+            preview.1,
+            &mut Vec::new(),
+        );
         if self.preview_due.is_some_and(|due| due <= Instant::now()) && !is_black(shown) {
             match thumbnail(shown) {
                 Ok(thumbnail) => self.thumbnail = Some(thumbnail),
@@ -834,12 +847,21 @@ fn watch(
         .ok()
     });
     let mut decoder: Option<Decoder> = None;
+    let mut waiting = true;
     // A frame that doesn't fit scales through this, a picture of the size
     // shown; one that does goes straight into the shared frame.
     let mut scratch = vec![];
     let mut shown = false;
     let mut failures = 0u64;
+    let started = Instant::now();
+    let mut measured = started;
+    let (mut input, mut published) = (0u64, 0u64);
     while !stop.load(Ordering::Relaxed) {
+        if measured.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(target: "yapfast_stream", elapsed_ms = started.elapsed().as_millis() as u64,
+                input, published, failures, waiting, "stream decoder");
+            measured = Instant::now();
+        }
         while let Ok(control) = sound.controls.try_recv() {
             match control {
                 Control::Hear(hearing) => sound.hearing.store(hearing, Ordering::Relaxed),
@@ -853,16 +875,18 @@ fn watch(
         let Some(frame) = receiver.next(Duration::from_millis(100)) else {
             continue;
         };
-        if decoder
+        let codec_changed = decoder
             .as_ref()
-            .is_none_or(|decoder| decoder.codec() != frame.codec)
-        {
+            .is_none_or(|decoder| decoder.codec() != frame.codec);
+        if (waiting || codec_changed) && !frame.keyframe {
+            continue;
+        }
+        if codec_changed {
             decoder = Some(Decoder::new(frame.codec)?);
         }
-        let Some(decoder) = decoder.as_mut() else {
-            continue;
-        };
-        let picture = match decoder.decode(&frame.data) {
+        waiting = false;
+        input += 1;
+        let picture = match decoder.as_mut().unwrap().decode(&frame.data) {
             Ok(Some(picture)) => picture,
             Ok(None) => continue,
             Err(error) => {
@@ -877,24 +901,27 @@ fn watch(
                         "a stream frame didn't decode"
                     );
                 }
+                // Keep codec headers already learned by the decoder.
+                waiting = true;
                 receiver.request_keyframe();
                 continue;
             }
         };
         let (width, height) = (picture.width, picture.height);
         if writer.fits(width, height) && width <= max_width && height <= max_height {
-            writer.write(width, height, |pixels| picture.to_rgba(pixels));
+            writer.write_video(picture.i420(), width, height, &mut scratch);
         } else {
             let (width, height) = fit(width, height, max_width, max_height);
-            writer.write(width, height, |pixels| {
-                picture.i420().to_rgba(&mut scratch, pixels, width, height)
-            });
+            writer.write_video(picture.i420(), width, height, &mut scratch);
         }
         if !shown {
             shown = true;
             tracing::info!(width, height, codec = ?frame.codec, "showing the stream");
             report(Report::Streaming);
+            tracing::info!(target: "yapfast_stream", elapsed_ms = started.elapsed().as_millis() as u64,
+                width, height, codec = ?frame.codec, "stream first frame");
         }
+        published += 1;
     }
     Ok(())
 }
@@ -1158,20 +1185,26 @@ impl Capture {
             };
             Some(found.context("That screen or window is gone.")?)
         };
+        let mut converted: Option<I420Buffer> = None;
         capturer.start_capture(source, move |result| {
             let mut seen = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             match result {
                 Ok(frame) => {
-                    let mut picture = picture_of(&frame);
-                    let (width, height) = (picture.width(), picture.height());
-                    let size = fit(width, height, max_width, max_height);
-                    if size != (width, height) {
-                        picture = picture.scale(size.0 as i32, size.1 as i32);
+                    let (width, height) = desktop_size(&frame);
+                    if converted.as_ref().is_none_or(|picture| {
+                        (picture.width(), picture.height()) != (width, height)
+                    }) {
+                        converted = Some(I420Buffer::new(width, height));
                     }
+                    let picture = converted.as_mut().expect("created above");
+                    convert_desktop(&frame, picture);
+                    let size = fit(width, height, max_width, max_height);
+                    let mut scaled = (size != (width, height))
+                        .then(|| picture.scale(size.0 as i32, size.1 as i32));
                     let taken = into
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .frame(&mut picture);
+                        .frame(scaled.as_mut().unwrap_or(picture));
                     match taken {
                         Ok(()) => seen.size = Some(size),
                         Err(error) => seen.failed = Some(format!("{error:#}")),
@@ -1284,8 +1317,21 @@ fn copy_planes(frame: &crate::picture::I420<'_>, picture: &mut I420Buffer) {
 
 /// A captured frame as an I420 picture of its size.
 fn picture_of(frame: &livekit::webrtc::desktop_capturer::DesktopFrame) -> I420Buffer {
-    let (width, height) = (frame.width().max(1) as u32, frame.height().max(1) as u32);
+    let (width, height) = desktop_size(frame);
     let mut picture = I420Buffer::new(width, height);
+    convert_desktop(frame, &mut picture);
+    picture
+}
+
+fn desktop_size(frame: &livekit::webrtc::desktop_capturer::DesktopFrame) -> (u32, u32) {
+    (frame.width().max(1) as u32, frame.height().max(1) as u32)
+}
+
+fn convert_desktop(
+    frame: &livekit::webrtc::desktop_capturer::DesktopFrame,
+    picture: &mut I420Buffer,
+) {
+    let (width, height) = (picture.width(), picture.height());
     let (y_stride, u_stride, v_stride) = picture.strides();
     let (y, u, v) = picture.data_mut();
     // libyuv's ARGB is B, G, R, A in memory, as the capturer's frames are.
@@ -1301,7 +1347,6 @@ fn picture_of(frame: &livekit::webrtc::desktop_capturer::DesktopFrame) -> I420Bu
         width as i32,
         height as i32,
     );
-    picture
 }
 
 /// How long [`glance`] waits for a picture of a screen that isn't black,
@@ -1425,7 +1470,7 @@ impl Worker {
         quality: StreamQuality,
     ) -> Result<(Self, Frames, mpsc::UnboundedReceiver<Report>)> {
         let source = picked(source);
-        let frames = Frames::create(PREVIEW_WIDTH, PREVIEW_HEIGHT)?;
+        let frames = Frames::create_i420(PREVIEW_WIDTH, PREVIEW_HEIGHT)?;
         let (width, height) = bounds(quality.resolution);
         let job = Job::Share {
             source,
@@ -1467,7 +1512,7 @@ impl Worker {
         deafened: bool,
         volume: f32,
     ) -> Result<(Self, Frames, mpsc::UnboundedReceiver<Report>)> {
-        let frames = Frames::create(WATCH_WIDTH, WATCH_HEIGHT)?;
+        let frames = Frames::create_i420(WATCH_WIDTH, WATCH_HEIGHT)?;
         let job = Job::Watch {
             server: server.clone(),
             frames: frames.path().context("the video frames file has no name")?,
@@ -1491,7 +1536,11 @@ impl Worker {
         speakers: Option<String>,
         volume: f32,
     ) -> Result<(Self, Frames, mpsc::UnboundedReceiver<Report>)> {
-        let frames = Frames::create(WATCH_WIDTH, WATCH_HEIGHT)?;
+        let frames = if (width, height) == (0, 0) {
+            Frames::create(2, 2)?
+        } else {
+            Frames::create(WATCH_WIDTH, WATCH_HEIGHT)?
+        };
         let job = Job::Play {
             file,
             size,

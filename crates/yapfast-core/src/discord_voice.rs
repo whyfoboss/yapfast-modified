@@ -100,11 +100,17 @@ impl Share {
         if let Some(preview) = &self.preview {
             preview.abort();
         }
+        drop(self.worker);
         if let Some(key) = &self.key {
             discord.end_stream(key);
         }
-        drop(self.worker);
         state.sharing = None;
+    }
+}
+
+fn clear_stopped_share_error(state: &mut State) {
+    if state.error.as_deref().is_some_and(|error| error.starts_with("Lost the stream connection:")) {
+        state.error = None;
     }
 }
 
@@ -717,6 +723,7 @@ pub(crate) async fn call(
                                 stopped.stop(discord, state);
                             }
                             starting = None;
+                            clear_stopped_share_error(state);
                         }
                         Some(Command::Watch(user)) => {
                             let is_watching = watches.iter().any(|w| w.user == user);
@@ -739,7 +746,7 @@ pub(crate) async fn call(
                                         stopped.stop(discord, state);
                                     }
                                     state.error = None;
-                                    tracing::info!("[STREAM-DIAG] Watch request created for: {}", user);
+                                    tracing::info!(target: "yapfast_stream", "watch requested");
                                     let watch = Watch::start(discord, guild, &channel, &user, state);
                                     focused_stream = Some(user.clone());
                                     watches.push(watch);
@@ -755,7 +762,7 @@ pub(crate) async fn call(
                             if user != me && !is_watching {
                                 if watches.len() < MAX_STREAMS {
                                     state.error = None;
-                                    tracing::info!("[STREAM-DIAG] Watch request created for: {}", user);
+                                    tracing::info!(target: "yapfast_stream", "watch requested");
                                     let watch = Watch::start(discord, guild, &channel, &user, state);
                                     if focused_stream.is_none() {
                                         focused_stream = watches.first().map(|w| w.user.clone()).or(Some(user.clone()));
