@@ -172,7 +172,7 @@ async fn run(
         // channel on another voice server, which Discord names just after.
         // The call waits a while for the move before it ends.
         if let Ended::Dropped(error) = &ended
-            && closed(error) == Some(4014)
+            && matches!(closed(error), Some(4014 | 4022))
         {
             listener.disconnected(&format!("{error:#}"));
             ended = media.wait_for_move(&connection, &mut orders).await;

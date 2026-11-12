@@ -221,18 +221,6 @@ struct Watch {
 const MAX_STREAMS: usize = 4;
 
 impl Watch {
-    /// Plays the stream's sound unless the call is deafened.
-    fn hear(&mut self, hearing: bool) {
-        if let Some((worker, _)) = self.worker.as_mut()
-            && let Err(error) = worker.hear(hearing)
-        {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "could not tell the stream worker"
-            );
-        }
-    }
-
     /// Plays the stream's sound at the volume chosen for it, times the
     /// speakers'.
     fn volume(&mut self) {
@@ -279,9 +267,8 @@ impl Watch {
     fn open(&mut self, server: &StreamServer, state: &mut State) -> Result<()> {
         self.opening = None;
         let volume = crate::volume::heard(crate::volume::Kind::Stream, &self.user);
-        let deafened = state.deafened;
         let (worker, frames, reports) =
-            Worker::watch(server, state.speaker.clone(), deafened, volume)?;
+            Worker::watch(server, state.speaker.clone(), false, volume)?;
         self.worker = Some((worker, reports));
         if let Some(shown) = state.watching.iter_mut().find(|w| w.user == self.user) {
             shown.frames = Some(Arc::new(frames));
@@ -620,9 +607,6 @@ pub(crate) async fn call(
                             if state.deafened {
                                 state.deafened = false;
                                 hearing.set_deafened(false);
-                                for w in &mut watches {
-                                    w.hear(true);
-                                }
                             }
                             match open_discord_microphone(state, &reverse, &microphone, &track, &microphone_thread) {
                                 Ok(opened) => {
@@ -643,9 +627,6 @@ pub(crate) async fn call(
                             }
                             state.deafened = deafened;
                             hearing.set_deafened(deafened);
-                            for w in &mut watches {
-                                w.hear(!deafened);
-                            }
                         }
                         Some(Command::Devices) => { let _ = devices(state); }
                         Some(Command::Microphone(id)) => {
