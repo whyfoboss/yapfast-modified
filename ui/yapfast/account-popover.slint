@@ -1,0 +1,109 @@
+import { ScrollView } from "../scrollview.slint";
+import { Theme, Middle, Popup, Looks } from "../theme.slint";
+import { MenuItem } from "../controls.slint";
+import { ProfileData } from "../people.slint";
+import { StatusDot } from "../rail.slint";
+import { StatusOption } from "../dialogs.slint";
+
+// Compact action menu opened from the user panel at the bottom left.
+export component AccountPopover inherits Rectangle {
+    in property <string> name;
+    in property <string> initial;
+    in property <color> tint;
+    in property <image> picture;
+    in property <string> user-id;
+    in property <string> status;
+    in property <string> custom-text;
+    in property <string> custom-emoji;
+    in property <bool> has-custom-status;
+    in property <string> game-name;
+    in property <string> game-duration;
+    /// The account's own profile; its id is empty until it has come.
+    in property <ProfileData> profile;
+    property <bool> themed: root.profile.has-theme;
+    /// Opened, so the profile can be asked for.
+    callback opened;
+    callback open-link(string);
+    init => { root.opened(); self.enter-amount = 1; }
+    in-out property <bool> expanded;
+    in property <length> available-height: 100000px;
+    callback choose(string);
+    callback custom-status;
+    callback edit-profile;
+    callback settings;
+    callback copy-id;
+    callback game-duration-due;
+    property <float> enter-amount: Looks.better-animations ? 0 : 1;
+    animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
+    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
+    property <string> presence-label: root.status == "idle" ? "Idle" : root.status == "dnd" ? "Do Not Disturb" : root.status == "invisible" ? "Invisible" : "Online";
+    background: root.themed
+        ? @linear-gradient(180deg, root.profile.theme-primary.mix(#000000, 0.4) 0%, root.profile.theme-secondary.mix(#000000, 0.4) 100%)
+        : Theme.panel;
+    border-radius: 8px;
+    border-width: 1px; border-color: root.themed ? root.profile.theme-primary : Theme.line;
+    drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
+    accessible-role: groupbox; accessible-label: "Account";
+    clip: true;
+    height: min(root.available-height, content.preferred-height);
+    ScrollView {
+        width: 100%;
+        height: 100%;
+        content-height: content.preferred-height;
+        content := VerticalLayout {
+            padding: 8px; spacing: 8px;
+            Rectangle {
+                background: Theme.raised; border-radius: 8px;
+                VerticalLayout {
+                    padding: 6px; spacing: 2px;
+                    MenuItem { height: 40px; text: "Edit Profile"; icon: @image-url("../icons/pencil.svg"); clicked => { root.edit-profile(); } }
+                    Rectangle { height: 1px; background: Theme.line; }
+                    Rectangle {
+                        height: 40px; border-radius: 4px;
+                        background: status-touch.has-hover ? Theme.active : transparent;
+                        border-width: status-focus.has-focus ? 2px : 0px; border-color: Theme.accent;
+                        accessible-role: button; accessible-label: "Change status"; accessible-description: root.presence-label;
+                        accessible-expanded: root.expanded;
+                        accessible-action-default => { root.expanded = !root.expanded; }
+                        forward-focus: status-focus;
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px; spacing: 8px;
+                            Middle { StatusDot { presence: root.status == "invisible" ? "offline" : root.status; ring: Theme.raised; } }
+                            Text { text: root.presence-label; color: Theme.secondary; font-size: 15px; vertical-alignment: center; horizontal-stretch: 1; }
+                            Image { source: root.expanded ? @image-url("../icons/chevron-down.svg") : @image-url("../icons/chevron-right.svg"); width: 16px; image-fit: contain; colorize: Theme.muted; }
+                        }
+                        status-focus := FocusScope {
+                            key-pressed(event) => {
+                                if event.text == " " || event.text == "\n" { root.expanded = !root.expanded; return accept; }
+                                return reject;
+                            }
+                            status-touch := TouchArea { mouse-cursor: pointer; clicked => { root.expanded = !root.expanded; } }
+                        }
+                    }
+                    if root.expanded: VerticalLayout {
+                        spacing: 2px;
+                        for option in [
+                            { key: "online", name: "Online", note: "" },
+                            { key: "idle", name: "Idle", note: "" },
+                            { key: "dnd", name: "Do Not Disturb", note: "You won't get message notifications." },
+                            { key: "invisible", name: "Invisible", note: "You'll appear offline." },
+                        ]: StatusOption {
+                            key: option.key; name: option.name; note: option.note; checked: root.status == option.key;
+                            clicked => { root.choose(option.key); }
+                        }
+                    }
+                    Rectangle { height: 1px; background: Theme.line; }
+                    MenuItem { height: 40px; text: root.has-custom-status ? "Change custom status" : "Set a custom status"; icon: @image-url("../icons/smile-plus.svg"); clicked => { root.custom-status(); } }
+                }
+            }
+            Rectangle {
+                background: Theme.raised; border-radius: 8px;
+                VerticalLayout {
+                    padding: 6px; spacing: 2px;
+                    if root.user-id != "": MenuItem { height: 40px; text: "Copy User ID"; icon: @image-url("../icons/copy.svg"); clicked => { root.copy-id(); } }
+                    MenuItem { height: 40px; text: "User Settings"; icon: @image-url("../icons/settings.svg"); clicked => { root.settings(); } }
+                }
+            }
+        }
+    }
+}

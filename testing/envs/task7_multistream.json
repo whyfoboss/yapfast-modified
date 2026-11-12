@@ -1,0 +1,98 @@
+{
+  "me": {
+    "username": "alice",
+    "name": "Alice",
+    "avatar": "task7_multistream/alice.png",
+    "email": "alice@example.org",
+    "status": "online",
+    "customStatus": { "text": "Testing Task 7 Multi-Stream", "emoji": "🎬" }
+  },
+  "people": [
+    {
+      "key": "bob",
+      "name": "Bob",
+      "avatar": "task7_multistream/bob.png",
+      "relationship": "friend",
+      "status": "online",
+      "playing": "Stream 1: Crimson",
+      "bio": "Streaming video source 1 (Red/Yellow)",
+      "pronouns": "he/him"
+    },
+    {
+      "key": "carol",
+      "name": "Carol",
+      "avatar": "task7_multistream/carol.png",
+      "relationship": "friend",
+      "status": "online",
+      "playing": "Stream 2: Azure",
+      "bio": "Streaming video source 2 (Blue/Cyan)",
+      "pronouns": "she/her"
+    },
+    {
+      "key": "dave",
+      "name": "Dave",
+      "avatar": "task7_multistream/dave.png",
+      "relationship": "friend",
+      "status": "online",
+      "playing": "Stream 3: Emerald",
+      "bio": "Streaming video source 3 (Green/Lime)",
+      "pronouns": "he/him"
+    },
+    {
+      "key": "eve",
+      "name": "Eve",
+      "avatar": "task7_multistream/eve.png",
+      "relationship": "friend",
+      "status": "online",
+      "playing": "Stream 4: Amethyst",
+      "bio": "Streaming video source 4 (Purple/Pink)",
+      "pronouns": "she/her"
+    }
+  ],
+  "servers": [
+    {
+      "name": "Stream Lab",
+      "icon": "task7_multistream/server.png",
+      "owner": "me",
+      "roles": [
+        { "name": "Streamers", "color": "#e91e63", "hoist": true, "mentionable": true },
+        { "name": "Viewers", "color": "#00e5ff", "hoist": true }
+      ],
+      "members": [
+        { "who": "me", "roles": ["Viewers"] },
+        { "who": "bob", "roles": ["Streamers"] },
+        { "who": "carol", "roles": ["Streamers"] },
+        { "who": "dave", "roles": ["Streamers"] },
+        { "who": "eve", "roles": ["Streamers"] }
+      ],
+      "categories": [
+        {
+          "name": "Chat & Streams",
+          "channels": [
+            {
+              "name": "general",
+              "topic": "Welcome to TASK 7 Multi-Stream Test Environment!",
+              "messages": [
+                { "from": "bob", "text": "Stream 1 is live! 🔴 Check out the red feed." },
+                { "from": "carol", "text": "Stream 2 active! 🔵 Blue feed on air." },
+                { "from": "dave", "text": "Stream 3 broadcasting! 🟢 Green feed rolling." },
+                { "from": "eve", "text": "Stream 4 running! 🟣 Purple feed up." },
+                { "from": "me", "text": "All four streams online. Testing Focus Mode & Grid Mode!" }
+              ]
+            },
+            {
+              "type": "voice",
+              "name": "Stream Stage",
+              "people": [
+                { "who": "bob", "stream": "task7_multistream/stream1-bob.mp4" },
+                { "who": "carol", "stream": "task7_multistream/stream2-carol.mp4" },
+                { "who": "dave", "stream": "task7_multistream/stream3-dave.mp4" },
+                { "who": "eve", "stream": "task7_multistream/stream4-eve.mp4" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
