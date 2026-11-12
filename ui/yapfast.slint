@@ -2462,6 +2462,13 @@ export component YapfastWindow inherits Window {
         y: self.top - self.lift;
         close-policy: PopupClosePolicy.close-on-click-outside;
         volume-content := VolumeMenu {
+            property <float> enter-amount: Looks.better-animations ? 0 : 1;
+            init => { self.enter-amount = 1; }
+            animate enter-amount { duration: Looks.better-animations ? 240ms : 0ms; easing: ease-out; }
+            opacity: self.enter-amount;
+            transform-scale: 0.88 + 0.12 * self.enter-amount;
+            transform-rotation: (1 - self.enter-amount) * -5deg;
+            transform-origin: { x: 0px, y: 0px };
             visible: root.voice-menu-volume;
             x: voice-menu.flip ? voice-menu-content.content-width - voice-menu.menu-width : 0px;
             y: voice-menu.lift;
@@ -2581,6 +2588,8 @@ export component YapfastWindow inherits Window {
                         clip: true;
                         sidebar-canvas := VerticalLayout {
                             x: root.nav-motion-direction == 1 ? root.nav-transition-x : 0px;
+                            transform-rotation: root.nav-motion-direction == 1 ? root.nav-transition-x / 1px * 0.12deg : 0deg;
+                            transform-origin: { x: 0px, y: 0px };
                             width: parent.width;
                             height: parent.height;
                             opacity: root.nav-motion-direction == 1 ? root.nav-transition-opacity : 1.0;

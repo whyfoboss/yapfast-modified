@@ -221,7 +221,7 @@ struct Watch {
 const MAX_STREAMS: usize = 4;
 
 impl Watch {
-    /// Plays the stream's sound, or not, as being deafened or focus changes.
+    /// Plays the stream's sound unless the call is deafened.
     fn hear(&mut self, hearing: bool) {
         if let Some((worker, _)) = self.worker.as_mut()
             && let Err(error) = worker.hear(hearing)
@@ -276,10 +276,10 @@ impl Watch {
 
     /// Shows the stream from `server`, in place of a worker showing it from
     /// the server it was on before.
-    fn open(&mut self, server: &StreamServer, state: &mut State, audible: bool) -> Result<()> {
+    fn open(&mut self, server: &StreamServer, state: &mut State) -> Result<()> {
         self.opening = None;
         let volume = crate::volume::heard(crate::volume::Kind::Stream, &self.user);
-        let deafened = state.deafened || !audible;
+        let deafened = state.deafened;
         let (worker, frames, reports) =
             Worker::watch(server, state.speaker.clone(), deafened, volume)?;
         self.worker = Some((worker, reports));
@@ -621,8 +621,7 @@ pub(crate) async fn call(
                                 state.deafened = false;
                                 hearing.set_deafened(false);
                                 for w in &mut watches {
-                                    let aud = focused_stream.as_deref() == Some(&w.user);
-                                    w.hear(aud);
+                                    w.hear(true);
                                 }
                             }
                             match open_discord_microphone(state, &reverse, &microphone, &track, &microphone_thread) {
@@ -645,8 +644,7 @@ pub(crate) async fn call(
                             state.deafened = deafened;
                             hearing.set_deafened(deafened);
                             for w in &mut watches {
-                                let aud = !deafened && focused_stream.as_deref() == Some(&w.user);
-                                w.hear(aud);
+                                w.hear(!deafened);
                             }
                         }
                         Some(Command::Devices) => { let _ = devices(state); }
@@ -730,10 +728,6 @@ pub(crate) async fn call(
                             if user != me {
                                 if is_watching {
                                     focused_stream = Some(user.clone());
-                                    for w in &mut watches {
-                                        let aud = focused_stream.as_deref() == Some(&w.user);
-                                        w.hear(!state.deafened && aud);
-                                    }
                                 } else {
                                     // Replace the currently focused watched stream
                                     if let Some(focused) = focused_stream.take() {
@@ -750,10 +744,6 @@ pub(crate) async fn call(
                                     let watch = Watch::start(discord, guild, &channel, &user, state);
                                     focused_stream = Some(user.clone());
                                     watches.push(watch);
-                                    for w in &mut watches {
-                                        let aud = focused_stream.as_deref() == Some(&w.user);
-                                        w.hear(!state.deafened && aud);
-                                    }
                                 }
                             }
                         }
@@ -768,10 +758,6 @@ pub(crate) async fn call(
                                         focused_stream = watches.first().map(|w| w.user.clone()).or(Some(user.clone()));
                                     }
                                     watches.push(watch);
-                                    for w in &mut watches {
-                                        let aud = focused_stream.as_deref() == Some(&w.user);
-                                        w.hear(!state.deafened && aud);
-                                    }
                                 } else {
                                     tracing::warn!(user, "maximum of 4 simultaneous streams reached");
                                 }
@@ -785,10 +771,6 @@ pub(crate) async fn call(
                                         stopped.stop(discord, state);
                                         if focused_stream.as_deref() == Some(&user) {
                                             focused_stream = watches.first().map(|w| w.user.clone());
-                                            for w in &mut watches {
-                                                let aud = focused_stream.as_deref() == Some(&w.user);
-                                                w.hear(!state.deafened && aud);
-                                            }
                                         }
                                     }
                                 }
@@ -798,10 +780,6 @@ pub(crate) async fn call(
                                             let stopped = watches.remove(pos);
                                             stopped.stop(discord, state);
                                             focused_stream = watches.first().map(|w| w.user.clone());
-                                            for w in &mut watches {
-                                                let aud = focused_stream.as_deref() == Some(&w.user);
-                                                w.hear(!state.deafened && aud);
-                                            }
                                         }
                                     } else if !watches.is_empty() {
                                         let stopped = watches.remove(0);
@@ -812,10 +790,6 @@ pub(crate) async fn call(
                         }
                         Some(Command::FocusStream(target)) => {
                             focused_stream = target;
-                            for w in &mut watches {
-                                let aud = focused_stream.as_deref() == Some(&w.user);
-                                w.hear(!state.deafened && aud);
-                            }
                         }
                         // Played here at once, as Discord's client does,
                         // which leaves out the effect Discord sends back.
@@ -1002,9 +976,7 @@ pub(crate) async fn call(
                     match event {
                         WatchEvent::Opened(idx, Ok(server)) => {
                             if idx < watches.len() {
-                                let is_audible = focused_stream.as_deref() == Some(&watches[idx].user)
-                                    || (focused_stream.is_none() && idx == 0);
-                                if let Err(error) = watches[idx].open(&server, state, is_audible) {
+                                if let Err(error) = watches[idx].open(&server, state) {
                                     tracing::warn!(error = format!("{error:#}"), "could not watch the stream");
                                     stop_idx = Some((idx, Some(format!("{error:#}"))));
                                 }
@@ -1055,10 +1027,6 @@ pub(crate) async fn call(
                         stopped.stop(discord, state);
                         if focused_stream.as_deref() == Some(&user) {
                             focused_stream = watches.first().map(|w| w.user.clone());
-                            for w in &mut watches {
-                                let aud = focused_stream.as_deref() == Some(&w.user);
-                                w.hear(!state.deafened && aud);
-                            }
                         }
                         if let Some(err) = error {
                             state.error = Some(err);
@@ -1121,10 +1089,6 @@ pub(crate) async fn call(
                             stopped.stop(discord, state);
                             if focused_stream.as_deref() == Some(&user) {
                                 focused_stream = watches.first().map(|w| w.user.clone());
-                                for w in &mut watches {
-                                    let aud = focused_stream.as_deref() == Some(&w.user);
-                                    w.hear(!state.deafened && aud);
-                                }
                             }
                             snapshots.send_replace(state.clone());
                         }
@@ -1178,8 +1142,7 @@ pub(crate) async fn call(
                                 if let Some(shown) = state.watching.iter_mut().find(|s| s.user == w.user) {
                                     shown.opening = true;
                                 }
-                                let is_audible = focused_stream.as_deref() == Some(&w.user);
-                                if let Err(error) = w.open(&next, state, is_audible) {
+                                if let Err(error) = w.open(&next, state) {
                                     tracing::warn!(error = format!("{error:#}"), "could not reopen moved stream");
                                 }
                             }
