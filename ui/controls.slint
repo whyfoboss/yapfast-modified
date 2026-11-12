@@ -768,6 +768,7 @@ export component VoiceSpot inherits Rectangle {
         }
     }
     pointer := TouchArea {
+        x: speaker.x; y: speaker.y; width: speaker.width; height: speaker.height;
         mouse-cursor: MouseCursor.pointer;
         clicked => { Tip.text = ""; root.clicked(); }
         changed has-hover => {
@@ -1122,9 +1123,9 @@ export component ContextMenu inherits Rectangle {
     callback chose(string);
     callback toggled(string);
     callback close;
-    property <float> enter-amount: Looks.better-animations ? 0 : 1;
+    out property <float> enter-amount: Looks.better-animations ? 0 : 1;
     init => { self.enter-amount = 1; }
-    animate enter-amount { duration: Popup.menu-enter; easing: ease-out; }
+    animate enter-amount { duration: Looks.better-animations ? 240ms : 0ms; easing: ease-out; }
     property <int> current: -1;
     // The submenu: whether it's open, how far down, and its current choice,
     // -1 while the keys move through the menu.
@@ -1205,6 +1206,8 @@ export component ContextMenu inherits Rectangle {
         }
         main-panel := Rectangle {
             opacity: Looks.better-animations ? root.enter-amount : 1.0;
+            transform-scale: 0.88 + 0.12 * root.enter-amount;
+            transform-rotation: (1 - root.enter-amount) * -5deg;
             transform-origin: { x: root.flip ? root.menu-width : 0px, y: 0px };
             x: (root.flip ? root.content-width - root.menu-width : 0px) + (Looks.better-animations ? (1 - root.enter-amount) * (root.flip ? 8px : -8px) : 0px);
             y: root.lift;

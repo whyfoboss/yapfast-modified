@@ -2462,9 +2462,7 @@ export component YapfastWindow inherits Window {
         y: self.top - self.lift;
         close-policy: PopupClosePolicy.close-on-click-outside;
         volume-content := VolumeMenu {
-            property <float> enter-amount: Looks.better-animations ? 0 : 1;
-            init => { self.enter-amount = 1; }
-            animate enter-amount { duration: Looks.better-animations ? 240ms : 0ms; easing: ease-out; }
+            property <float> enter-amount: voice-menu-content.enter-amount;
             opacity: self.enter-amount;
             transform-scale: 0.88 + 0.12 * self.enter-amount;
             transform-rotation: (1 - self.enter-amount) * -5deg;
@@ -2588,8 +2586,6 @@ export component YapfastWindow inherits Window {
                         clip: true;
                         sidebar-canvas := VerticalLayout {
                             x: root.nav-motion-direction == 1 ? root.nav-transition-x : 0px;
-                            transform-rotation: root.nav-motion-direction == 1 ? root.nav-transition-x / 1px * 0.12deg : 0deg;
-                            transform-origin: { x: 0px, y: 0px };
                             width: parent.width;
                             height: parent.height;
                             opacity: root.nav-motion-direction == 1 ? root.nav-transition-opacity : 1.0;
@@ -2615,7 +2611,7 @@ export component YapfastWindow inherits Window {
                                     clicked => { root.open-header-menu(self.absolute-position.x, self.absolute-position.y + self.height + 6px); }
                                 }
                                 if root.header-server != "" && root.header-invite: IconButton {
-                                    x: parent.width - self.width - 8px; y: 8px;
+                                    x: parent.width - self.width - 8px; y: 8px; height: 32px;
                                     icon: @image-url("icons/user-plus.svg"); label: "Invite people"; size: 32px; glyph: 20px; tip-side: 2;
                                     clicked => { root.open-invite(root.header-server); }
                                 }
@@ -5096,6 +5092,7 @@ export component YapfastWindow inherits Window {
         width: self.w; height: self.h;
         opacity: Looks.better-animations ? self.enter : 1.0;
         transform-scale: Looks.better-animations && !self.server-tip && !self.settings-tip ? (0.97 + 0.03 * self.enter) : 1.0;
+        transform-rotation: Looks.better-animations ? (1 - self.enter) * -8deg : 0deg;
         transform-origin: { x: self.w / 2, y: self.h };
         border-radius: 6px; background: Theme.tooltip;
         drop-shadow-blur: 12px; drop-shadow-color: #00000080; drop-shadow-offset-y: 3px;
