@@ -355,6 +355,11 @@ export component VoiceDock inherits Rectangle {
     in property <bool> voice-leaving;
     in property <string> voice-warning;
     in property <string> voice-error;
+    Timer {
+        interval: 8s;
+        running: root.voice-error == "No camera found. Connect one and try again.";
+        triggered => { root.dismiss-voice-error(); }
+    }
     in property <bool> can-share;
     in property <bool> sharing;
     in property <bool> share-live;
@@ -656,7 +661,7 @@ export component StreamPip inherits Rectangle {
                 clicked => { root.stop(); }
             }
         }
-        ViewerStack {
+        if touch.has-hover && !root.dragging: ViewerStack {
             x: parent.width - self.width - 8px; y: 8px;
             viewers: root.viewers; names: root.viewer-names;
         }

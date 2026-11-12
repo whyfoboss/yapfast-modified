@@ -174,8 +174,8 @@ export global Popup {
     out property <length> switch-offset: Looks.better-animations ? 24px : 0px;
     out property <length> switch-drift: Looks.better-animations ? -6px : 0px;
     // Server / DM workspace horizontal offsets
-    out property <length> switch-offset-x: Looks.better-animations ? 48px : 0px;
-    out property <length> switch-drift-x: Looks.better-animations ? -16px : 0px;
+    out property <length> switch-offset-x: Looks.better-animations ? 24px : 0px;
+    out property <length> switch-drift-x: Looks.better-animations ? -8px : 0px;
     /// The card's size and opacity for how far it's open, from 0 to 1.
     public pure function scale(amount: float) -> float { Looks.better-animations ? (0.92 + 0.08 * amount) : 1.0 }
     public pure function lift(amount: float) -> length { Looks.better-animations ? ((1.0 - amount) * 10px) : 0px }
