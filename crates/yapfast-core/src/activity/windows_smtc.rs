@@ -321,17 +321,27 @@ pub mod winrt {
             let mut state = MediaSessionState::new();
             let mut metadata_dirty = true;
             let mut timeline_revision = None;
+            let mut track_identity = None;
+            let mut stale_timeline = None;
+            let mut soundcloud_gap: Option<Instant> = None;
             let mut was_paused = false;
             let mut metadata: Option<Metadata> = None;
             let mut artwork: Option<Artwork> = None;
             let async_waker = Waker::from(Arc::new(wake.clone()));
             loop {
-                let events = wake.pending.swap(0, Ordering::AcqRel);
+                let mut events = wake.pending.swap(0, Ordering::AcqRel);
+                if soundcloud_gap.is_some_and(|deadline| Instant::now() >= deadline) {
+                    events |= SESSION;
+                }
                 if events & STOP != 0 {
                     break;
                 }
                 if events == 0 {
-                    thread::park();
+                    if let Some(deadline) = soundcloud_gap {
+                        thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+                    } else {
+                        thread::park();
+                    }
                     continue;
                 }
 
@@ -340,25 +350,58 @@ pub mod winrt {
                     let reported = manager.GetCurrentSession().ok();
                     let manager_has_current = reported.is_some();
                     let current = reported.or_else(|| {
-                        let previous = &subscription.as_ref()?.session;
-                        manager
-                            .GetSessions()
-                            .ok()?
-                            .into_iter()
-                            .find(|session| session == previous)
+                        let sessions: Vec<_> = manager.GetSessions().ok()?.into_iter().collect();
+                        if let Some(previous) = subscription.as_ref()
+                            && let Some(session) = sessions
+                                .iter()
+                                .find(|session| *session == &previous.session)
+                        {
+                            return Some(session.clone());
+                        }
+                        // SoundCloud can expose a paused session without a current session.
+                        let mut soundcloud = sessions.into_iter().filter(|session| {
+                            session.SourceAppUserModelId().is_ok_and(|id| {
+                                clean_source_name(&id.to_string_lossy()) == "SoundCloud"
+                            }) && matches!(
+                                session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()),
+                                Ok(Status::Playing | Status::Paused)
+                            )
+                        });
+                        let session = soundcloud.next()?;
+                        soundcloud.next().is_none().then_some(session)
                     });
                     if !manager_has_current && current.is_some() {
-                        tracing::debug!(target: "yapfast_media", "SMTC previous session still visible");
+                        tracing::debug!(target: "yapfast_media", "SMTC selected a session from the session list");
                     }
+                    if current.is_none() && clean_source_name(&state.source_id) == "SoundCloud" {
+                        // A track switch can briefly remove the session from Windows.
+                        let deadline = soundcloud_gap.get_or_insert_with(|| {
+                            received + std::time::Duration::from_millis(500)
+                        });
+                        if received < *deadline {
+                            continue;
+                        }
+                    }
+                    soundcloud_gap = None;
                     if current.as_ref() != subscription.as_ref().map(|sub| &sub.session) {
+                        let retain_soundcloud = current.as_ref().is_some_and(|session| {
+                            clean_source_name(&state.source_id) == "SoundCloud"
+                                && session.SourceAppUserModelId().is_ok_and(|id| {
+                                    clean_source_name(&id.to_string_lossy()) == "SoundCloud"
+                                })
+                        });
                         subscription = None;
                         state.on_session_closed();
                         metadata = None;
                         artwork = None;
                         tracing::debug!(target: "yapfast_media", present = current.is_some(), "SMTC session changed");
                         timeline_revision = None;
+                        track_identity = None;
+                        stale_timeline = None;
                         was_paused = false;
-                        sender.send_if_modified(|track| track.take().is_some());
+                        if !retain_soundcloud {
+                            sender.send_if_modified(|track| track.take().is_some());
+                        }
                         if let Some(session) = current {
                             let id = session
                                 .SourceAppUserModelId()
@@ -371,12 +414,16 @@ pub mod winrt {
                                     state.on_session_changed(id);
                                 }
                                 Err(error) => {
+                                    sender.send_if_modified(|track| track.take().is_some());
                                     tracing::debug!(%error, "could not subscribe to the Windows media session")
                                 }
                             }
                         }
                         metadata_dirty = true;
                     }
+                }
+                if soundcloud_gap.is_some() {
+                    continue;
                 }
                 let Some(sub) = &subscription else { continue };
                 metadata_dirty |= events & METADATA != 0;
@@ -395,6 +442,8 @@ pub mod winrt {
                     artwork = None;
                     was_paused = false;
                     timeline_revision = None;
+                    track_identity = None;
+                    stale_timeline = None;
                     let source = std::mem::take(&mut state.source_id);
                     state.on_session_closed();
                     state.on_session_changed(source);
@@ -434,7 +483,6 @@ pub mod winrt {
                             PlaybackType::Unknown => playback_type,
                             kind => kind,
                         };
-                        let previous = (&state.title, &state.artist, &state.album);
                         let updated = (
                             props
                                 .Title()
@@ -449,9 +497,18 @@ pub mod winrt {
                                 .map(|s| s.to_string_lossy())
                                 .unwrap_or_default(),
                         );
-                        if (&updated.0, &updated.1, &updated.2) != previous {
-                            state.thumbnail = None;
+                        let identity = (updated.0.clone(), updated.1.clone());
+                        if track_identity.as_ref().is_some_and(|old| old != &identity) {
+                            stale_timeline = timeline_revision;
+                            state.on_timeline_changed(0, 0);
+                            state.position_updated_ms = Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                            );
                         }
+                        track_identity = Some(identity);
                         state.on_media_properties_changed(updated.0, updated.1, updated.2);
                         if state.playback_type != PlaybackType::Video {
                             artwork = Some(Box::pin(thumbnail(props)));
@@ -465,15 +522,18 @@ pub mod winrt {
                     let millis = |time: windows::Foundation::TimeSpan| {
                         (time.Duration / 10_000).max(0) as u64
                     };
-                    state.on_timeline_changed(
-                        timeline.EndTime().map(millis).unwrap_or(0),
-                        timeline.Position().map(millis).unwrap_or(state.position_ms),
-                    );
                     let revision = timeline.LastUpdatedTime().ok().and_then(|time| {
                         u64::try_from(time.UniversalTime / 10_000)
                             .ok()?
                             .checked_sub(11_644_473_600_000)
                     });
+                    if stale_timeline.is_none() || revision > stale_timeline {
+                        stale_timeline = None;
+                        state.on_timeline_changed(
+                            timeline.EndTime().map(millis).unwrap_or(0),
+                            timeline.Position().map(millis).unwrap_or(state.position_ms),
+                        );
+                    }
                     if revision != timeline_revision {
                         state.position_updated_ms = revision;
                         timeline_revision = revision;
@@ -487,6 +547,9 @@ pub mod winrt {
                     state.position_updated_ms = Some(now.as_millis() as u64);
                 }
                 was_paused = !state.is_playing;
+                if metadata.is_some() && state.title.is_empty() && clean_source_name(&state.source_id) == "SoundCloud" {
+                    continue;
+                }
                 let next = state.to_media_track();
                 if sender.send_if_modified(|track| {
                     if *track == next {

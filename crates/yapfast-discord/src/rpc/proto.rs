@@ -78,6 +78,12 @@ pub fn web_address(text: &str, longest: usize) -> bool {
     text.len() <= longest && (text.starts_with("https://") || text.starts_with("http://"))
 }
 
+fn proxy_image(text: &str) -> bool {
+    text.starts_with("mp:external/")
+        && text.len() <= 512
+        && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// The media proxy's names for image addresses, as `mp:` asset keys.
 pub fn external_lookup(response: &Value) -> Result<Assets> {
     Ok(response
@@ -242,7 +248,7 @@ fn normalize_activity(
                 } else if key.ends_with("_image") {
                     match assets.and_then(|lookup| lookup.get(text)) {
                         Some(image) => image.as_str(),
-                        None if snowflake(text) => text,
+                        None if snowflake(text) || proxy_image(text) => text,
                         None if allow_pending_images => continue,
                         None => bail!("unknown application asset"),
                     }
@@ -361,6 +367,7 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     let mut images = Assets::new();
     type Artwork = Pin<Box<dyn Future<Output = (Value, Option<Assets>, Option<Assets>)> + Send>>;
     let mut artwork: Option<Artwork> = None;
+    let mut artwork_input = None::<Value>;
     loop {
         let (opcode, payload) = {
             let frame = read(&mut stream);
@@ -380,7 +387,7 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             }
                             images.extend(external);
                         }
-                        if let Ok(value) = normalize_activity(&input, &client, &name, assets.as_ref(), &images, true) {
+                        if let Ok(value) = normalize_activity(artwork_input.take().as_ref().unwrap_or(&input), &client, &name, assets.as_ref(), &images, true) {
                             updates.send((id, Some(Arc::new(value)), true)).await?;
                         }
                     }
@@ -433,11 +440,20 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
 
         match result {
             Ok(value) => {
-                // Any pending result belongs to the previous activity.
-                artwork = None;
                 let eligible = value.as_deref().is_some_and(crate::own_activity::eligible);
-                if eligible {
-                    let input = &packet["args"]["activity"];
+                let input = &packet["args"]["activity"];
+                let same_artwork = eligible
+                    && artwork.is_some()
+                    && artwork_input
+                        .as_ref()
+                        .is_some_and(|old| old["assets"] == input["assets"]);
+                if same_artwork {
+                    artwork_input = Some(input.clone());
+                } else {
+                    artwork = None;
+                    artwork_input = None;
+                }
+                if eligible && !same_artwork {
                     let pictures = &input["assets"];
                     let mut addresses = Vec::new();
                     let mut fetch_named = false;
@@ -447,13 +463,14 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 if !images.contains_key(image) {
                                     addresses.push(image.to_owned());
                                 }
-                            } else if !snowflake(image) && assets.is_none() {
+                            } else if !snowflake(image) && !proxy_image(image) && assets.is_none() {
                                 fetch_named = true;
                             }
                         }
                     }
                     if fetch_named || !addresses.is_empty() {
                         let input = input.clone();
+                        artwork_input = Some(input.clone());
                         let api = api.clone();
                         let client = client.clone();
                         artwork = Some(Box::pin(async move {
@@ -487,9 +504,35 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                         }));
                     }
                 }
+                // Give a fast SoundCloud cover lookup a chance to travel with the
+                // track in one presence update. Keep slow lookups asynchronous.
+                let mut published = value.clone();
+                if name.eq_ignore_ascii_case("SoundCloud")
+                    && !same_artwork
+                    && let Some(pending) = artwork.as_mut()
+                    && let Ok((_, named, external)) =
+                        tokio::time::timeout(Duration::from_millis(150), pending).await
+                {
+                    artwork = None;
+                    artwork_input = None;
+                    if let Some(named) = named {
+                        assets = Some(named);
+                    }
+                    if let Some(external) = external {
+                        if images.len() + external.len() > KEPT_IMAGES {
+                            images.clear();
+                        }
+                        images.extend(external);
+                    }
+                    if let Ok(normalized) =
+                        normalize_activity(input, &client, &name, assets.as_ref(), &images, true)
+                    {
+                        published = Some(Arc::new(normalized));
+                    }
+                }
                 // Bound queued updates even when games publish very frequently.
                 updates
-                    .send((id, value.clone().filter(|_| eligible), false))
+                    .send((id, published.filter(|_| eligible), false))
                     .await?;
                 let published_at_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -564,6 +607,16 @@ mod tests {
             json!({"button_urls":["https://example.com"]})
         );
         assert!(shown.get("id").is_none());
+    }
+
+    #[test]
+    fn preserves_resolved_cover_from_rpc() {
+        let input = json!({"assets":{"large_image":"mp:external/abc/https/example.com/cover.png"}});
+        let activity = normalize(&input, "42", "SoundCloud", None, &Assets::new()).unwrap();
+        assert_eq!(
+            activity["assets"]["large_image"],
+            input["assets"]["large_image"]
+        );
     }
 
     #[test]

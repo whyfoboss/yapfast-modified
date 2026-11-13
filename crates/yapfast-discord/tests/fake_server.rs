@@ -1286,16 +1286,23 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
     })
     .await;
     let mut playback = yapfast_discord::own_activity::MusicPlayback {
+        soundcloud_source: false,
         title: "Fixture track".into(),
         artist: "Fixture artist".into(),
         duration_ms: 72_000,
+        position_ms: 48_000,
         start_ms: None,
     };
     discord.set_music_playback(Some(playback.clone()));
     presence_where(server, |p| {
         p["activities"].as_array().is_some_and(|a| {
             a.iter()
-                .any(|a| a["name"] == "SoundCloud" && a.get("timestamps").is_none())
+                .any(|a| {
+                    a["name"] == "SoundCloud"
+                        && a.get("timestamps").is_none()
+                        && a["state"] == "Paused at 0:48 · Fixture artist"
+                        && a["details"] == "Fixture track"
+                })
         })
     })
     .await;
@@ -1307,6 +1314,7 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
                 a["name"] == "SoundCloud"
                     && a["timestamps"]["start"] == 1800000001000_u64
                     && a["timestamps"]["end"] == 1800000073000_u64
+                    && a["state"] == "Fixture artist"
             })
         })
     })

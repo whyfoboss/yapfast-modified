@@ -100,6 +100,9 @@ fn main() -> Result<()> {
 
     #[cfg(all(windows, feature = "desktop"))]
     match data_directory(&arguments) {
+        Some(directory) if std::env::var_os("YAPFAST_MEDIA_LOG").is_some() => {
+            logging::init_to_file(&directory.join("yapfast-media.log"))
+        }
         Some(directory) if !has_console() => logging::init_to_file(&directory.join("yapfast.log")),
         _ => logging::init(),
     }
