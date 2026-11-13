@@ -559,7 +559,9 @@ pub(super) fn local_activity_row(
             || profile::activity_row(rpc),
             |track| media_row(track, Some(rpc), now),
         );
-        if playing.is_some_and(|playing| app.display_name != playing.name) {
+        if playing.is_some_and(|playing| app.display_name != playing.name)
+            && !rpc.name.eq_ignore_ascii_case("SoundCloud")
+        {
             row.name = app.display_name.as_str().into();
         }
         return Some(row);
@@ -609,6 +611,9 @@ fn media_row(
         profile::activity_row(&media)
     };
     clear_builtin_art(&mut row);
+    if track.source.as_deref().is_some_and(|source| source.eq_ignore_ascii_case("SoundCloud")) {
+        row.heading = "LISTENING TO SOUNDCLOUD".into();
+    }
     if let Some(art) = track.thumbnail.as_deref() {
         row.artwork = super::pictures::picture(art);
     }
