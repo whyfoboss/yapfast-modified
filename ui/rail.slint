@@ -962,6 +962,15 @@ export component ServerRail inherits Rectangle {
         list := ListView {
             vertical-stretch: 1;
             for server[index] in root.servers: server-slot := Rectangle {
+                TouchArea {
+                    scroll-event(event) => {
+                        if event.delta-y != 0 {
+                            list.content-y = max(min(0px, list.visible-height - list.content-height), min(0px, list.content-y + event.delta-y));
+                            return accept;
+                        }
+                        reject
+                    }
+                }
                 property <length> middle: self.absolute-position.y + self.height / 2;
                 property <bool> pointed: root.drag-id != "" && !server.dm && !server.divider
                     && root.within-rail(root.drag-x, root.drag-y)

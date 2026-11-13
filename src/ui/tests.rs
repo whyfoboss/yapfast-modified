@@ -15044,7 +15044,7 @@ fn task9_live_media_session_updates_game_activity_and_profile() {
     assert!(window.get_has_game_activity_preview());
     let preview = window.get_game_activity_preview();
     assert_eq!(preview.name.as_str(), "Bass Cannon");
-    assert_eq!(preview.heading.as_str(), "LISTENING TO BASS CANNON");
+    assert_eq!(preview.heading.as_str(), "LISTENING TO SOUNDCLOUD");
     assert_eq!(preview.details.as_str(), "by Excision");
     assert_eq!(preview.state.as_str(), "on X Rated");
 
@@ -15295,7 +15295,10 @@ fn smtc_transitions_replace_stale_rpc_in_activity_cards() {
         card
     };
     let start = std::time::Instant::now();
-    assert!(!publish(&mut ad, &session).paused);
+    let card = publish(&mut ad, &session);
+    assert!(!card.paused);
+    assert_eq!(card.name, "Fixture track");
+    assert_eq!(card.details, "Artist");
     let elapsed = start.elapsed();
     eprintln!("SMTC fixture to Slint activity cards: {:.2?}", elapsed);
     assert!(elapsed < std::time::Duration::from_secs(1));

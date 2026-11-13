@@ -279,6 +279,11 @@ pub(super) fn activity_row(activity: &yapfast_core::chat::Activity) -> ActivityR
             after("by", &activity.state),
             after("on", &activity.large_text),
         )
+    } else if activity.kind == yapfast_core::chat::ActivityKind::Listening
+        && activity.name.eq_ignore_ascii_case("SoundCloud")
+        && activity.details.as_deref().is_some_and(|details| !details.is_empty())
+    {
+        (activity.details.as_deref().unwrap_or_default().to_owned(), state, String::new())
     } else {
         (
             name.to_owned(),
