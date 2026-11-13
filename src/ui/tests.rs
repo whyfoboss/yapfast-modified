@@ -5289,6 +5289,29 @@ fn server_rail_order_persists_and_preserves_folders() {
         position: from,
         button,
     });
+    window.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(from.x, from.y - 8.),
+    });
+    let outside = slint::LogicalPosition::new(from.x + 100., from.y - 12.);
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position: outside });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased {
+            position: outside,
+            button,
+        });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position: from });
+    window.window().dispatch_event(WindowEvent::PointerPressed {
+        position: from,
+        button,
+    });
+    window.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(from.x, from.y - 8.),
+    });
     window
         .window()
         .dispatch_event(WindowEvent::PointerMoved { position: to });
@@ -5320,7 +5343,18 @@ fn server_rail_order_persists_and_preserves_folders() {
     );
     assert_eq!(
         rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        ["B", "A", "C", "folder", "E", "D"]
+        ["B", "D", "A", "C", "folder", "E"]
+    );
+    window.invoke_reorder_server("folder".into(), "B".into(), true);
+    let rows = refresh::rail_rows(
+        &adapter.borrow().app.state,
+        &HashMap::new(),
+        &["folder".into()].into(),
+        &adapter.borrow().layout.server_rail_order,
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        ["folder", "E", "B", "D", "A", "C"]
     );
     window.hide().unwrap();
 }

@@ -4173,7 +4173,12 @@ impl Adapter {
         let active_focus_user = focused_user.or(primary_watching);
         if window.get_watch_user().as_str() != active_focus_user.unwrap_or_default() {
             let frame = active_focus_user
-                .and_then(|user| voice.participants.iter().position(|person| person.id == user))
+                .and_then(|user| {
+                    voice
+                        .participants
+                        .iter()
+                        .position(|person| person.id == user)
+                })
                 .and_then(|index| self.models.stream_frames.row_data(index))
                 .unwrap_or_default();
             window.set_watch_frame(frame);
@@ -5088,11 +5093,22 @@ fn rail(
     rail
 }
 
-fn rail_group(server: &yapfast_core::chat::ChatServer) -> &str {
-    server
-        .folder
-        .as_ref()
-        .map_or(server.id.as_str(), |folder| folder.id.as_str())
+fn rail_folder<'a>(
+    server: &'a yapfast_core::chat::ChatServer,
+    order: &[String],
+) -> Option<&'a yapfast_core::chat::ServerFolder> {
+    if order
+        .iter()
+        .any(|entry| entry.strip_prefix("detached:") == Some(server.id.as_str()))
+    {
+        None
+    } else {
+        server.folder.as_ref()
+    }
+}
+
+fn rail_group<'a>(server: &'a yapfast_core::chat::ChatServer, order: &[String]) -> &'a str {
+    rail_folder(server, order).map_or(server.id.as_str(), |folder| folder.id.as_str())
 }
 
 fn ordered_servers<'a>(
@@ -5108,10 +5124,10 @@ fn ordered_servers<'a>(
             .collect();
         let mut groups = HashMap::new();
         for (index, server) in servers.iter().enumerate() {
-            groups.entry(rail_group(server)).or_insert(index);
+            groups.entry(rail_group(server, order)).or_insert(index);
         }
         servers.sort_by_cached_key(|server| {
-            let group = rail_group(server);
+            let group = rail_group(server, order);
             (
                 ranks.get(group).copied().unwrap_or(usize::MAX),
                 groups[group],
@@ -5130,46 +5146,88 @@ pub(super) fn move_rail_server(
     before: bool,
 ) -> Option<Vec<String>> {
     let servers = ordered_servers(state, saved);
-    let moved = servers.iter().find(|server| server.id == source)?;
-    let destination = servers.iter().find(|server| server.id == target);
-    let anchor = if moved.folder.is_some() {
-        // Keep Discord folder membership intact when moving its children.
-        destination
-            .filter(|server| server.folder == moved.folder)?
-            .id
-            .as_str()
-    } else if let Some(server) = destination {
-        rail_group(server)
-    } else {
-        servers
-            .iter()
-            .find(|server| rail_group(server) == target)
-            .map(|server| rail_group(server))?
-    };
-    if anchor == source {
+    let source_server = servers.iter().find(|server| server.id == source).copied();
+    let source_folder = servers
+        .iter()
+        .any(|server| rail_folder(server, saved).is_some_and(|folder| folder.id == source));
+    if source_server.is_none() && !source_folder {
+        return None;
+    }
+    let destination = servers.iter().find(|server| server.id == target).copied();
+    let anchor = destination
+        .map(|server| {
+            if source_server.is_some_and(|moved| {
+                rail_folder(moved, saved).is_some()
+                    && rail_folder(moved, saved) == rail_folder(server, saved)
+            }) {
+                server.id.as_str()
+            } else {
+                rail_group(server, saved)
+            }
+        })
+        .or_else(|| {
+            servers.iter().find_map(|server| {
+                rail_folder(server, saved)
+                    .filter(|folder| folder.id == target)
+                    .map(|folder| folder.id.as_str())
+            })
+        })?;
+    if source == target || (source_folder && source == anchor) {
         return None;
     }
     let mut ids = Vec::new();
     let mut previous = None;
-    for server in servers {
-        let group = rail_group(server);
+    for server in &servers {
+        let group = rail_group(server, saved);
         if previous != Some(group) {
             ids.push(group.to_owned());
             previous = Some(group);
         }
-        if server.folder.is_some() {
+        if rail_folder(server, saved).is_some() {
             ids.push(server.id.clone());
         }
     }
-    let from = ids.iter().position(|id| id == source)?;
-    let to = ids.iter().position(|id| id == anchor)?;
-    let to = to + usize::from(!before);
-    let to = to - usize::from(from < to);
-    if to == from {
-        return None;
+    let mut detached: Vec<String> = saved
+        .iter()
+        .filter(|entry| entry.starts_with("detached:"))
+        .cloned()
+        .collect();
+    if let Some(server) = source_server
+        && rail_folder(server, saved).is_some()
+        && destination.is_none_or(|target| rail_folder(target, saved) != rail_folder(server, saved))
+        && rail_group(server, saved) != anchor
+    {
+        detached.push(format!("detached:{}", server.id));
     }
-    let moved = ids.remove(from);
-    ids.insert(to, moved);
+    let from = ids.iter().position(|id| id == source)?;
+    let count = if source_folder {
+        1 + ids[from + 1..]
+            .iter()
+            .take_while(|id| {
+                servers.iter().any(|server| {
+                    server.id.as_str() == id.as_str() && rail_group(server, saved) == source
+                })
+            })
+            .count()
+    } else {
+        1
+    };
+    let moved: Vec<_> = ids.drain(from..from + count).collect();
+    let anchor_pos = ids.iter().position(|id| id == anchor)?;
+    let after_group = if before {
+        0
+    } else {
+        1 + ids[anchor_pos + 1..]
+            .iter()
+            .take_while(|id| {
+                servers.iter().any(|server| {
+                    server.id.as_str() == id.as_str() && rail_group(server, saved) == anchor
+                })
+            })
+            .count()
+    };
+    ids.splice(anchor_pos + after_group..anchor_pos + after_group, moved);
+    ids.extend(detached);
     Some(ids)
 }
 
@@ -5208,7 +5266,7 @@ pub(super) fn rail_rows(
     let mut rows = Vec::with_capacity(state.servers.len());
     let mut servers = ordered_servers(state, order).into_iter().peekable();
     while let Some(server) = servers.next() {
-        let Some(folder) = &server.folder else {
+        let Some(folder) = rail_folder(server, order) else {
             let (unread, mentions) = marks(server);
             rows.push(ServerRow {
                 call: in_call(server),
@@ -5217,7 +5275,7 @@ pub(super) fn rail_rows(
             continue;
         };
         let mut inside = vec![server];
-        while let Some(next) = servers.next_if(|next| next.folder.as_ref() == Some(folder)) {
+        while let Some(next) = servers.next_if(|next| rail_folder(next, order) == Some(folder)) {
             inside.push(next);
         }
         let open = open_folders.contains(&folder.id);

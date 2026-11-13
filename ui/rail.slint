@@ -1,6 +1,6 @@
 import { DmHeading } from "yapfast/dm-heading.slint";
 import { ClientStyle } from "yapfast/style.slint";
-import { ListView } from "scrollview.slint";
+import { ListView, ScrollView } from "scrollview.slint";
 import { Theme, Tip, Middle, Label, Popup, Looks } from "theme.slint";
 import { Avatar, Nameplate, PictureStore, StatusText, StyledName, NameStyleRow, VoiceSpot, ServerTagChip } from "controls.slint";
 import { DiscordBadge } from "discord.slint";
@@ -225,7 +225,7 @@ export component RailItem inherits Rectangle {
             mouse-cursor: root.dragging ? MouseCursor.grabbing : MouseCursor.pointer;
             clicked => { if !root.dragging { root.clicked(); } }
             moved => {
-                if self.pressed && root.reorderable && !root.dragging && abs(self.mouse-y - self.pressed-y) > 4px {
+                if self.pressed && root.reorderable && !root.dragging && (abs(self.mouse-y - self.pressed-y) > 4px || abs(self.mouse-x - self.pressed-x) > 4px) {
                     root.dragging = true;
                     Tip.text = "";
                     root.drag-start();
@@ -235,6 +235,9 @@ export component RailItem inherits Rectangle {
                 }
             }
             pointer-event(event) => {
+                if event.kind == PointerEventKind.cancel && root.dragging {
+                    root.dragging = false; root.drag-end(-10000px, -10000px);
+                }
                 if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.dragging {
                     root.dragging = false;
                     root.drag-end(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
@@ -274,9 +277,11 @@ component FolderItem inherits Rectangle {
     in property <string> badge;
     /// In a call in one of its servers, shown at the top right while closed.
     in property <bool> call;
+    property <bool> dragging;
+    callback drag-start;
+    callback drag-move(length, length);
+    callback drag-end(length, length);
     callback clicked;
-    /// A right click, or the Menu key or Shift+F10 when focused: where to open
-    /// a menu in the window.
     callback context-menu(length, length);
     property <length> tile-size: ClientStyle.folder-tile;
     property <length> tile-left: (root.width - root.tile-size) / 2;
@@ -346,8 +351,21 @@ component FolderItem inherits Rectangle {
         }
         pointer := TouchArea {
             mouse-cursor: MouseCursor.pointer;
-            clicked => { root.clicked(); }
+            clicked => { if !root.dragging { root.clicked(); } }
+            moved => {
+                if self.pressed && !root.dragging && (abs(self.mouse-y - self.pressed-y) > 4px || abs(self.mouse-x - self.pressed-x) > 4px) {
+                    root.dragging = true; Tip.text = ""; root.drag-start();
+                }
+                if root.dragging { root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); }
+            }
             pointer-event(event) => {
+                if event.kind == PointerEventKind.cancel && root.dragging {
+                    root.dragging = false; root.drag-end(-10000px, -10000px);
+                }
+                if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.dragging {
+                    root.dragging = false;
+                    root.drag-end(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
                 if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                     root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                 }
@@ -917,7 +935,7 @@ export component ServerRail inherits Rectangle {
     }
     Timer {
         interval: 16ms;
-        running: root.drag-id != "" && root.within-rail(root.drag-x, root.drag-y)
+        running: root.drag-id != "" && root.drag-x >= list.absolute-position.x - 72px && root.drag-x <= list.absolute-position.x + list.width + 72px
             && (root.drag-y < list.absolute-position.y + 32px || root.drag-y > list.absolute-position.y + list.height - 32px);
         triggered => {
             if root.drag-y < list.absolute-position.y + 32px {
@@ -957,10 +975,12 @@ export component ServerRail inherits Rectangle {
             height: 1px;
             Rectangle { width: 32px; height: 1px; background: Theme.outline; }
         }
-        // A list view makes only the servers in sight, which
-        // matters on accounts in many servers. Unread DMs scroll with them.
-        list := ListView {
+        // Keep dragged items alive while the rail scrolls. Unread DMs scroll with them.
+        list := ScrollView {
             vertical-stretch: 1;
+            content-height: rail-items.preferred-height;
+            rail-items := VerticalLayout {
+            width: list.visible-width;
             for server[index] in root.servers: server-slot := Rectangle {
                 TouchArea {
                     scroll-event(event) => {
@@ -1007,6 +1027,14 @@ export component ServerRail inherits Rectangle {
                     open: server.open; tint: server.tint; servers: server.preview;
                     selected: server.selected; unread: server.unread; badge: server.badge; call: server.call;
                     clicked => { root.toggle-folder(server.id); }
+                    drag-start => { root.target-id = ""; root.drag-id = server.id; }
+                    drag-move(x, y) => { root.drag-x = x; root.drag-y = y; }
+                    drag-end(x, y) => {
+                        let target = root.target-id;
+                        let before = y < root.target-middle;
+                        root.drag-id = "";
+                        if target != "" && root.within-rail(x, y) { root.reorder-server(server.id, target, before); }
+                    }
                     context-menu(x, y) => { root.open-server-menu(server.id, x, y); }
                 }
                 if server.dm: RailItem {
@@ -1048,6 +1076,7 @@ export component ServerRail inherits Rectangle {
                     x: 9px; y: root.drag-y < server-slot.middle ? 0px : parent.height - 2px;
                     width: parent.width - 18px; height: 2px; border-radius: 1px; background: Theme.accent;
                 }
+            }
             }
         }
         if root.can-join: RailItem {

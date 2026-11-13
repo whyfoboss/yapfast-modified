@@ -1839,7 +1839,7 @@ export component ProfileEditorDialog inherits Rectangle {
                                     if root.editing == 3: VerticalLayout {
                                         spacing: 4px;
                                         Rectangle {
-                                            height: 110px; border-radius: 6px; background: Theme.sunken;
+                                            height: min(300px, max(110px, bio-input.preferred-height + 16px)); border-radius: 6px; background: Theme.sunken;
                                             border-width: 1px; border-color: Theme.accent.with-alpha(0.8);
                                             Text {
                                                 x: 10px; y: 8px; width: parent.width - 20px;
@@ -1847,9 +1847,13 @@ export component ProfileEditorDialog inherits Rectangle {
                                                 text: root.prompt.bio-placeholder; color: Theme.muted; font-size: 14px;
                                                 wrap: word-wrap; overflow: elide;
                                             }
-                                            TextInput {
-                                                init => { self.focus(); }
+                                            bio-scroll := Flickable {
                                                 x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px;
+                                                content-height: bio-input.height;
+                                                mouse-drag-pan-enabled: false;
+                                                bio-input := TextInput {
+                                                init => { self.focus(); }
+                                                width: bio-scroll.width; height: max(bio-scroll.height, self.preferred-height);
                                                 text <=> root.bio;
                                                 single-line: false; wrap: word-wrap;
                                                 font-size: 14px; color: Theme.text;
@@ -1857,6 +1861,14 @@ export component ProfileEditorDialog inherits Rectangle {
                                                 selection-foreground-color: Theme.text;
                                                 accessible-label: "Bio";
                                                 edited => { root.write(2, self.text); }
+                                                cursor-position-changed(position) => {
+                                                    if position.y + bio-scroll.content-y < 0px {
+                                                        bio-scroll.content-y = -position.y;
+                                                    } else if position.y + 20px + bio-scroll.content-y > bio-scroll.height {
+                                                        bio-scroll.content-y = bio-scroll.height - position.y - 20px;
+                                                    }
+                                                }
+                                                }
                                             }
                                         }
                                         HorizontalLayout {
