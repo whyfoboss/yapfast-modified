@@ -1090,9 +1090,8 @@ component MenuRows inherits VerticalLayout {
 // opens that submenu on hover; clicked itself, it reports its `click-id`
 // and the menu closes. A menu or submenu taller than `tallest` scrolls.
 //
-// The menu stays where it opens. A submenu lines up with its row and moves
-// up to stay within `room-below`, past the menu's top if it must, and
-// `lift` says how far: the component's top is that far above the menu's.
+// The menu stays where it opens. A submenu lines up with its row and scrolls
+// when it cannot fit below the menu's top, without moving the popup.
 export component ContextMenu inherits Rectangle {
     in property <[MenuRow]> rows;
     /// Each row's submenu, by the row's index: empty for a row without one,
@@ -1115,9 +1114,9 @@ export component ContextMenu inherits Rectangle {
     out property <length> content-width: root.menu-width + (root.has-submenus ? 4px + root.widest : 0px);
     out property <bool> flip: root.has-submenus && root.content-width > root.room;
     out property <length> main-height: min(main.preferred-height, root.tallest);
-    property <length> sub-height: min(sub.preferred-height, root.tallest);
+    property <length> sub-height: min(sub.preferred-height, root.tallest, root.room-below);
     // Where the submenu's top is, from the menu's.
-    property <length> sub-top: max(root.room-below - root.tallest, min(root.sub-y, root.room-below - root.sub-height));
+    property <length> sub-top: max(0px, min(root.sub-y, root.room-below - root.sub-height));
     out property <length> lift: root.sub-open ? max(0px, -root.sub-top) : 0px;
     out property <length> content-height: root.lift + max(root.main-height, root.sub-open ? root.sub-top + root.sub-height : 0px);
     callback chose(string);

@@ -4130,9 +4130,13 @@ impl Adapter {
                 &[]
             },
             sharing: voice.sharing.is_some(),
+            watching: &voice.watching,
         };
         let focused = self.call_focus.as_ref().and_then(|focus| stage.slot(focus));
-        if focused.is_none() {
+        if focused.is_none()
+            && !matches!(&self.call_focus, Some(Focus::Stream(user))
+                if voice.participants.iter().any(|person| person.id == *user && person.streaming))
+        {
             self.call_focus = None;
         }
         let slot = |slot: Option<usize>| slot.map_or(-1, |slot| slot as i32);
@@ -4475,7 +4479,7 @@ impl Adapter {
                             false
                         };
                         let watched_index = watching_pos.map_or(-1, |i| i as i32);
-                        let unwatched_index = if watched {
+                        let unwatched_index = if watched || !person.streaming || person.local {
                             -1
                         } else {
                             let idx = unwatched_count;

@@ -1583,6 +1583,7 @@ impl Layout {
         let (id, chosen) =
             theme::chosen(self.theme.as_deref().or(default_theme), &self.custom_themes);
         chosen.apply(window);
+        crate::icon::apply_theme(window, chosen.accent, chosen.on_accent);
         window.set_theme_id(id.into());
         window.set_themes(theme::cards(&self.custom_themes));
         if let Some(width) = self.sidebar_width {

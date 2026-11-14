@@ -12654,8 +12654,12 @@ fn task7_voice_participant_strip_persists_with_single_watched_stream_and_non_str
     // Single stream watched
     assert!(window.get_has_active_streams());
     assert_eq!(window.get_watched_stream_count(), 1);
-    assert_eq!(window.get_single_watched_slot(), 1); // Bob's slot
-    assert_eq!(window.get_call_focus(), 1);
+    assert_eq!(window.get_single_watched_slot(), 0); // Bob's stream tile
+    assert_eq!(window.get_call_focus(), 0);
+
+    // Only the watched stream has a separate tile.
+    let streams: Vec<_> = adapter.borrow().models.stream_tiles.iter().collect();
+    assert_eq!(streams, vec![1]);
 
     // Verify all 5 participants exist in model
     let participants: Vec<_> = adapter.borrow().models.participants.iter().collect();
@@ -12679,9 +12683,9 @@ fn task7_voice_participant_strip_persists_with_single_watched_stream_and_non_str
     assert!(participants[4].live);
     assert!(!participants[4].watched);
 
-    // Even if mode is set to Grid with 1 stream, single_watched_slot remains 1
+    // Even if mode is set to Grid with 1 stream, single_watched_slot remains 0
     window.invoke_set_layout_mode(false);
-    assert_eq!(window.get_single_watched_slot(), 1);
+    assert_eq!(window.get_single_watched_slot(), 0);
     assert_eq!(window.get_watched_stream_count(), 1);
 
     // Watch action on Carol invokes watch_stream and sets focus to Carol

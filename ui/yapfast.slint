@@ -1491,6 +1491,8 @@ export component YapfastWindow inherits Window {
     }
     callback stream-tick;
     callback toggle-camera;
+    // A manually resized DM call height; zero keeps the automatic layout.
+    property <length> dm-call-height: 0px;
     /// Where the call's tiles are; see ParticipantGrid.
     callback call-tiles(int, length, length, length, length, length, length, int, length, length);
     /// Show the call's tile at this place large, or none for -1.
@@ -3142,9 +3144,9 @@ export component YapfastWindow inherits Window {
                         if root.voice-panel || root.call-shown: Rectangle {
                             // Above a DM's messages, a call takes less than half the room,
                             // more while watching a stream, and little while offering to join.
-                            vertical-stretch: root.voice-panel ? 1 : !root.voice-here ? 0 : root.call-focus >= 0 ? 1.8 : 0.8;
-                            min-height: root.voice-panel ? 0px : root.voice-here ? 260px : 210px;
-                            max-height: root.voice-panel || root.voice-here ? 100000px : 210px;
+                            vertical-stretch: root.voice-panel ? 1 : !root.voice-here || root.dm-call-height > 0px ? 0 : root.call-focus >= 0 ? 1.8 : 0.8;
+                            min-height: root.voice-panel ? 0px : root.voice-here ? (root.dm-call-height > 0px ? min(root.dm-call-height, max(260px, chat-canvas.height - 180px)) : 260px) : 210px;
+                            max-height: root.voice-panel ? 100000px : !root.voice-here ? 210px : root.dm-call-height > 0px ? min(root.dm-call-height, max(260px, chat-canvas.height - 180px)) : 100000px;
                             background: Theme.stage;
                             if !root.voice-here && !root.voice-panel: CallInvite {
                                 call-people: root.call-people; call-note: root.call-note; call-incoming: root.call-incoming;
@@ -3208,6 +3210,15 @@ export component YapfastWindow inherits Window {
                                     open-soundboard(x, y) => { root.open-soundboard(x, y); }
                                     leave-voice => { root.leave-voice(); }
                                 }
+                            }
+                            if !root.voice-panel && root.voice-here: TouchArea {
+                                y: parent.height - 8px; height: 8px; mouse-cursor: ns-resize;
+                                moved => {
+                                    if self.pressed {
+                                        root.dm-call-height = max(260px, min(max(260px, chat-canvas.height - 180px), parent.height + self.mouse-y - self.pressed-y));
+                                    }
+                                }
+                                double-clicked => { root.dm-call-height = 0px; }
                             }
                         }
                         // A forum's posts, in place of its messages.
@@ -3718,6 +3729,7 @@ export component YapfastWindow inherits Window {
                                 border-top-left-radius: root.compose-label != "" ? 0px : 10px;
                                 border-top-right-radius: root.compose-label != "" ? 0px : 10px;
                                 VerticalLayout {
+                                    padding-top: 1px;
                                     spacing: 0px;
                                     // Files waiting to go with the message, in a row that scrolls sideways.
                                     if root.staged.length > 0: Flickable {

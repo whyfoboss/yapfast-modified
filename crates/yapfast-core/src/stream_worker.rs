@@ -858,8 +858,8 @@ fn watch(
     let (mut input, mut published) = (0u64, 0u64);
     while !stop.load(Ordering::Relaxed) {
         if measured.elapsed() >= Duration::from_secs(5) {
-            tracing::info!(target: "yapfast_stream", elapsed_ms = started.elapsed().as_millis() as u64,
-                input, published, failures, waiting, "stream decoder");
+            tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64,
+                input, published, failures, waiting, codec = ?decoder.as_ref().map(|decoder| decoder.codec()), "stream decoder status");
             measured = Instant::now();
         }
         while let Ok(control) = sound.controls.try_recv() {
@@ -901,8 +901,9 @@ fn watch(
                         "a stream frame didn't decode"
                     );
                 }
-                // Keep codec headers already learned by the decoder.
-                waiting = true;
+                // Keep codec headers already learned by the decoder. H264
+                // can conceal a lost frame and decode following pictures.
+                waiting = frame.codec != Codec::H264;
                 receiver.request_keyframe();
                 continue;
             }

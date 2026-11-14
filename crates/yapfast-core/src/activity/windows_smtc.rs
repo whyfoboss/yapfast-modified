@@ -348,17 +348,7 @@ pub mod winrt {
                 let received = Instant::now();
                 if events & SESSION != 0 {
                     let reported = manager.GetCurrentSession().ok();
-                    let manager_has_current = reported.is_some();
-                    let current = reported.or_else(|| {
-                        let sessions: Vec<_> = manager.GetSessions().ok()?.into_iter().collect();
-                        if let Some(previous) = subscription.as_ref()
-                            && let Some(session) = sessions
-                                .iter()
-                                .find(|session| *session == &previous.session)
-                        {
-                            return Some(session.clone());
-                        }
-                        // SoundCloud can expose a paused session without a current session.
+                    let current = manager.GetSessions().ok().and_then(|sessions| {
                         let mut soundcloud = sessions.into_iter().filter(|session| {
                             session.SourceAppUserModelId().is_ok_and(|id| {
                                 clean_source_name(&id.to_string_lossy()) == "SoundCloud"
@@ -369,10 +359,7 @@ pub mod winrt {
                         });
                         let session = soundcloud.next()?;
                         soundcloud.next().is_none().then_some(session)
-                    });
-                    if !manager_has_current && current.is_some() {
-                        tracing::debug!(target: "yapfast_media", "SMTC selected a session from the session list");
-                    }
+                    }).or(reported);
                     if current.is_none() && clean_source_name(&state.source_id) == "SoundCloud" {
                         // A track switch can briefly remove the session from Windows.
                         let deadline = soundcloud_gap.get_or_insert_with(|| {

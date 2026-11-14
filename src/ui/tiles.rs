@@ -2,7 +2,7 @@
 //! pictures are made only for tiles in sight, at their size; which tile
 //! shows large; and what the corner shows while the call is off screen.
 
-use yapfast_core::voice::Participant;
+use yapfast_core::voice::{Participant, Watching};
 
 /// The call grid's layout, in logical pixels, as `ParticipantGrid` reports it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -50,8 +50,7 @@ impl Tiles {
 pub(super) enum Focus {
     /// Someone's tile, by participant id: their camera, or their picture.
     Person(String),
-    /// Someone's stream: in a tile of its own while they film too, or else
-    /// in theirs.
+    /// Someone's stream, in its own tile.
     Stream(String),
     /// This account's shared screen.
     OwnScreen,
@@ -68,21 +67,22 @@ pub(super) enum Pip {
 }
 
 /// The call's tiles in order: this account's shared screen leads, then the
-/// streams of those who film as well, in tiles of their own, then everyone.
+/// watched remote streams in tiles of their own, then everyone.
 #[derive(Clone, Copy)]
 pub(super) struct Stage<'a> {
     pub participants: &'a [Participant],
     pub sharing: bool,
+    pub watching: &'a [Watching],
 }
 
 impl Stage<'_> {
     /// The streams with tiles of their own, as indexes of their participants.
-    /// Someone who shares without a camera shows the stream in their tile.
+    /// Watched streams are separate from their participants.
     pub(super) fn streams(&self) -> impl Iterator<Item = usize> + '_ {
         self.participants
             .iter()
             .enumerate()
-            .filter(|(_, person)| person.streaming && person.video.is_some() && !person.local)
+            .filter(|(_, person)| person.streaming && !person.local && self.watching.iter().any(|watch| watch.user == person.id))
             .map(|(index, _)| index)
     }
 
@@ -102,12 +102,8 @@ impl Stage<'_> {
             Focus::Person(id) => Some(self.before() + self.index(id)?),
             Focus::Stream(id) => {
                 let person = self.index(id)?;
-                match self.streams().position(|stream| stream == person) {
-                    Some(stream) => Some(usize::from(self.sharing) + stream),
-                    None => (self.participants[person].streaming
-                        && !self.participants[person].local)
-                        .then(|| self.before() + person),
-                }
+                self.streams().position(|stream| stream == person)
+                    .map(|stream| usize::from(self.sharing) + stream)
             }
         }
     }
@@ -125,18 +121,7 @@ impl Stage<'_> {
         }
         let person = self.participants.get(slot - before)?;
         let id = person.id.clone();
-        Some(if person.video.is_some() || !person.streaming {
-            Focus::Person(id)
-        } else if person.local {
-            // This account's own tile, while it shares, stands for its screen.
-            if self.sharing {
-                Focus::OwnScreen
-            } else {
-                Focus::Person(id)
-            }
-        } else {
-            Focus::Stream(id)
-        })
+        Some(Focus::Person(id))
     }
 
     /// What the corner shows: what's large, if it moves; else the stream
@@ -251,26 +236,32 @@ mod tests {
         }
     }
 
+    fn watching(id: &str) -> Watching {
+        Watching { user: id.into(), name: id.into(), opening: true, frames: None, viewers: vec![] }
+    }
+
     #[test]
-    fn a_stream_takes_its_own_tile_only_beside_a_camera() {
+    fn only_watched_streams_have_separate_tiles() {
         let people = [
             person("me", true, true, true),
             person("ana", false, true, false),
             person("bo", false, true, true),
             person("cy", false, false, true),
         ];
+        let watching = [watching("ana")];
         let stage = Stage {
             participants: &people,
             sharing: true,
+            watching: &watching,
         };
-        assert_eq!(stage.streams().collect::<Vec<_>>(), [2]);
+        assert_eq!(stage.streams().collect::<Vec<_>>(), [1]);
         assert_eq!(stage.before(), 2);
         assert_eq!(stage.slot(&Focus::OwnScreen), Some(0));
-        assert_eq!(stage.slot(&Focus::Stream("bo".into())), Some(1));
+        assert_eq!(stage.slot(&Focus::Stream("bo".into())), None);
         assert_eq!(
             stage.slot(&Focus::Stream("ana".into())),
-            Some(3),
-            "in her tile"
+            Some(1),
+            "separate from her participant tile"
         );
         assert_eq!(
             stage.slot(&Focus::Stream("cy".into())),
@@ -282,7 +273,7 @@ mod tests {
             let focus = stage.focus_at(slot).unwrap();
             assert_eq!(stage.slot(&focus), Some(slot), "{focus:?}");
         }
-        assert_eq!(stage.focus_at(3), Some(Focus::Stream("ana".into())));
+        assert_eq!(stage.focus_at(3), Some(Focus::Person("ana".into())));
         assert_eq!(stage.focus_at(6), None);
     }
 
@@ -293,14 +284,16 @@ mod tests {
             person("ana", false, true, false),
             person("cy", false, false, true),
         ];
+        let watching = [watching("ana")];
         let stage = Stage {
             participants: &people,
             sharing: false,
+            watching: &watching,
         };
         let cy = Focus::Person("cy".into());
         assert_eq!(stage.pip(Some(&cy), Some("ana")), Pip::Camera(2));
         assert_eq!(stage.pip(None, Some("ana")), Pip::Watched);
-        assert_eq!(stage.pip_slot(Pip::Watched, Some("ana")), Some(1));
+        assert_eq!(stage.pip_slot(Pip::Watched, Some("ana")), Some(0));
         assert_eq!(
             stage.pip(None, None),
             Pip::Camera(2),

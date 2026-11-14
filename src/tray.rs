@@ -56,14 +56,27 @@ impl Tray {
 
 /// Yapfast's logo in Yap's marigold, `size` pixels square, with a red dot for
 /// unread messages cut into its corner.
+#[cfg(any(target_os = "linux", test))]
 fn logo(size: u32, unread: bool) -> Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
+    logo_in_colour(size, unread, 0xffbf47)
+}
+
+fn logo_in_colour(
+    size: u32,
+    unread: bool,
+    colour: u32,
+) -> Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
     let mut svg = include_str!("../ui/icons/logo.svg")
         .replacen(
             r#"width="24" height="24""#,
             &format!(r#"width="{size}" height="{size}""#),
             1,
         )
-        .replacen(r##"fill="#fff" mask"##, r##"fill="#ffbf47" mask"##, 1);
+        .replacen(
+            r##"fill="#fff" mask"##,
+            &format!("fill=\"#{:06x}\" mask", colour & 0xffffff),
+            1,
+        );
     if unread {
         svg = svg
             .replacen("</mask>", r#"<circle cx="74" cy="74" r="21" /></mask>"#, 1)
@@ -76,6 +89,11 @@ fn logo(size: u32, unread: bool) -> Option<slint::SharedPixelBuffer<slint::Rgba8
     slint::Image::load_from_svg_data(svg.as_bytes())
         .ok()?
         .to_rgba8()
+}
+
+#[cfg(windows)]
+pub fn set_icon_theme(accent: slint::Color) {
+    windows::set_icon_theme(accent.as_argb_encoded() & 0xffffff);
 }
 
 #[cfg(target_os = "linux")]
@@ -298,6 +316,36 @@ mod windows {
         /// thread, whose message loop winit runs.
         static ICON: RefCell<Option<Icon>> = const { RefCell::new(None) };
         static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+        static COLOUR: Cell<u32> = const { Cell::new(0xffbf47) };
+    }
+
+    pub fn set_icon_theme(colour: u32) {
+        if COLOUR.replace(colour) == colour {
+            return;
+        }
+        let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 256) as u32;
+        if !ICON.with_borrow(|slot| slot.is_some()) {
+            return;
+        }
+        let icons = [icon(size, false), icon(size, true)];
+        if icons.iter().any(|icon| icon.is_null()) {
+            for icon in icons {
+                if !icon.is_null() {
+                    unsafe { DestroyIcon(icon) };
+                }
+            }
+            return;
+        }
+        let (data, previous) = ICON.with_borrow_mut(|slot| {
+            let current = slot.as_mut().expect("tray exists");
+            let previous = std::mem::replace(&mut current.icons, icons);
+            current.data.hIcon = current.icons[usize::from(current.shown.unread)];
+            (current.data, previous)
+        });
+        notify(NIM_MODIFY, &data);
+        for icon in previous {
+            unsafe { DestroyIcon(icon) };
+        }
     }
 
     struct Icon {
@@ -419,7 +467,7 @@ mod windows {
     /// The logo as an icon with an alpha channel: colour as BGRA, and an empty
     /// mask, which the alpha replaces.
     fn icon(size: u32, unread: bool) -> HICON {
-        let Some(pixels) = super::logo(size, unread) else {
+        let Some(pixels) = super::logo_in_colour(size, unread, COLOUR.get()) else {
             return std::ptr::null_mut();
         };
         let colour: Vec<u8> = pixels
@@ -542,6 +590,24 @@ mod none {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn themed_tray_icon_keeps_the_unread_indicator() {
+        let plain = super::logo_in_colour(32, false, 0xffffff).unwrap();
+        let unread = super::logo_in_colour(32, true, 0xffffff).unwrap();
+        assert!(
+            plain
+                .as_slice()
+                .iter()
+                .any(|pixel| pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (255, 255, 255))
+        );
+        assert!(
+            unread
+                .as_slice()
+                .iter()
+                .any(|pixel| pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (0xf0, 0x54, 0x5e))
+        );
+    }
+
     #[test]
     fn the_logo_is_marigold_and_unread_adds_a_red_dot() {
         let plain = super::logo(32, false).unwrap();
