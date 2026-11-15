@@ -167,16 +167,24 @@ impl Call {
     /// Connects to `server` for `channel_id`, as when Discord moves the call
     /// to another voice server, or someone moves this account to another
     /// channel of the server. What plays carries on there.
-    pub async fn move_to(&mut self, server: &VoiceServer, channel_id: &str) -> Result<()> {
-        let identity = identity(server, &self.server_id, channel_id)?;
-        let (reply, replied) = oneshot::channel();
-        if self.orders.send(Order::Move(identity, reply)).is_err() {
-            bail!("the call has ended");
+    pub fn move_to(
+        &mut self,
+        server: &VoiceServer,
+        channel_id: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + use<> {
+        let request = identity(server, &self.server_id, channel_id).and_then(|identity| {
+            let (reply, replied) = oneshot::channel();
+            self.orders
+                .send(Order::Move(identity, reply))
+                .map_err(|_| anyhow::anyhow!("the call has ended"))?;
+            Ok(replied)
+        });
+        async move {
+            request?
+                .await
+                .context("the call ended while moving")?
+                .context("could not connect to Discord voice")
         }
-        replied
-            .await
-            .context("the call ended while moving")?
-            .context("could not connect to Discord voice")
     }
 
     /// Sends this input's audio from now on, replacing any before it.

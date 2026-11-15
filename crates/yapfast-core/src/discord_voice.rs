@@ -109,7 +109,11 @@ impl Share {
 }
 
 fn clear_stopped_share_error(state: &mut State) {
-    if state.error.as_deref().is_some_and(|error| error.starts_with("Lost the stream connection:")) {
+    if state
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("Lost the stream connection:"))
+    {
         state.error = None;
     }
 }
@@ -517,6 +521,8 @@ pub(crate) async fn call(
         // The voice connection dropped, and the call ends when `lost` comes
         // unless Discord says it moved the call meanwhile.
         let mut dropped = false;
+        let mut connected_channel = channel.clone();
+        let mut moving: Option<(String, VoiceServer, Pin<Box<dyn Future<Output = Result<()>>>>)> = None;
         let lost = tokio::time::sleep(MOVE_GRACE);
         tokio::pin!(lost);
         loop {
@@ -1093,19 +1099,19 @@ pub(crate) async fn call(
                     // Discord moved the call to another voice server: the
                     // call carries on there.
                     Live::VoiceMoved { guild: moved, server: next } if moved == guild => {
-                        if dropped || next.endpoint != server.endpoint || next.token != server.token {
-                            tracing::info!("Discord moved the call to another voice server");
-                            match tokio::time::timeout(MOVE_TIMEOUT, call.move_to(&next, &channel)).await {
-                                Ok(Ok(())) => {
-                                    server = next;
-                                    dropped = false;
-                                }
-                                Ok(Err(error)) => {
-                                    tracing::warn!(error = format!("{error:#}"), "could not follow the call to its new voice server");
-                                    bail!("Discord moved the call to another voice server, and Yapfast couldn't connect to it. Join again.");
-                                }
-                                Err(_) => bail!("Discord moved the call to another voice server, which took too long to answer. Join again."),
+                        if dropped || moving.is_some() || connected_channel != channel
+                            || next.endpoint != server.endpoint || next.token != server.token
+                            || next.session_id != server.session_id
+                        {
+                            if moving.as_ref().is_some_and(|(target, assigned, _)|
+                                target == &channel && assigned.endpoint == next.endpoint
+                                && assigned.token == next.token && assigned.session_id == next.session_id)
+                            {
+                                continue;
                             }
+                            tracing::info!("Discord moved the call to another voice server");
+                            let request = call.move_to(&next, &channel);
+                            moving = Some((channel.clone(), next, Box::pin(request)));
                         }
                     }
                     // Or a stream this account shares or watches.
@@ -1139,7 +1145,27 @@ pub(crate) async fn call(
                     dropped = true;
                     lost.as_mut().reset(tokio::time::Instant::now() + MOVE_GRACE);
                 }
-                () = &mut lost, if dropped => {
+                result = async {
+                    match moving.as_mut() {
+                        Some((_, _, request)) => request.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let (target, next, _) = moving.take().expect("move in progress");
+                    match result {
+                        Ok(()) => {
+                            server = next;
+                            connected_channel = target;
+                            dropped = false;
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = format!("{error:#}"), "could not follow the call to its new voice server");
+                            dropped = true;
+                            lost.as_mut().reset(tokio::time::Instant::now() + MOVE_GRACE);
+                        }
+                    }
+                }
+                () = &mut lost, if dropped && moving.is_none() => {
                     bail!("Discord voice disconnected. Join again to reconnect.");
                 }
                 changed = discord_states.changed() => {
@@ -1182,9 +1208,6 @@ pub(crate) async fn call(
     discord.leave(guild);
     result
 }
-
-/// How long connecting to the voice server a call moved to may take.
-const MOVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Opens the chosen speakers, or the system default if they're gone.
 fn open_discord_speakers(

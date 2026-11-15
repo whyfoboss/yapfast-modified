@@ -3525,16 +3525,22 @@ async fn join_lounge(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
 async fn a_call_follows_a_move_to_another_voice_server() {
-    follows_voice_move(4014).await;
+    follows_voice_move(4014, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
 async fn a_call_follows_a_move_when_the_old_call_is_terminated() {
-    follows_voice_move(4022).await;
+    follows_voice_move(4022, false).await;
 }
 
-async fn follows_voice_move(close_code: u16) {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn a_call_follows_a_move_after_a_failed_assignment() {
+    follows_voice_move(4014, true).await;
+}
+
+async fn follows_voice_move(close_code: u16, failed_assignment: bool) {
     let fixture = Fixture::start("a_call_follows_a_move_to_another_voice_server").await;
     let (discord, server, guild) = (&fixture.discord, fixture.server, &fixture.guild);
     let listener = Arc::new(Dropping::default());
@@ -3576,6 +3582,16 @@ async fn follows_voice_move(close_code: u16) {
     })
     .await;
     assert!(listener.dropped.lock().unwrap()[0].contains(&close_code.to_string()));
+    if failed_assignment {
+        let mut unavailable = moved.clone();
+        unavailable.endpoint = "ws://127.0.0.1:1".into();
+        assert!(
+            timeout(WAIT, call.move_to(&unavailable, &to))
+                .await
+                .expect("timed out waiting for the failed assignment")
+                .is_err()
+        );
+    }
     // The call waited, and carries on there: Bob's tone comes through.
     timeout(WAIT, call.move_to(&moved, &to))
         .await

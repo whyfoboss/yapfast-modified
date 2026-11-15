@@ -2913,6 +2913,7 @@ impl Adapter {
                     }
                 }
                 Effect::Sound(sound) => self.sound(sound),
+                Effect::OwnStreamSound(sound) => self.play(sound),
                 Effect::Backend(Command::Typing { .. }) if self.layout.dont_show_typing() => {}
                 Effect::Backend(command) => {
                     let result = match &self.backend {
@@ -3428,7 +3429,7 @@ impl Adapter {
         // anything; a sound changes nothing on screen.
         let reach = if effects
             .iter()
-            .all(|effect| matches!(effect, Effect::Sound(_)))
+            .all(|effect| matches!(effect, Effect::Sound(_) | Effect::OwnStreamSound(_)))
         {
             reach
         } else {

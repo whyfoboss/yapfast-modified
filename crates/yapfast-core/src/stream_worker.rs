@@ -855,8 +855,16 @@ fn watch(
     let mut failures = 0u64;
     let started = Instant::now();
     let mut measured = started;
+    let mut last_picture = Instant::now();
+    let mut last_recovery = Instant::now();
     let (mut input, mut published) = (0u64, 0u64);
     while !stop.load(Ordering::Relaxed) {
+        if last_picture.elapsed() >= Duration::from_secs(5)
+            && last_recovery.elapsed() >= Duration::from_secs(5)
+        {
+            receiver.request_keyframe();
+            last_recovery = Instant::now();
+        }
         if measured.elapsed() >= Duration::from_secs(5) {
             tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64,
                 input, published, failures, waiting, codec = ?decoder.as_ref().map(|decoder| decoder.codec()), "stream decoder status");
@@ -909,6 +917,7 @@ fn watch(
             }
         };
         let (width, height) = (picture.width, picture.height);
+        last_picture = Instant::now();
         if writer.fits(width, height) && width <= max_width && height <= max_height {
             writer.write_video(picture.i420(), width, height, &mut scratch);
         } else {
