@@ -864,9 +864,9 @@ export component ProfileListRow inherits Rectangle {
             }
         }
         VerticalLayout {
-            alignment: center; spacing: 0px; horizontal-stretch: 1;
-            Text { text: root.name; color: Theme.text; font-size: 15px; font-weight: 500; overflow: elide; }
-            if root.detail != "": Text { text: root.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
+            alignment: center; spacing: 0px; horizontal-stretch: 1; min-width: 0px;
+            Text { min-width: 0px; text: root.name; color: Theme.text; font-size: 15px; font-weight: 500; overflow: elide; }
+            if root.detail != "": Text { min-width: 0px; text: root.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
         }
     }
     focus := FocusScope {
@@ -951,6 +951,7 @@ export component ProfileCard inherits Rectangle {
             ScrollView {
                 y: 0px; height: parent.height;
                 content-height: body.preferred-height;
+                content-width: self.visible-width;
                 body := VerticalLayout {
                     padding-bottom: root.pad; spacing: 0px;
                     // The banner, with the avatar hanging over its lower edge.
@@ -1082,6 +1083,7 @@ export component ProfileCard inherits Rectangle {
                             if root.data.handle != "" || root.data.pronouns != "" || root.data.tag != "" || root.data.badges.length > 0: HorizontalLayout {
                                 spacing: 6px; alignment: start;
                                 if root.data.handle != "": TextInput {
+                                    min-width: 0px;
                                     text: root.data.handle;
                                     color: Theme.secondary; font-size: 14px; font-weight: 400; vertical-alignment: center;
                                     read-only: true; single-line: true;
@@ -1095,6 +1097,7 @@ export component ProfileCard inherits Rectangle {
                                     color: Theme.secondary; font-size: 14px; vertical-alignment: center;
                                 }
                                 if root.data.pronouns != "": TextInput {
+                                    min-width: 0px;
                                     text: root.data.pronouns;
                                     color: Theme.secondary; font-size: 14px; font-weight: 400; vertical-alignment: center;
                                     read-only: true; single-line: true;
@@ -1104,7 +1107,8 @@ export component ProfileCard inherits Rectangle {
                                     accessible-label: "Pronouns";
                                 }
                                 if root.data.tag != "": Middle { ServerTagChip { text: root.data.tag; badge: root.data.tag-badge; font-weight: 400; chip-height: 24px; pad: 8px; radius: 8px; fill: Theme.overlay.with-alpha(0.08); outline: Theme.overlay.with-alpha(0.03); outline-width: 1px; } }
-                                if root.data.badges.length > 0: HorizontalLayout {
+                            }
+                            if root.data.badges.length > 0: HorizontalLayout {
                                     alignment: start; spacing: 2px;
                                     for badge[index] in root.data.badges: ProfileBadge {
                                         width: 20px; height: 20px; visible: index < 6;
@@ -1116,7 +1120,6 @@ export component ProfileCard inherits Rectangle {
                                         text: "+" + (root.data.badges.length - 6); color: Theme.secondary;
                                         font-size: 12px; font-weight: 600; vertical-alignment: center; horizontal-alignment: center;
                                     }
-                                }
                             }
                         }
                         // The card's actions sit under the name, as in v0.3.0:

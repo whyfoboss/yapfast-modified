@@ -362,6 +362,58 @@ fn watch_frames(
     frames
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn a_running_av1_stream_recovers_when_keyframes_stop() {
+    let fixture = Fixture::start("a_running_av1_stream_recovers_when_keyframes_stop").await;
+    let (_assigned, _call) = join_lounge(&fixture, Arc::new(Dropping::default())).await;
+    let bob = stream::key(&fixture.guild, &fixture.lounge, &fixture.bob);
+    let watched = fixture.discord.watch(&bob).await.unwrap();
+    let server = fixture.server;
+    tokio::task::spawn_blocking(move || {
+        stream_codec(server, "av1");
+        let mut receiver = StreamReceiver::start(watched, vec![Codec::Av1, Codec::H264]).unwrap();
+        let sounds = receiver.take_sounds().unwrap();
+        let first = receiver.next(WAIT).expect("AV1 starts with video");
+        assert_eq!(first.codec, Codec::Av1);
+
+        post_control(server, "/_control/stream-video?paused=1", "");
+        let pause_ends = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < pause_ends {
+            let _ = receiver.next(Duration::from_millis(100));
+            let _ = sounds.try_iter().count();
+        }
+        post_control(server, "/_control/stream-video", "");
+        let resumed = receiver
+            .next(WAIT)
+            .expect("video resumes on the same connection");
+        assert_eq!(resumed.codec, Codec::Av1);
+
+        post_control(server, "/_control/stream-codec?no-keyframes", "av1");
+        receiver.request_keyframe();
+        let deadline = std::time::Instant::now() + WAIT;
+        let mut heard = 0;
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "video did not fall back after losing AV1 keyframes: {:?}",
+                receiver.link()
+            );
+            heard += sounds.try_iter().count();
+            if let Some(frame) = receiver.next(Duration::from_millis(100))
+                && frame.codec == Codec::H264
+            {
+                assert!(frame.keyframe, "the recovered video starts with a keyframe");
+                assert!(heard > 10, "audio continued during the video stall");
+                assert_eq!(receiver.next(WAIT).unwrap().codec, Codec::H264);
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 /// Offers `gpu`, AV1 or H265, first, as a GPU encoder lets Yapfast:
 /// Discord chooses it, and when a viewer whose client decodes only H264 and
 /// VP8 starts watching, it switches the stream to H264 with op 14, and
@@ -1286,16 +1338,23 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
     })
     .await;
     let mut playback = yapfast_discord::own_activity::MusicPlayback {
+        soundcloud_source: false,
         title: "Fixture track".into(),
         artist: "Fixture artist".into(),
         duration_ms: 72_000,
+        position_ms: 48_000,
         start_ms: None,
     };
     discord.set_music_playback(Some(playback.clone()));
     presence_where(server, |p| {
         p["activities"].as_array().is_some_and(|a| {
             a.iter()
-                .any(|a| a["name"] == "SoundCloud" && a.get("timestamps").is_none())
+                .any(|a| {
+                    a["name"] == "SoundCloud"
+                        && a.get("timestamps").is_none()
+                        && a["state"] == "Paused at 0:48 · Fixture artist"
+                        && a["details"] == "Fixture track"
+                })
         })
     })
     .await;
@@ -1307,6 +1366,7 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
                 a["name"] == "SoundCloud"
                     && a["timestamps"]["start"] == 1800000001000_u64
                     && a["timestamps"]["end"] == 1800000073000_u64
+                    && a["state"] == "Fixture artist"
             })
         })
     })
@@ -3517,16 +3577,22 @@ async fn join_lounge(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
 async fn a_call_follows_a_move_to_another_voice_server() {
-    follows_voice_move(4014).await;
+    follows_voice_move(4014, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
 async fn a_call_follows_a_move_when_the_old_call_is_terminated() {
-    follows_voice_move(4022).await;
+    follows_voice_move(4022, false).await;
 }
 
-async fn follows_voice_move(close_code: u16) {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn a_call_follows_a_move_after_a_failed_assignment() {
+    follows_voice_move(4014, true).await;
+}
+
+async fn follows_voice_move(close_code: u16, failed_assignment: bool) {
     let fixture = Fixture::start("a_call_follows_a_move_to_another_voice_server").await;
     let (discord, server, guild) = (&fixture.discord, fixture.server, &fixture.guild);
     let listener = Arc::new(Dropping::default());
@@ -3568,6 +3634,16 @@ async fn follows_voice_move(close_code: u16) {
     })
     .await;
     assert!(listener.dropped.lock().unwrap()[0].contains(&close_code.to_string()));
+    if failed_assignment {
+        let mut unavailable = moved.clone();
+        unavailable.endpoint = "ws://127.0.0.1:1".into();
+        assert!(
+            timeout(WAIT, call.move_to(&unavailable, &to))
+                .await
+                .expect("timed out waiting for the failed assignment")
+                .is_err()
+        );
+    }
     // The call waited, and carries on there: Bob's tone comes through.
     timeout(WAIT, call.move_to(&moved, &to))
         .await

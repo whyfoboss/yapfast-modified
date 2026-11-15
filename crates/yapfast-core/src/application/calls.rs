@@ -8,6 +8,17 @@ use crate::sounds::Sound;
 /// stopping a stream. People arriving together make one sound. Reconnecting makes none,
 /// and nor do those a DM call is still ringing, until they answer.
 pub(super) fn call_sounds(before: &voice::State, after: &voice::State) -> Vec<Effect> {
+    let sharing_started = |state: &voice::State| {
+        state
+            .sharing
+            .as_ref()
+            .is_some_and(|share| share.phase != voice::SharePhase::Choosing)
+    };
+    match (sharing_started(before), sharing_started(after)) {
+        (false, true) => return vec![Effect::OwnStreamSound(Sound::StreamStart)],
+        (true, false) => return vec![Effect::OwnStreamSound(Sound::StreamStop)],
+        _ => {}
+    }
     let here = |state: &voice::State| matches!(state.phase, Phase::Connected | Phase::Reconnecting);
     let others = |state: &voice::State| -> HashSet<String> {
         state

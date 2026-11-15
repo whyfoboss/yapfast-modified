@@ -1583,6 +1583,7 @@ impl Layout {
         let (id, chosen) =
             theme::chosen(self.theme.as_deref().or(default_theme), &self.custom_themes);
         chosen.apply(window);
+        crate::icon::apply_theme(window, chosen.accent, chosen.on_accent);
         window.set_theme_id(id.into());
         window.set_themes(theme::cards(&self.custom_themes));
         if let Some(width) = self.sidebar_width {
@@ -2912,6 +2913,7 @@ impl Adapter {
                     }
                 }
                 Effect::Sound(sound) => self.sound(sound),
+                Effect::OwnStreamSound(sound) => self.play(sound),
                 Effect::Backend(Command::Typing { .. }) if self.layout.dont_show_typing() => {}
                 Effect::Backend(command) => {
                     let result = match &self.backend {
@@ -3427,7 +3429,7 @@ impl Adapter {
         // anything; a sound changes nothing on screen.
         let reach = if effects
             .iter()
-            .all(|effect| matches!(effect, Effect::Sound(_)))
+            .all(|effect| matches!(effect, Effect::Sound(_) | Effect::OwnStreamSound(_)))
         {
             reach
         } else {

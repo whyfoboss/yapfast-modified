@@ -24,13 +24,15 @@ use tokio::{
 use crate::{
     rtp::{self, Assembler, Codec, Packetizer},
     stream::{self, StreamServer},
-    voice_connection::{Connection, Identity, lock, receive, send_json},
+    voice_connection::{Closed, Connection, Identity, lock, receive, send_json},
 };
 
 /// How often a viewer may ask for a keyframe while frames are lost.
 const KEYFRAME_REQUESTS: Duration = Duration::from_millis(500);
-/// Give AV1 several keyframe requests before trying H264 for the first picture.
-const AV1_START_GRACE: Duration = Duration::from_secs(4);
+/// Give the sender several keyframe requests before falling back to H264.
+const VIDEO_RECOVERY_GRACE: Duration = Duration::from_secs(4);
+/// A pause in video traffic restarts the recovery grace period.
+const VIDEO_PACKET_GAP: Duration = Duration::from_secs(1);
 /// How often a streamer sends an RTCP sender report.
 const SENDER_REPORTS: Duration = Duration::from_secs(1);
 /// How often a viewer logs what it received while no picture comes through.
@@ -478,6 +480,44 @@ async fn send(
     mut frames: mpsc::Receiver<Frame>,
     mut sounds: mpsc::Receiver<Sound>,
 ) -> Result<()> {
+    let mut failures = 0u32;
+    loop {
+        let started = Instant::now();
+        match send_once(server, user, channel, fps, shared, &mut frames, &mut sounds).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if frames.is_closed() { return Ok(()); }
+                if stream_session_ended(&error) {
+                    return Err(error);
+                }
+                if started.elapsed() >= Duration::from_secs(30) { failures = 0; }
+                failures += 1;
+                if failures > 3 { return Err(error); }
+                tracing::warn!(attempt = failures, error = %error, "stream connection dropped; reconnecting");
+                *lock(&shared.link) = Link::Connecting;
+                shared.keyframe.store(true, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(500 * u64::from(failures))).await;
+                if frames.is_closed() { return Ok(()); }
+                while frames.try_recv().is_ok() {}
+                while sounds.try_recv().is_ok() {}
+            }
+        }
+    }
+}
+
+fn stream_session_ended(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Closed>().and_then(|closed| closed.code) == Some(4006)
+}
+
+async fn send_once(
+    server: &StreamServer,
+    user: u64,
+    channel: u64,
+    fps: u32,
+    shared: &Shared,
+    frames: &mut mpsc::Receiver<Frame>,
+    sounds: &mut mpsc::Receiver<Sound>,
+) -> Result<()> {
     let mut connection = open(server, user, channel, Role::Send, shared).await?;
     let (ssrc, video, rtx) = (connection.ssrc, connection.video, connection.rtx);
     let mut size = *lock(&shared.size);
@@ -494,6 +534,7 @@ async fn send(
     )
     .await?;
     *lock(&shared.link) = Link::Connected;
+    shared.keyframe.store(true, Ordering::Relaxed);
 
     // Discord's choice, or the first offered while it hasn't said.
     let offered = lock(&shared.offers).clone();
@@ -814,6 +855,8 @@ struct Received {
     video: u64,
     frames: u64,
     unreadable: u64,
+    /// Decrypted AV1 frames held while waiting for a usable recovery frame.
+    av1_waiting: u64,
     decoded: u64,
     /// Opus frames of the stream's sound, and those that wouldn't decrypt.
     sounds: u64,
@@ -883,7 +926,7 @@ async fn receive_stream(
     Ok(())
 }
 
-/// Returns true when the same watch should reconnect without AV1.
+/// Returns true when the same watch should reconnect without AV1 and H265.
 async fn receive_stream_once(
     server: &StreamServer,
     user: u64,
@@ -931,9 +974,11 @@ async fn receive_stream_once(
     let mut flowing = 0;
     let can_fallback = {
         let offers = lock(&shared.offers);
-        offers.contains(&Codec::Av1) && offers.contains(&Codec::H264)
+        offers.contains(&Codec::H264)
+            && (offers.contains(&Codec::Av1) || offers.contains(&Codec::H265))
     };
-    let mut av1_started = None;
+    // First and latest video packet in a stretch without a usable frame.
+    let mut stalled_video = None;
     loop {
         tokio::select! {
             _ = &mut *stopped => {
@@ -956,6 +1001,7 @@ async fn receive_stream_once(
                         incoming.clear();
                         last_report = None;
                         recovering = true;
+                        stalled_video = None;
                     }
                 }
             }
@@ -1072,11 +1118,16 @@ async fn receive_stream_once(
                     received.other += 1;
                     continue;
                 }
-                if can_fallback && received.decoded == 0 {
-                    if codec == Codec::Av1 {
-                        av1_started.get_or_insert(Instant::now());
-                    } else {
-                        av1_started = None;
+                if can_fallback && !resent {
+                    match codec {
+                        Codec::Av1 | Codec::H265 => {
+                            let now = Instant::now();
+                            let started = stalled_video
+                                .filter(|&(_, latest)| now - latest < VIDEO_PACKET_GAP)
+                                .map_or(now, |(started, _)| started);
+                            stalled_video = Some((started, now));
+                        }
+                        _ => stalled_video = None,
                     }
                 }
                 // Keep the codec inferred at arrival across session updates and reordering.
@@ -1106,7 +1157,9 @@ async fn receive_stream_once(
             && shared.keyframe.swap(false, Ordering::Relaxed)
         {
             recovering = true;
-            if let Some(video) = incoming.get_mut(&media) {
+            if let Some(video) = incoming.get_mut(&media)
+                && video.assembler.codec() != Codec::H264
+            {
                 video.assembler.wait_for_keyframe();
             }
         }
@@ -1127,13 +1180,18 @@ async fn receive_stream_once(
                 received.frames += 1;
                 let Some(data) = connection.dave.decrypt(streamer_id, frame.data) else {
                     received.unreadable += 1;
-                    video.assembler.wait_for_keyframe();
+                    // A single DAVE failure does not imply packet loss. Keep
+                    // H264 frames flowing while asking the sender for an IDR.
+                    if codec != Codec::H264 {
+                        video.assembler.wait_for_keyframe();
+                    }
                     recovering = true;
                     continue;
                 };
                 let keyframe = frame.keyframe
                     || (codec == Codec::Av1 && recovering && rtp::av1_recovery_keyframe(&data));
                 if codec == Codec::Av1 && recovering && !keyframe {
+                    received.av1_waiting += 1;
                     continue;
                 }
                 let frame = ReceivedFrame {
@@ -1145,6 +1203,7 @@ async fn receive_stream_once(
                     Ok(()) => {
                         received.decoded += 1;
                         recovering &= !keyframe;
+                        stalled_video = None;
                     }
                     Err(channel::TrySendError::Full(_)) => {
                         received.behind += 1;
@@ -1173,12 +1232,12 @@ async fn receive_stream_once(
             connection.transport.seal(&mut request, rtp::RTCP_CLEAR)?;
             connection.udp.send(&request).await?;
         }
-        if received.decoded == 0
-            && received.sounds > 0
-            && av1_started.is_some_and(|started| started.elapsed() >= AV1_START_GRACE)
-        {
-            tracing::warn!(target: "yapfast_stream", unreadable = received.unreadable,
-                "AV1 supplied no usable first keyframe; retrying the stream with H264");
+        if stalled_video.is_some_and(|(started, latest)| {
+            started.elapsed() >= VIDEO_RECOVERY_GRACE && latest.elapsed() < VIDEO_PACKET_GAP
+        }) {
+            tracing::warn!(target: "yapfast_stream", codec = ?streamer.codec,
+                queued = received.decoded, unreadable = received.unreadable,
+                "video packets arrived without a usable frame; retrying the stream with H264");
             let _ = connection.ws.close(None).await;
             return Ok(true);
         }
@@ -1188,6 +1247,15 @@ async fn receive_stream_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_stream_session_does_not_retry() {
+        let expired = anyhow::Error::new(Closed { code: Some(4006), reason: String::new() });
+        let dropped = anyhow::Error::new(Closed { code: None, reason: String::new() });
+        assert!(stream_session_ended(&expired));
+        assert!(!stream_session_ended(&dropped));
+        assert!(!stream_session_ended(&anyhow::anyhow!("connection reset")));
+    }
 
     #[test]
     fn learns_the_streamers_video() {

@@ -13,6 +13,7 @@ impl Adapter {
         };
         window.set_theme_id(id.as_str().into());
         self.set_theme(window, &chosen);
+        crate::icon::apply_theme(window, chosen.accent, chosen.on_accent);
         self.layout.theme = Some(id);
         self.layout.write(&self.root);
         true

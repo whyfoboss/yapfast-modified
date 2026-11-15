@@ -37,6 +37,10 @@ server, and the call ends then. A stream moves the same way, with a new `STREAM_
 `STREAM_SERVER_UPDATE`: sharing sends to the new server, after waiting up to
 five seconds for it when the old connection ends, and watching connects again.
 
+If connecting to the assigned voice server fails, Yapfast tries once more
+and then waits briefly for a fresh assignment. A newer assignment replaces
+the connection attempt in progress.
+
 A join that fails says why in the dock. Discord's gateway errors are
 sentences of their own ("Discord disconnected while joining voice."); a
 voice server that fails says the step: "Couldn't connect to Discord voice:

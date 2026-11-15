@@ -12,6 +12,12 @@ if this account's voice state arrives after both answers. `yapfast_discord::stre
 streams by key (`guild:{server}:{channel}:{user}`) and
 `Discord::{go_live, watch, end_stream, pause_stream}` run the signalling. Voice
 states carry `self_stream`, which shows as a LIVE badge beside the person.
+The Stream Start sound plays as soon as capture begins, while Discord is
+connecting the stream. Stream Stop plays when that share ends. Both play even
+while deafened, at the volume chosen in Sounds.
+If the outgoing media connection drops, it retries up to three times using
+the same stream session; an expired session is not retried. Stopping the
+share still ends the worker and its connection.
 Sharing starts from the call's controls or from the voice panel's Share
 button, which works wherever the window is; the panel says when the stream
 is live and stops it. A click on someone's tile watches their stream, which
@@ -210,9 +216,11 @@ error, or a full decoder queue, playback holds the last picture and drops
 dependent frames until a keyframe arrives. The connection retries its picture
 loss indication at most every 500 ms until a keyframe reaches the decoder,
 even if no further video packets arrive. AV1 recovery also recognizes a keyframe
-after decryption when it reuses the existing coded sequence. If AV1 video
-packets and audio arrive but no usable first keyframe does, the viewer retries
-the media connection once with H264 and VP8. The connection
+after decryption when it reuses the existing coded sequence. If AV1 or H265
+video packets keep arriving for four seconds without delivering a usable frame
+to the decoder, the viewer retries the media connection once with H264 and VP8.
+This applies at startup and during playback. A pause in incoming video resets
+the grace period. The connection
 sends a receiver report every second
 (packets lost, the highest received, and the streamer's last sender report
 echoed). With `YAPFAST_LOG=debug` it logs what it received every 5 s (`stream

@@ -2523,9 +2523,44 @@ fn others_going_live_and_ending_sounds_but_not_as_anyone_comes_or_goes_streaming
     );
     // Kim leaving mid-stream makes only the sound of leaving.
     assert_eq!(heard(call(false, &[("sam", false)])), [Sound::Leave]);
-    // This account going live and ending makes none.
+    // The local participant's badge alone does not announce a share.
     assert_eq!(heard(call(true, &[("sam", false)])), []);
     assert_eq!(heard(call(false, &[("sam", false)])), []);
+}
+
+#[test]
+fn local_stream_sounds_at_capture_start_and_stop() {
+    let mut state = voice::State {
+        phase: Phase::Connected,
+        room: Some("lounge".into()),
+        deafened: true,
+        ..Default::default()
+    };
+    let mut app = connected();
+    app.apply(Event::Voice(state.clone()));
+    state.sharing = Some(voice::Sharing {
+        phase: voice::SharePhase::Choosing,
+        frames: std::sync::Arc::new(crate::frames::Frames::create(2, 2).unwrap()),
+        viewers: vec![],
+    });
+    assert!(app.apply(Event::Voice(state.clone())).is_empty());
+    let mut cancelled = state.clone();
+    cancelled.sharing = None;
+    assert!(app.apply(Event::Voice(cancelled)).is_empty());
+    assert!(app.apply(Event::Voice(state.clone())).is_empty());
+    state.sharing.as_mut().unwrap().phase = voice::SharePhase::Starting;
+    assert!(matches!(
+        app.apply(Event::Voice(state.clone())).as_slice(),
+        [Effect::OwnStreamSound(Sound::StreamStart)]
+    ));
+    state.sharing.as_mut().unwrap().phase = voice::SharePhase::Live;
+    assert!(app.apply(Event::Voice(state.clone())).is_empty());
+    state.sharing = None;
+    assert!(matches!(
+        app.apply(Event::Voice(state.clone())).as_slice(),
+        [Effect::OwnStreamSound(Sound::StreamStop)]
+    ));
+    assert!(app.apply(Event::Voice(state)).is_empty());
 }
 
 #[test]

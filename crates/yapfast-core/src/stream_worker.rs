@@ -855,11 +855,19 @@ fn watch(
     let mut failures = 0u64;
     let started = Instant::now();
     let mut measured = started;
+    let mut last_picture = Instant::now();
+    let mut last_recovery = Instant::now();
     let (mut input, mut published) = (0u64, 0u64);
     while !stop.load(Ordering::Relaxed) {
+        if last_picture.elapsed() >= Duration::from_secs(5)
+            && last_recovery.elapsed() >= Duration::from_secs(5)
+        {
+            receiver.request_keyframe();
+            last_recovery = Instant::now();
+        }
         if measured.elapsed() >= Duration::from_secs(5) {
-            tracing::info!(target: "yapfast_stream", elapsed_ms = started.elapsed().as_millis() as u64,
-                input, published, failures, waiting, "stream decoder");
+            tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64,
+                input, published, failures, waiting, codec = ?decoder.as_ref().map(|decoder| decoder.codec()), "stream decoder status");
             measured = Instant::now();
         }
         while let Ok(control) = sound.controls.try_recv() {
@@ -901,13 +909,15 @@ fn watch(
                         "a stream frame didn't decode"
                     );
                 }
-                // Keep codec headers already learned by the decoder.
-                waiting = true;
+                // Keep codec headers already learned by the decoder. H264
+                // can conceal a lost frame and decode following pictures.
+                waiting = frame.codec != Codec::H264;
                 receiver.request_keyframe();
                 continue;
             }
         };
         let (width, height) = (picture.width, picture.height);
+        last_picture = Instant::now();
         if writer.fits(width, height) && width <= max_width && height <= max_height {
             writer.write_video(picture.i420(), width, height, &mut scratch);
         } else {

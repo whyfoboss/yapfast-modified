@@ -608,7 +608,7 @@ Hide Styles folds the column away, sliding, and the Show Styles tab on the
 card's edge brings it back.
 
 The name, bio and note are outlined while pointed at. Clicking the name or
-bio opens its field in place. The pronouns field is directly after the username
+bio opens its field in place. The bio field grows with its text and scrolls when it reaches its maximum height. The pronouns field is directly after the username
 and takes focus by click or Tab. Activity cards appear below it. Profile badges
 are shown in profile views outside this editor. Enter, Escape
 or a click elsewhere on the card ends text editing. The note
@@ -811,11 +811,13 @@ for that integration. Browser applications are excluded from own presence.
 
 On Windows, the Game Activity card and own profiles use the SMTC playback
 position when the current media session matches the RPC track. Paused
-positions stay fixed. Published music RPC omits the running timer while
-paused and uses the Windows playback timeline again on resume. Video RPC,
+positions stay fixed. While paused, published music RPC removes playback
+timestamps and puts the fixed position in the activity text. On resume it
+restores the original text and uses the Windows playback timeline. Video RPC,
 including YouTube reported as Playing, is filtered from own presence.
-Media and RPC artwork arrive independently of the
-initial activity. For local troubleshooting, `YAPFAST_MEDIA_LOG=1` enables
+Media and RPC artwork can arrive after the initial activity. SoundCloud
+cover and clock refreshes leave the last available presence update for
+playback changes. For local troubleshooting, `YAPFAST_MEDIA_LOG=1` enables
 the `yapfast_media` transition and timing diagnostics.
 
 A per-app Off rule filters the published presence, the own roster line and

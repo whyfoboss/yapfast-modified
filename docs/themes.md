@@ -9,6 +9,11 @@ is kept in `layout.json` as `theme`, the theme's id, and applied before the
 window's first frame, and again to a window made anew. An id Yapfast doesn't
 know, or a deleted theme's, shows Yap.
 
+On Windows, the selected theme's accent and foreground also colour the window
+and taskbar icon. Existing Yapfast shortcuts that point to the running executable
+are updated to match, including its Start menu and pinned shortcuts. Windows may
+keep a cached shortcut icon temporarily. The executable's own icon stays unchanged.
+
 ## Custom themes
 
 New theme opens an editor on a copy of the theme shown; START FROM swaps it

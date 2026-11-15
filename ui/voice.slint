@@ -912,8 +912,7 @@ export component ParticipantGrid inherits Flickable {
     in property <image> share-frame;
     in property <[PersonRow]> share-viewers;
     in property <string> share-viewer-names;
-    /// The streams of those who film too, in tiles of their own, as indexes
-    /// of `participants`. Others' streams show in their own tiles.
+    /// Watched streams in tiles of their own, as indexes of `participants`.
     in property <[int]> stream-tiles;
     /// Whether any stream is currently being actively watched.
     in property <bool> has-active-streams: false;
@@ -988,14 +987,10 @@ export component ParticipantGrid inherits Flickable {
     property <bool> is-focus-mode: !root.compact && root.has-active-streams && !self.is-multi-grid;
     property <int> total-call-items: (root.sharing ? 1 : 0) + root.stream-tiles.length + root.participants.length;
     property <int> grid-strip-count: max(0, self.total-call-items - self.active-count);
-    // A camera-less streamer normally shares their slot with the screen.
-    // Focus keeps that slot on stage and adds their ordinary participant tile.
+    // Participant and stream tiles have separate slots.
     property <int> focused-person-index: self.large-slot - self.extra;
     property <PersonRow> focused-person: root.participants[self.focused-person-index];
-    property <bool> show-focused-profile: self.is-focus-mode && !self.full
-        && self.focused-person-index >= 0 && self.focused-person-index < self.participants.length
-        && self.focused-person.live && !self.focused-person.local && !self.focused-person.video
-        && self.focused-person.watched;
+    property <bool> show-focused-profile: false;
     property <int> strip-count: (root.is-focus-mode || (!root.has-active-streams && root.focusing))
         ? max(0, self.total-call-items - 1 + (self.show-focused-profile ? 1 : 0))
         : (root.is-multi-grid ? self.grid-strip-count : 0);
@@ -1300,8 +1295,8 @@ export component ParticipantGrid inherits Flickable {
         property <int> slot: self.position + root.extra;
         property <image> frame: tile.person.video ? root.frames[self.position] : @image-url("");
         property <bool> filmed: self.frame.width > 0;
-        property <bool> streams-here: !self.focused-profile && tile.person.live && !tile.person.local && !tile.person.video;
-        property <bool> watched: self.streams-here && tile.person.watched;
+        property <bool> streams-here: tile.person.live && !tile.person.local && !tile.person.watched;
+        property <bool> watched: false;
         property <image> stream-pic: (root.is-focus-mode && (tile.is-large || tile.focused) && tile.person.id == root.watch-user && root.watch-frame.width > 0)
             ? root.watch-frame
             : (root.stream-frames.length > self.position && root.stream-frames[self.position].width > 0
@@ -1310,7 +1305,7 @@ export component ParticipantGrid inherits Flickable {
         property <bool> video-ready: self.watched && tile.person.stream-ready;
         property <bool> is-large: !self.focused-profile && (root.has-active-streams && !root.compact ? (root.is-focus-mode && self.slot == root.large-slot) : (root.focusing && self.slot == root.large-slot));
         property <bool> in-strip: root.has-active-streams && !root.compact ? (root.is-focus-mode ? !self.is-large : !self.watched) : (root.focusing && !self.is-large);
-        property <int> strip-index: self.focused-profile ? root.strip-count - 1 : (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : (tile.person.unwatched-index >= 0 ? tile.person.unwatched-index : (self.slot < root.large-slot ? self.slot : (self.slot - 1)));
+        property <int> strip-index: self.focused-profile ? root.strip-count - 1 : (root.is-focus-mode || (!root.has-active-streams && root.focusing)) ? (self.slot < root.large-slot ? self.slot : (self.slot - 1)) : self.position;
         property <int> active-slot: (root.sharing ? 1 : 0) + tile.person.watched-index;
         property <bool> is-top-right: (root.is-focus-mode && self.is-large) || (root.is-multi-grid && (root.active-count == 2 ? self.active-slot == 1 : (root.active-count == 3 ? self.active-slot == root.g3-sub0 : self.active-slot == 1)));
         property <bool> is-active: true;

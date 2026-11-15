@@ -89,10 +89,9 @@ streamer, the outline follows the outside of the visible video.
 
 In Focus mode (or Grid mode with a single stream), the focused stream occupies
 the upper stage area, and a horizontal participant thumbnail strip appears
-below it. This strip displays all other people currently in the voice channel
-(non-streaming members with their avatars, unwatched broadcasters with a LIVE
-badge and stream controls, and secondary watched streams with live video),
-excluding only the currently focused streamer. Clicking a non-streaming member
+below it. Each participant remains in the strip. Unwatched broadcasters show
+a LIVE badge and stream controls on their participant tile. Watched streams
+have separate tiles with live video, including while the first frame loads. Clicking a non-streaming member
 opens their profile. For broadcasting participants, hovering over their tile
 reveals Discord-style stream controls:
 - **Watch stream**: Switches focus to that user's stream (replacing the previous

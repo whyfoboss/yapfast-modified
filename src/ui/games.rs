@@ -454,9 +454,11 @@ fn music_playback(
     now: u64,
 ) -> yapfast_discord::own_activity::MusicPlayback {
     yapfast_discord::own_activity::MusicPlayback {
+        soundcloud_source: track.source.as_deref().is_some_and(|source| source.eq_ignore_ascii_case("SoundCloud")),
         title: track.title.clone(),
         artist: track.artist.clone(),
         duration_ms: track.duration_ms,
+        position_ms: if track.is_playing { 0 } else { track.position_ms },
         start_ms: track.is_playing.then(|| {
             track
                 .position_updated_ms
@@ -482,7 +484,11 @@ pub(super) fn publish_music_playback(adapter: &mut Adapter) {
                     .is_none_or(|source| adapter.activity_manager.activity_enabled(source))
             })
             .map(|track| music_playback(track, now_ms()));
-        if playback != adapter.published_music
+        let changed = match (&playback, &adapter.published_music) {
+            (Some(next), Some(previous)) => !next.same_published_timeline(previous),
+            _ => playback != adapter.published_music,
+        };
+        if changed
             && backend
                 .send(Command::Discord(
                     yapfast_core::chat::DiscordCommand::MusicPlayback(playback.clone()),
@@ -555,10 +561,18 @@ pub(super) fn local_activity_row(
             .and_then(|playing| playing.activity.as_deref())
             .filter(|activity| activity.eligible_for_own_presence())
     {
-        let mut row = matching_track(manager, rpc, now).map_or_else(
-            || profile::activity_row(rpc),
-            |track| media_row(track, Some(rpc), now),
-        );
+        let mut row = if let Some(track) = matching_track(manager, rpc, now) {
+            media_row(track, Some(rpc), now)
+        } else if rpc.name.eq_ignore_ascii_case("SoundCloud")
+            && let Some(track) = manager.enabled_media().filter(|track| {
+                track.source.as_deref().is_some_and(|source| source.eq_ignore_ascii_case("SoundCloud"))
+                    && !track.title.trim().is_empty()
+            })
+        {
+            media_row(track, None, now)
+        } else {
+            profile::activity_row(rpc)
+        };
         if playing.is_some_and(|playing| app.display_name != playing.name)
             && !rpc.name.eq_ignore_ascii_case("SoundCloud")
         {

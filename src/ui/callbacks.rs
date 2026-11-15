@@ -3828,6 +3828,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         let stage = Stage {
             participants: &voice.participants,
             sharing: voice.sharing.is_some(),
+            watching: &voice.watching,
         };
         let new_focus = usize::try_from(slot)
             .ok()
@@ -4052,6 +4053,7 @@ fn place_videos(adapter: &Adapter, window: &YapfastWindow) {
     let before = Stage {
         participants: &voice.participants,
         sharing: voice.sharing.is_some(),
+        watching: &voice.watching,
     }
     .before();
     for (index, person) in voice.participants.iter().enumerate() {

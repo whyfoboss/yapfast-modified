@@ -122,7 +122,9 @@ const PRESENCE_LIMIT: usize = 5;
 /// in unit tests and against the test server, which has no such limit, so
 /// that tests changing the status don't wait out Discord's.
 fn presence_window() -> Duration {
-    if cfg!(test) || client::test_server().is_some() {
+    if cfg!(test) {
+        Duration::from_secs(2)
+    } else if client::test_server().is_some() {
         Duration::from_millis(300)
     } else {
         Duration::from_secs(20)
@@ -320,6 +322,7 @@ impl Gateway {
             limiter,
             presences: Limiter::new(PRESENCE_LIMIT, presence_window()),
             presence: None,
+            last_presence: None,
             resumes: 0,
         };
         connection.greeted().await?;
@@ -587,6 +590,36 @@ impl Limiter {
     }
 }
 
+fn soundcloud_track_with_cover(presence: &Value) -> Option<&str> {
+    let activity = presence["activities"].as_array()?.iter().find(|activity| {
+        activity["type"] == 2 && activity["name"] == "SoundCloud"
+    })?;
+    activity["assets"]["large_image"].as_str().filter(|image| !image.is_empty())?;
+    activity["details"].as_str().filter(|track| !track.is_empty())
+}
+
+// Artwork and clock corrections must leave room for a track change or pause.
+fn soundcloud_refresh(previous: &Value, next: &Value) -> bool {
+    let (Some(previous), Some(next)) = (
+        previous["activities"].as_array(),
+        next["activities"].as_array(),
+    ) else {
+        return false;
+    };
+    previous.len() == next.len()
+        && previous.iter().zip(next).all(|(old, new)| {
+            old == new || (old["type"] == 2
+                && new["type"] == 2
+                && old["name"] == "SoundCloud"
+                && new["name"] == "SoundCloud"
+                && old["application_id"] == new["application_id"]
+                && old["details"] == new["details"]
+                && old["state"] == new["state"]
+                && old["timestamps"].is_object() == new["timestamps"].is_object())
+        })
+        && next.iter().any(|activity| activity["name"] == "SoundCloud")
+}
+
 /// One connection to the gateway, and the session it carries on.
 struct Connection {
     socket: Socket,
@@ -605,7 +638,8 @@ struct Connection {
     /// Presence updates, which Discord allows 5 of in 20 seconds; the
     /// latest waits, replacing any before it, while that's used up.
     presences: Limiter,
-    presence: Option<Value>,
+    presence: Option<(Instant, Value)>,
+    last_presence: Option<Value>,
     /// Resumes tried since Discord last confirmed one.
     resumes: u32,
 }
@@ -644,7 +678,19 @@ impl Connection {
         loop {
             let now = Instant::now();
             let free_at = self.limiter.free_at(now);
-            let presence_at = self.presences.free_at(now).max(free_at);
+            let mut presence_at = self.presences.free_at(now).max(free_at)
+                .max(self.presence.as_ref().map_or(now, |(due, _)| *due));
+            if self.presences.sent.len() == PRESENCE_LIMIT - 1
+                && let Some((_, pending)) = &self.presence
+                && let Some(previous) = &self.last_presence
+                && previous["status"] == pending["status"]
+                && previous["afk"] == pending["afk"]
+                && previous["since"] == pending["since"]
+                && soundcloud_refresh(previous, pending)
+                && let Some(oldest) = self.presences.sent.front()
+            {
+                presence_at = presence_at.max(*oldest + self.presences.window);
+            }
             tokio::select! {
                 () = tokio::time::sleep_until(self.next_heartbeat) => {
                     if !self.acked {
@@ -661,13 +707,39 @@ impl Connection {
                     *held = None;
                 }
                 () = tokio::time::sleep_until(presence_at), if self.presence.is_some() => {
-                    if let Some(presence) = self.presence.take() {
+                    if let Some((due, presence)) = self.presence.take() {
                         self.presences.sent.push_back(Instant::now());
                         self.write(PRESENCE_UPDATE, &presence).await?;
+                        tracing::debug!(target: "yapfast_media",
+                            overdue_ms = Instant::now().saturating_duration_since(due).as_millis() as u64,
+                            "gateway presence sent");
+                        self.last_presence = Some(presence);
                     }
                 }
                 command = commands.recv(), if held.is_none() => match command {
-                    Some(Command::Send(PRESENCE_UPDATE, data)) => self.presence = Some(data),
+                    Some(Command::Send(PRESENCE_UPDATE, data)) if self.last_presence.as_ref() == Some(&data) => {
+                        self.presence = None;
+                    }
+                    Some(Command::Send(PRESENCE_UPDATE, data)) => {
+                        tracing::debug!(target: "yapfast_media",
+                            wait_ms = presence_at.saturating_duration_since(now).as_millis() as u64,
+                            "gateway presence queued");
+                        // Coalesce the track, timeline, and cover arriving in a short burst.
+                        // Keep the first deadline so sustained traffic cannot postpone delivery.
+                        let track_ready = soundcloud_track_with_cover(&data).is_some_and(|track| {
+                            self.last_presence.as_ref().and_then(soundcloud_track_with_cover) != Some(track)
+                                && self.last_presence.as_ref().is_none_or(|last| !soundcloud_refresh(last, &data))
+                        });
+                        let due = if track_ready {
+                            now
+                        } else {
+                            self.presence.as_ref().map_or_else(
+                                || now + Duration::from_millis(150),
+                                |(due, _)| *due,
+                            )
+                        };
+                        self.presence = Some((due, data));
+                    }
                     Some(Command::Send(op, data)) => {
                         if free_at > Instant::now() {
                             tracing::warn!("holding back a gateway command to stay under Discord's limit");
@@ -1021,6 +1093,7 @@ mod tests {
             limiter: limiter(),
             presences: Limiter::new(PRESENCE_LIMIT, presence_window()),
             presence: None,
+            last_presence: None,
             resumes: 0,
         };
         let message = json!({
@@ -1457,6 +1530,34 @@ mod tests {
             .unwrap();
         assert_eq!(peer.command().await["d"]["n"], "latest");
         assert!(held.elapsed() >= presence_window() / 2);
+    }
+
+    #[tokio::test]
+    async fn track_change_can_use_the_slot_reserved_from_cover_updates() {
+        let discord = Discord::new().await;
+        let (mut gateway, mut peer) = discord.session(SLOW_HEARTBEAT, limiter()).await;
+        let activity = |track: &str, cover: &str| json!({
+            "status": "online",
+            "activities": [{"type": 2, "name": "SoundCloud", "application_id": "42",
+                "details": track, "state": "Artist", "assets": {"large_image": cover},
+                "timestamps": {"start": 1000, "end": 124000}}]
+        });
+        for n in 0..(PRESENCE_LIMIT - 1) {
+            let presence = activity(&format!("Track {n}"), "old");
+            gateway.update_presence(presence.clone()).await.unwrap();
+            assert_eq!(peer.command().await["d"], presence);
+        }
+
+        let cover = activity(&format!("Track {}", PRESENCE_LIMIT - 2), "loaded");
+        gateway.update_presence(cover).await.unwrap();
+        assert!(timeout(Duration::from_millis(300), peer.command()).await.is_err());
+
+        let next = activity("New track", "new cover");
+        gateway.update_presence(next.clone()).await.unwrap();
+        let command = timeout(Duration::from_millis(600), peer.command())
+            .await
+            .expect("the track change must go before the rate limit window expires");
+        assert_eq!(command["d"], next);
     }
 
     /// Compresses payloads as Discord's gateway does, sharing one stream.

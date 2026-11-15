@@ -2,9 +2,9 @@
 
 ## Server rail
 
-Drag a server above or below another entry to change the order on this
-device. Servers inside an open folder can be reordered within that folder.
-Folder membership follows Discord.
+Drag a server or a folder above or below another entry to change the order on
+this device. A server can also be dragged out of an open folder. The order and
+removed folder membership are saved on this device.
 
 ## Permissions and roles
 

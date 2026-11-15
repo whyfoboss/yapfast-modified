@@ -2200,6 +2200,8 @@ pub enum Effect {
     Notify(chat::Alert),
     /// Play one of Yapfast's sounds, as the person set them.
     Sound(crate::sounds::Sound),
+    /// Play a local confirmation when this account starts or stops sharing.
+    OwnStreamSound(crate::sounds::Sound),
     /// List the system's audio devices for the preview, then report them
     /// through [`Application::preview_devices`].
     ListDevices,

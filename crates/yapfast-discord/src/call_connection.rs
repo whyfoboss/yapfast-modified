@@ -177,66 +177,107 @@ async fn run(
             listener.disconnected(&format!("{error:#}"));
             ended = media.wait_for_move(&connection, &mut orders).await;
         }
-        match ended {
-            Ended::Left => {
-                let _ = connection.ws.close(None).await;
-                return;
-            }
-            Ended::Moved(to, reply) => {
-                let _ = connection.ws.close(None).await;
-                match Connection::open(&to, codecs(), &[]).await {
-                    Ok(moved) => {
-                        connection = moved;
-                        identity = to;
-                        media.reset();
-                        drops = 0;
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(error) => {
-                        let reason = format!("{error:#}");
-                        let _ = reply.send(Err(error));
-                        listener.disconnected(&reason);
-                        return;
-                    }
-                }
-            }
-            Ended::Dropped(error) => {
-                // Drops count in a row: a connection that held a while starts
-                // the count again, so a long call survives the odd blip.
-                if up.elapsed() >= STEADY {
-                    drops = 0;
-                }
-                drops += 1;
-                // The session ended: final.
-                if closed(&error) == Some(4006) || drops > RETRIES {
-                    listener.disconnected(&format!("{error:#}"));
+        loop {
+            match ended {
+                Ended::Left => {
+                    let _ = connection.ws.close(None).await;
                     return;
                 }
-                tracing::info!(
-                    error = format!("{error:#}"),
-                    "the call's voice connection dropped"
-                );
-                // The first try goes at once, so a blip passes unheard; the
-                // rest wait longer each time, rather than hammering a voice
-                // server that's struggling.
-                tokio::time::sleep(RESUME_WAIT * (drops - 1)).await;
-                if let Err(resume) = connection.resume(&identity).await {
-                    tracing::info!(
-                        error = format!("{resume:#}"),
-                        "couldn't resume the call; connecting again"
-                    );
-                    match Connection::open(&identity, codecs(), &[]).await {
-                        Ok(again) => {
-                            connection = again;
-                            media.reset();
+                Ended::Moved(to, reply) => {
+                    let _ = connection.ws.close(None).await;
+                    let opened = {
+                        let opening = async {
+                            let open = || {
+                                tokio::time::timeout(
+                                    super::voice_connection::HANDSHAKE,
+                                    Connection::open(&to, codecs(), &[]),
+                                )
+                            };
+                            if let Ok(Ok(opened)) = open().await {
+                                return Ok(opened);
+                            }
+                            open().await?
+                        };
+                        tokio::pin!(opening);
+                        loop {
+                            tokio::select! {
+                                order = orders.recv() => match order {
+                                    None | Some(Order::Leave) => return,
+                                    Some(Order::Move(newer, reply)) => {
+                                    break Err(Ended::Moved(newer, reply));
+                                    }
+                                    Some(Order::Film(camera)) => {
+                                        media.filming = camera.map(|camera| call_video::Sending::new(camera, &connection));
+                                    }
+                                    Some(Order::Want(wants)) => media.watching.want(wants),
+                                },
+                            result = &mut opening => break Ok(result),
+                            }
                         }
-                        Err(again) => {
-                            listener.disconnected(&format!("{error:#}; then {again:#}"));
-                            return;
+                    };
+                    let opened = match opened {
+                        Ok(result) => result,
+                        Err(newer) => {
+                            ended = newer;
+                            continue;
+                        }
+                    };
+                    match opened {
+                        Ok(moved) => {
+                            connection = moved;
+                            identity = to;
+                            media.reset();
+                            drops = 0;
+                            let _ = reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let reason = format!("{error:#}");
+                            let _ = reply.send(Err(error));
+                            tracing::warn!(%reason, "voice move failed; waiting for a new assignment");
+                            ended = media.wait_for_move(&connection, &mut orders).await;
+                            continue;
+                        }
+                    }
+                }
+                Ended::Dropped(error) => {
+                    // Drops count in a row: a connection that held a while starts
+                    // the count again, so a long call survives the odd blip.
+                    if up.elapsed() >= STEADY {
+                        drops = 0;
+                    }
+                    drops += 1;
+                    // The session ended: final.
+                    if closed(&error) == Some(4006) || drops > RETRIES {
+                        listener.disconnected(&format!("{error:#}"));
+                        return;
+                    }
+                    tracing::info!(
+                        error = format!("{error:#}"),
+                        "the call's voice connection dropped"
+                    );
+                    // The first try goes at once, so a blip passes unheard; the
+                    // rest wait longer each time, rather than hammering a voice
+                    // server that's struggling.
+                    tokio::time::sleep(RESUME_WAIT * (drops - 1)).await;
+                    if let Err(resume) = connection.resume(&identity).await {
+                        tracing::info!(
+                            error = format!("{resume:#}"),
+                            "couldn't resume the call; connecting again"
+                        );
+                        match Connection::open(&identity, codecs(), &[]).await {
+                            Ok(again) => {
+                                connection = again;
+                                media.reset();
+                            }
+                            Err(again) => {
+                                listener.disconnected(&format!("{error:#}; then {again:#}"));
+                                return;
+                            }
                         }
                     }
                 }
             }
+            break;
         }
     }
 }
