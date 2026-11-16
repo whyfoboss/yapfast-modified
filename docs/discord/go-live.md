@@ -12,8 +12,8 @@ if this account's voice state arrives after both answers. `yapfast_discord::stre
 streams by key (`guild:{server}:{channel}:{user}`) and
 `Discord::{go_live, watch, end_stream, pause_stream}` run the signalling. Voice
 states carry `self_stream`, which shows as a LIVE badge beside the person.
-The Stream Start sound plays as soon as capture begins, while Discord is
-connecting the stream. Stream Stop plays when that share ends. Both play even
+The Stream Start sound plays when the worker reports that the share is live.
+Stream Stop plays when a share that went live ends. Both play even
 while deafened, at the volume chosen in Sounds.
 If the outgoing media connection drops, it retries up to three times using
 the same stream session; an expired session is not retried. Stopping the
@@ -116,15 +116,18 @@ for a packet carried on in the next, OBUs of different layers in packets of
 their own, and a keyframe's first packet marked as starting a coded video
 sequence (N). A frame with a malformed OBU isn't sent. DAVE leaves an AV1
 frame's last OBU without its size, its trailer after it, and receivers keep
-it so, since DAVE's decryptor reads the frame as it was sealed. Past a
-frame's first 8 packets, 4 go out
-each millisecond: a 1080p keyframe of 200 sent at once can overflow buffers on
-the way. Yapfast keeps the last 2048 video packets, and when a viewer reports
+it so, since DAVE's decryptor reads the frame as it was sealed. Past the
+first eight packets, the sender paces video at 2.5 times the target bitrate
+or fast enough to finish the frame within two frame intervals. The sender
+queues one frame's packets at a time and polls audio and RTCP while pacing. Yapfast keeps the last 2048 video packets, and when a viewer reports
 some lost with a generic NACK (RTCP 205), resends up to 128 of them as
 Discord's client does: on the RTX SSRC with RTX's payload type and numbering,
 the original sequence number before the payload (RFC 4588), and the repaired
 stream id (extension 12) in place of the stream id. An RTCP sender report goes
 out every second.
+
+The source list and stream options scroll together when space is limited.
+The Go Live or Switch button stays visible below them.
 
 Before sharing, the share button's menu picks a resolution and a frame rate, as
 Discord's client asks for them: 720p, 1080p or the screen's own size (up to
@@ -134,10 +137,12 @@ beside the chosen audio devices (`devices.json`), and starts at 1080p30 without
 it. Larger screens, and those of another shape, are scaled down to fit. Yapfast
 sends them at the bitrates Discord's client uses: at most 3.5 Mbit/s up to 720p
 and 9 Mbit/s above, the cap op 12 announces, with the frame rate as its
-`max_framerate`. Like Discord's client it also follows the server's bandwidth
-estimate (REMB): when that drops below the cap, the encoder aims for the
-estimate instead, though never below 500 kbit/s, and it changes only when the
-two differ by more than a tenth. Discord's client allows accounts without Nitro
+`max_framerate`. The controller starts at up to 2.5 Mbit/s. It takes the
+minimum of the resolution cap and the server's bandwidth estimate (REMB) as the
+upper limit, and keeps at least 500 kbit/s. RTCP receiver reports measure
+latency, loss, and the rate the server received. The controller lowers the
+encoding target when latency or loss rises and increases it on a clear link.
+It limits increases to a share of what the encoder is actually sending. Discord's client allows accounts without Nitro
 720p30, but trials 1080p30 at 3.5 or 5 Mbit/s for them. The worker converts
 captured frames to I420 with libyuv, scales them with libyuv's filtering
 scaler, and encodes those; the preview is the same picture scaled down to 720p.
@@ -211,7 +216,9 @@ Discord's client does, it asks for a missing packet again at once with a
 generic NACK, again every 80 ms up to three times, and takes the resend from
 the streamer's RTX SSRC (RFC 4588); padding there, which probes the path, is
 dropped. Packets after a gap wait for it at most 300 ms. A frame still missing
-a packet or its end marker is dropped. After loss, a decryption or decoding
+a packet or its end marker is dropped. An AV1 packet that explicitly starts
+a new coded sequence can start a complete recovery frame after a gap. After
+loss, a decryption or decoding
 error, or a full decoder queue, playback holds the last picture and drops
 dependent frames until a keyframe arrives. The connection retries its picture
 loss indication at most every 500 ms until a keyframe reaches the decoder,
@@ -256,8 +263,13 @@ switching between streams already being watched. The streamer's avatar or camera
 the strip below with the other participants. Avatars and their decorations
 share the tile's center. Main participant tiles allow a larger avatar.
 The strip can also show unwatched
-broadcasters with a LIVE badge and secondary watched streams. In multi-stream Grid Mode (2-4 streams),
-all watched streams are laid out in a balanced 16:9 grid (2 side-by-side, 3 balanced,
+broadcasters with a LIVE badge and secondary watched streams.
+If the outgoing media connection ends and Discord does not supply a
+replacement, the existing capture asks for a new stream server. Recovery
+attempts are bounded, and Stop Sharing still ends capture immediately.
+
+The View button toggles between Focus and Grid. With multiple watched
+streams, Grid lays them out in a balanced 16:9 grid (2 side-by-side, 3 balanced,
 4 in 2x2). Broadcaster tiles provide two actions: "Watch stream" (replaces the
 currently focused stream) and an eye icon button (adds the stream to active
 viewing without replacing current streams).

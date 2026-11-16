@@ -186,6 +186,31 @@ impl Refused {
     }
 }
 
+/// Part of a file from [`Api::download_part`], its bytes as they arrive.
+pub struct FilePart<S> {
+    /// Where its bytes start in the file: 0 when the server sent the whole
+    /// file in place of the part asked for.
+    pub start: u64,
+    /// The whole file's size, when the server says.
+    pub size: Option<u64>,
+    /// Whether this came from a valid partial response.
+    pub ranged: bool,
+    pub chunks: S,
+}
+
+/// The inclusive start, exclusive end and complete size of a response.
+fn content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let (range, size) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, last) = range.split_once('-')?;
+    let start = start.parse().ok()?;
+    let end = last.parse::<u64>().ok()?.checked_add(1)?;
+    let size = match size.trim() {
+        "*" => None,
+        size => Some(size.parse().ok()?),
+    };
+    (start < end && size.is_none_or(|size| end <= size)).then_some((start, end, size))
+}
+
 /// A download larger than it was allowed to be.
 #[derive(Debug)]
 pub struct TooLarge;
@@ -517,6 +542,20 @@ impl Api {
         }
     }
 
+    /// The signed-in account uses a bot's message component, submits its
+    /// modal, runs an app's command or asks for an autocomplete's choices.
+    /// Discord acknowledges this request before the app responds over the
+    /// gateway; a successful HTTP response alone is not the app's result.
+    /// Files go uploaded first, named in the body's `data.attachments`.
+    ///
+    /// After a 429 it goes again once, as Discord's client sends commands
+    /// and forms again, only with `again`: the client drops a click or an
+    /// autocomplete that was limited.
+    pub async fn interact(&self, body: &Value, again: bool) -> Result<()> {
+        let request = with_json(self.request(Method::POST, "/interactions"), body);
+        self.send_request(request, again).await.map(drop)
+    }
+
     /// Sends a message, as a reply when `options` names one in the same
     /// channel, with uploaded files.
     pub async fn send(
@@ -694,6 +733,25 @@ impl Api {
             .collect();
         let path = format!("/applications/public?{}", query.join("&"));
         self.json(self.request(Method::GET, &path)).await
+    }
+
+    /// The apps' commands under `resource`, `guilds/{id}`, `channels/{id}`
+    /// or `users/@me`: `{applications, application_commands, version}`, or
+    /// None while Discord is still building it and answers 202, as its
+    /// client then asks again a while later. See [`crate::commands`].
+    pub async fn command_index(&self, resource: &str) -> Result<Option<Value>> {
+        let path = format!("/{resource}/application-command-index");
+        let response = self.execute(self.request(Method::GET, &path)).await?;
+        if response.status() == StatusCode::ACCEPTED {
+            return Ok(None);
+        }
+        let body = response
+            .bytes()
+            .await
+            .context("could not read Discord's answer")?;
+        Ok(Some(
+            serde_json::from_slice(&body).context("could not understand Discord's answer")?,
+        ))
     }
 
     /// The message that each of up to 25 message requests is waiting with,
@@ -2169,9 +2227,101 @@ impl Api {
         Ok(size)
     }
 
+    /// Asks Discord's CDN or media proxy for a file's bytes from `from`, up
+    /// to `to` when given, as a browser asks for the part of a video it
+    /// plays: an HTTP Range request. A server that doesn't take ranges sends
+    /// the whole file, which [`FilePart::start`] tells. Refuses a file over
+    /// `limit` bytes.
+    pub async fn download_part(
+        &self,
+        url: &str,
+        from: u64,
+        to: Option<u64>,
+        limit: u64,
+    ) -> Result<
+        FilePart<
+            impl futures_util::Stream<Item = Result<impl std::ops::Deref<Target = [u8]> + Send + use<>>>
+            + Send
+            + Unpin
+            + use<>,
+        >,
+    > {
+        allowed(url)?;
+        let range = match to {
+            Some(to) => format!("bytes={from}-{}", to.saturating_sub(1)),
+            None => format!("bytes={from}-"),
+        };
+        let response = self.send_file(self.http.get(url).header(header::RANGE, range)).await;
+        let (response, bounds) = match response {
+            Ok(response) if response.status() == StatusCode::OK => (response, None),
+            Ok(response) => {
+                let bounds = response.headers().get(header::CONTENT_RANGE)
+                    .and_then(|value| content_range(value.to_str().ok()?))
+                    .filter(|&(start, end, _)| response.status() == StatusCode::PARTIAL_CONTENT
+                        && start == from
+                        && to.is_none_or(|to| end <= to)
+                        && response.content_length().is_none_or(|length| end - start == length));
+                match bounds {
+                    Some(bounds) => (response, Some(bounds)),
+                    None => (self.get_file(url).await?, None),
+                }
+            }
+            Err(error) if error.downcast_ref::<Refused>().is_some_and(|error| error.0 == StatusCode::RANGE_NOT_SATISFIABLE) => {
+                (self.get_file(url).await?, None)
+            }
+            Err(error) => return Err(error),
+        };
+        anyhow::ensure!(bounds.is_some() || response.status() == StatusCode::OK, "Discord didn't send the full file");
+        let (start, expected, size) = match bounds {
+            Some((start, end, size)) => (start, Some(end), size),
+            None => (0, response.content_length(), response.content_length()),
+        };
+        if size.is_some_and(|size| size > limit) {
+            return Err(TooLarge.into());
+        }
+        let maximum = expected.unwrap_or(limit).min(limit);
+        let stall = self.stall;
+        let chunks =
+            futures_util::stream::unfold(Some((response, start)), move |state| async move {
+                let (mut response, at) = state?;
+                match tokio::time::timeout(stall, response.chunk()).await {
+                    Err(_) => Some((Err(Stalled.into()), None)),
+                    Ok(Err(error)) => Some((
+                        Err(anyhow::Error::new(error).context("the download stopped")),
+                        None,
+                    )),
+                    Ok(Ok(None)) if expected.is_some_and(|end| at != end) => {
+                        Some((Err(anyhow::anyhow!("Discord sent an incomplete file part")), None))
+                    }
+                    Ok(Ok(None)) => None,
+                    Ok(Ok(Some(chunk))) => {
+                        let at = at + chunk.len() as u64;
+                        if at > limit {
+                            return Some((Err(TooLarge.into()), None));
+                        }
+                        if at > maximum {
+                            return Some((Err(anyhow::anyhow!("Discord sent bytes outside the promised range")), None));
+                        }
+                        Some((Ok(chunk), Some((response, at))))
+                    }
+                }
+            });
+        Ok(FilePart {
+            start,
+            size,
+            ranged: bounds.is_some(),
+            chunks: Box::pin(chunks),
+        })
+    }
+
     /// Asks for a file, giving up if Discord doesn't answer within [`STALL`].
     async fn get_file(&self, url: &str) -> Result<Response> {
-        let response = tokio::time::timeout(self.stall, self.http.get(url).send())
+        self.send_file(self.http.get(url)).await
+    }
+
+    /// Sends a request for a file as [`Self::get_file`] does.
+    async fn send_file(&self, request: RequestBuilder) -> Result<Response> {
+        let response = tokio::time::timeout(self.stall, request.send())
             .await
             .map_err(|_| Stalled)?
             .context("could not reach Discord")?;
@@ -2210,10 +2360,15 @@ impl Api {
     /// A 429 means Discord didn't act on it, so it goes once more after the
     /// wait Discord asks for.
     async fn execute(&self, request: RequestBuilder) -> Result<Response> {
+        self.send_request(request, true).await
+    }
+
+    /// [`Self::execute`], sent again after a 429 only with `again`.
+    async fn send_request(&self, request: RequestBuilder, again: bool) -> Result<Response> {
         let (client, request) = request.build_split();
         let mut request = request.context("could not build the request")?;
         let route = limits::route(request.method(), request.url().path());
-        let mut retried = false;
+        let mut retried = !again;
         loop {
             match self.refusals.check() {
                 Ok(()) => {}
@@ -2610,6 +2765,21 @@ fn discord_file(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn content_ranges_must_describe_bytes_inside_the_file() {
+        use super::content_range;
+        assert_eq!(content_range("bytes 10-19/20"), Some((10, 20, Some(20))));
+        assert_eq!(content_range("bytes 0-0/*"), Some((0, 1, None)));
+        for value in [
+            "bytes 19-10/20",
+            "bytes 0-20/20",
+            "bytes 0-18446744073709551615/*",
+            "bytes */20",
+            "items 0-10/20",
+        ] {
+            assert_eq!(content_range(value), None, "{value}");
+        }
+    }
     #[test]
     fn a_poll_goes_as_discords_client_sends_it() {
         use super::{NewAnswer, NewPoll};

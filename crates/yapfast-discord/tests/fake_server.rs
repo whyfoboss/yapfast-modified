@@ -414,6 +414,41 @@ async fn a_running_av1_stream_recovers_when_keyframes_stop() {
     .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn a_running_av1_stream_keeps_video_after_loss_before_keyframes() {
+    let fixture =
+        Fixture::start("a_running_av1_stream_keeps_video_after_loss_before_keyframes").await;
+    let (_assigned, _call) = join_lounge(&fixture, Arc::new(Dropping::default())).await;
+    let bob = stream::key(&fixture.guild, &fixture.lounge, &fixture.bob);
+    let watched = fixture.discord.watch(&bob).await.unwrap();
+    let server = fixture.server;
+    tokio::task::spawn_blocking(move || {
+        stream_codec(server, "av1");
+        let mut receiver = StreamReceiver::start(watched, vec![Codec::Av1, Codec::H264]).unwrap();
+        let sounds = receiver.take_sounds().unwrap();
+        assert_eq!(receiver.next(WAIT).unwrap().codec, Codec::Av1);
+        post_control(server, "/_control/stream-video?dropBeforeAv1Keyframes", "");
+        let deadline = std::time::Instant::now() + Duration::from_secs(7);
+        let (mut frames, mut keyframes, mut audio) = (0, 0, 0);
+        while std::time::Instant::now() < deadline {
+            audio += sounds.try_iter().count();
+            if let Some(frame) = receiver.next(Duration::from_millis(100)) {
+                assert_eq!(frame.codec, Codec::Av1, "no codec fallback during recovery");
+                frames += 1;
+                keyframes += usize::from(frame.keyframe);
+            }
+        }
+        assert!(
+            frames > 30 && keyframes >= 3,
+            "{frames} frames, {keyframes} keyframes"
+        );
+        assert!(audio > 100, "{audio} Opus packets");
+    })
+    .await
+    .unwrap();
+}
+
 /// Offers `gpu`, AV1 or H265, first, as a GPU encoder lets Yapfast:
 /// Discord chooses it, and when a viewer whose client decodes only H264 and
 /// VP8 starts watching, it switches the stream to H264 with op 14, and
@@ -1596,6 +1631,43 @@ async fn a_star_saves_the_favourite_emoji_and_leaves_the_rest() {
     assert_eq!(after.favorites.as_ref(), Some(&favorites));
     assert_eq!(kept_gifs, gifs);
     assert_eq!(after.used, before.used);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn fetches_the_profile_frame_a_profile_names() {
+    let Fixture {
+        _fake,
+        discord,
+        guild,
+        bob,
+        ..
+    } = Fixture::start("fetches_the_profile_frame_a_profile_names").await;
+    // Dave's profile names a frame, and his banner moves; Bob's has no frame.
+    let dave = discord
+        .profile(&guild, "1400000000000000004", |_| {})
+        .await
+        .unwrap();
+    let sku = dave.frame.expect("Dave equips a frame");
+    assert!(dave.banner.unwrap().contains("/a_davebanner.png?"));
+    let bob = discord.profile(&guild, &bob, |_| {}).await.unwrap();
+    assert_eq!(bob.frame, None);
+    // The shop describes its layers, the back ones first, and they're kept.
+    assert_eq!(discord.kept_frame(&sku), None);
+    let layers = discord.profile_frame(&sku).await.unwrap().unwrap();
+    assert_eq!(
+        layers
+            .iter()
+            .map(|layer| (layer.kind.as_str(), layer.front))
+            .collect::<Vec<_>>(),
+        [("border", false), ("staple", true)]
+    );
+    assert!(
+        layers[1]
+            .src
+            .ends_with(&format!("/collectibles-shop/{sku}/1/static"))
+    );
+    assert_eq!(discord.kept_frame(&sku), Some(Some(layers)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3024,16 +3096,27 @@ async fn shows_embeds_and_media() {
     assert!(!clip.image && clip.dimensions == Some((480, 270)));
     let poster = clip.preview_url.as_deref().unwrap();
     assert!(!discord.download(poster, 1 << 20).await.unwrap().is_empty());
-    let path = std::env::temp_dir().join(format!("yapfast-clip-{}.mp4", std::process::id()));
-    let mut file = std::fs::File::create(&path).unwrap();
-    let size = discord
-        .download_into(clip.video_url.as_deref().unwrap(), &mut file, 1 << 20)
-        .await
-        .unwrap();
-    assert_eq!(Some(size), clip.size);
-    let downloaded = std::fs::read(&path).unwrap();
-    let _ = std::fs::remove_file(&path);
+    // It downloads in parts, as a browser asks for a video's: the whole
+    // file from its start, or its last bytes alone, where an MP4's index
+    // may be.
+    let video_url = clip.video_url.as_deref().unwrap();
+    let (start, size, downloaded) = download_part(&discord, video_url, 0, None).await;
+    assert_eq!((start, size), (0, clip.size));
+    assert_eq!(Some(downloaded.len() as u64), clip.size);
     assert_eq!(&downloaded[4..8], b"ftyp");
+    let end = downloaded.len() as u64;
+    let (start, size, tail) = download_part(&discord, video_url, end - 100, None).await;
+    assert_eq!((start, size), (end - 100, clip.size));
+    assert_eq!(tail, downloaded[downloaded.len() - 100..]);
+    let (start, _, middle) = download_part(&discord, video_url, 10, Some(20)).await;
+    assert_eq!((start, middle.as_slice()), (10, &downloaded[10..20]));
+    assert!(
+        discord
+            .download_part(video_url, 0, None, end - 1)
+            .await
+            .is_err(),
+        "too large"
+    );
     // A forward of it shows the clip it carries.
     let forward = live_where(&mut live, |event| match event {
         Live::Created(message) if message.forwarded => Some(message),
@@ -3053,12 +3136,26 @@ async fn shows_embeds_and_media() {
     assert!(linked.embeds[0].video);
     let poster = &linked.attachments[0];
     assert_eq!(poster.shown, Shown::Poster(0));
-    let mut file = std::fs::File::create(&path).unwrap();
-    discord
-        .download_into(poster.video_url.as_deref().unwrap(), &mut file, 1 << 20)
-        .await
-        .unwrap();
-    let _ = std::fs::remove_file(&path);
+    let (_, _, linked) =
+        download_part(&discord, poster.video_url.as_deref().unwrap(), 0, None).await;
+    assert_eq!(&linked[4..8], b"ftyp");
+}
+
+/// A part of a file, as [`Discord::download_part`] gives it: where it
+/// starts, the file's size, and its bytes.
+async fn download_part(
+    discord: &Discord,
+    url: &str,
+    from: u64,
+    to: Option<u64>,
+) -> (u64, Option<u64>, Vec<u8>) {
+    use futures_util::StreamExt;
+    let mut part = discord.download_part(url, from, to, 1 << 20).await.unwrap();
+    let mut data = Vec::new();
+    while let Some(chunk) = part.chunks.next().await {
+        data.extend_from_slice(&chunk.unwrap());
+    }
+    (part.start, part.size, data)
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -978,6 +978,7 @@ export component ServerRail inherits Rectangle {
         // Keep dragged items alive while the rail scrolls. Unread DMs scroll with them.
         list := ScrollView {
             vertical-stretch: 1;
+            expand-scrollbars: false;
             content-height: rail-items.preferred-height;
             rail-items := VerticalLayout {
             width: list.visible-width;

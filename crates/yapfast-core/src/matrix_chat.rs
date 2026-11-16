@@ -1944,6 +1944,7 @@ async fn publish_timeline(
                         });
                         message.attachments = vec![Attachment {
                             voice_ms: None,
+                            voice_waveform: None,
                             name: content.filename().into(),
                             size,
                             image: true,
@@ -1955,12 +1956,14 @@ async fn publish_timeline(
                             spoiler: false,
                             video: false,
                             preview: cached.flatten(),
+                            description: None,
                         }];
                     }
                     MessageType::File(content) => {
                         message.body = content.caption().unwrap_or_default().into();
                         message.attachments = vec![Attachment {
                             voice_ms: None,
+                            voice_waveform: None,
                             name: content.filename().into(),
                             size: content
                                 .info
@@ -1976,12 +1979,14 @@ async fn publish_timeline(
                             url: None,
                             spoiler: false,
                             video: false,
+                            description: None,
                         }];
                     }
                     MessageType::Video(content) => {
                         message.body = content.caption().unwrap_or_default().into();
                         message.attachments = vec![Attachment {
                             voice_ms: None,
+                            voice_waveform: None,
                             name: content.filename().into(),
                             size: content
                                 .info
@@ -1997,12 +2002,14 @@ async fn publish_timeline(
                             url: None,
                             spoiler: false,
                             video: false,
+                            description: None,
                         }];
                     }
                     MessageType::Audio(content) => {
                         message.body = content.caption().unwrap_or_default().into();
                         message.attachments = vec![Attachment {
                             voice_ms: None,
+                            voice_waveform: None,
                             name: content.filename().into(),
                             size: content
                                 .info
@@ -2018,6 +2025,7 @@ async fn publish_timeline(
                             url: None,
                             spoiler: false,
                             video: false,
+                            description: None,
                         }];
                     }
                     _ => message.body = text.body().to_owned(),

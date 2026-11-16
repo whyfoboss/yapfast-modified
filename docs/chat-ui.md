@@ -133,7 +133,7 @@ errors make it taller than the minimum window. SSO and OAuth are still pending.
   focused. Enter doesn't send from there, unlike Discord. Not while the settings,
   a profile, a card, a dialog, a panel such as the pins, the image viewer, a
   ringing call or the call in full screen is open, nor on the friends list or a
-  call, nor with Ctrl, Alt or Super held, nor for the push-to-talk key while
+  call, nor with Ctrl, Alt or Super held, nor for a push-to-talk key while
   unmuted in a call. Stepping through the messages, only letters and digits go.
 - Clicking a mention, a link to a Matrix user, opens their profile card.
 - Emoji in message text are drawn by Twemoji's picture of them, as the picker's
@@ -448,7 +448,12 @@ returns to 100%. The level shows
 for a moment at the top and is kept in `layout.json`. Yapfast multiplies the
 display's scale factor by it, so the window lays out in fewer logical pixels,
 and zooming in stops before those would fall below the window's 800×560
-minimum, which would make it grow.
+minimum, which would make it grow. On Windows that scale is the one of the
+monitor the window is on, taken again when a move or resize settles: the
+HIGHDPIAWARE compatibility setting holds the window's own scale to the
+primary display's and sends no change on the others. Elsewhere it is the
+window's, as a Wayland monitor names only a whole scale where the window
+has its fractional one.
 
 The window starts at the size it had when Yapfast last ran, maximized if it
 was, and on Windows in the same place (`window` in `layout.json`,
@@ -468,8 +473,11 @@ in place of the desktop's, as Discord does (`src/ui/title_bar.rs`,
 the server's name, "Direct messages" or "Yapfast" in the middle and
 minimize, maximize or restore, and close at the right. Signed in, it also has
 back and forward arrows at the left, which walk the conversations visited as
-Alt+Left and Alt+Right do, up to 50 of them and past any that are gone, and
-Inbox and Help before the window's buttons. Help opens Discord's support site.
+Alt+Left and Alt+Right and a mouse's back and forward buttons do, up to 50 of
+them and past any that are gone, and Inbox and Help before the window's
+buttons. Help opens Discord's support site.
+On Windows, a side button bound to push-to-talk in that input mode stays
+with the microphone.
 Inbox opens a popout with Discord's first two tabs: Unreads, the channels and
 conversations with unread messages, muted ones only for a mention, and
 Mentions, those that mention this account, each with its count; Discord's own
@@ -724,3 +732,7 @@ use, such as 𝓯𝓪𝓷𝓬𝔂, are all of the Common script, so they would s
 Yapfast puts Segoe UI, Segoe UI Symbol, Cambria Math and Segoe UI Historic at
 the front of both lists (`emoji::WINDOWS_FALLBACK`), after Twemoji's font, and
 not Segoe UI Emoji.
+
+With Better Animations on, the tooltip starts eight pixels below its anchor
+with its right edge angled down. The text and pill fade in together over
+150 ms as the pill straightens. The hover delay is the same with animations off.

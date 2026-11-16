@@ -27,6 +27,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use yapfast_discord::{
+    congestion,
     rtp::Codec,
     stream::StreamServer,
     stream_connection::{self, Link, StreamReceiver, StreamSender},
@@ -303,6 +304,13 @@ pub enum Control {
         width: u32,
         height: u32,
     },
+    /// These bytes of the video's file arrived, `from` up to `to`; `size`
+    /// is the whole file's, once known.
+    Arrived {
+        from: u64,
+        to: u64,
+        size: Option<u64>,
+    },
     /// The video's file finished downloading, with this size; none when the
     /// download failed.
     Downloaded {
@@ -324,6 +332,8 @@ pub enum Report {
     /// Sharing: the video reaches the stream server. Watching: the first
     /// picture is on screen.
     Streaming,
+    /// Sharing: capture is still running and needs another stream server.
+    ReconnectShare { reason: String },
     /// Sharing: how the stream goes out, once a second while it's live.
     Sending(StreamStats),
     /// Sharing: a preview of the stream for Discord to show, a JPEG as a
@@ -338,6 +348,8 @@ pub enum Report {
         height: u32,
         sound: bool,
     },
+    /// The video waits for this byte of its file, which hasn't arrived.
+    Needs { at: u64 },
     /// The video played to its end, and waits there.
     Finished,
     /// A picture of the screen [`shareable`] listed by `id`, for
@@ -559,16 +571,6 @@ fn log_encoder(encoder: &Encoder) {
     );
 }
 
-/// The kbit/s to aim for, as Discord's client does: its cap for frames of
-/// `height` lines, or what its server estimates the path carries when
-/// that's less, but at least the 500 kbit/s it gives a screen.
-fn kbps(height: u32, estimate: Option<u64>) -> u32 {
-    let cap = stream_connection::max_bitrate(height) / 1000;
-    estimate.map_or(cap, |estimate| {
-        (estimate / 1000).clamp(500, u64::from(cap)) as u32
-    })
-}
-
 impl Sink {
     /// Takes a frame at the size it's sent: the preview shows it, scaled
     /// down to fit, and Discord gets it once the stream has a server.
@@ -606,6 +608,9 @@ impl Sink {
             self.preview_due = Some(Instant::now() + THUMBNAIL_EVERY);
         }
         if let Some(server) = self.server.take() {
+            self.video = None;
+            self.streaming = false;
+            self.lost = None;
             let (offers, encoder) = self.offers(width, height)?;
             let sender = StreamSender::start(server, width, height, self.fps, offers)?;
             let sound = if self.sound {
@@ -658,12 +663,12 @@ impl Sink {
         let Some(video) = self.video.as_mut() else {
             return Ok(());
         };
-        let wanted = kbps(height, video.sender.bandwidth_estimate());
+        let wanted = (video.sender.target() / 1000) as u32;
         let aimed = video.encoder.bitrate();
         // Not on every wobble, which would churn the rate control.
         if wanted.abs_diff(aimed) > aimed / 10 {
             match video.encoder.set_bitrate(wanted) {
-                Ok(()) => tracing::debug!(kbps = wanted, "following Discord's bandwidth estimate"),
+                Ok(()) => tracing::debug!(kbps = wanted, "the encoder follows the stream's target"),
                 Err(error) => {
                     tracing::warn!(error = format!("{error:#}"), "could not change the bitrate")
                 }
@@ -724,22 +729,36 @@ impl Sink {
         Ok(encoder)
     }
 
-    /// An encoder in `codec`, at the bitrate Discord's cap for its height
-    /// allows.
+    /// An encoder in `codec`, at the stream's target, or what a stream of
+    /// `height` lines starts at before it has one.
     fn open(&self, codec: Codec, width: u32, height: u32) -> Result<Encoder> {
+        let target = self.video.as_ref().map_or_else(
+            || congestion::start(stream_connection::max_bitrate(height).into()),
+            |video| video.sender.target(),
+        );
         Encoder::new(
             codec,
             width,
             height,
             self.fps,
-            kbps(height, None),
+            (target / 1000) as u32,
             self.effort,
             self.hardware,
         )
     }
 
-    /// Takes Yapfast's controls, reports the stream starting, and fails once
-    /// its connection ended. Gives the source a [`Control::Switch`] asked for.
+    fn lost_link(&mut self, reason: String, report: &mut dyn FnMut(Report)) {
+        let lost = *self.lost.get_or_insert_with(Instant::now);
+        if lost.elapsed() >= MOVE_GRACE {
+            self.video = None;
+            self.streaming = false;
+            self.preview_due = None;
+            self.lost = None;
+            report(Report::ReconnectShare { reason });
+        }
+    }
+
+    /// Reports connection changes without stopping capture, and returns a requested new source.
     fn check(&mut self, report: &mut dyn FnMut(Report)) -> Result<Option<Source>> {
         let mut switch = None;
         while let Ok(control) = self.controls.try_recv() {
@@ -757,11 +776,8 @@ impl Sink {
             }
             // Discord ends the connection when it moves the stream to
             // another server, which then arrives as another Send.
-            Some(Link::Ended(reason)) => {
-                let lost = *self.lost.get_or_insert_with(Instant::now);
-                if lost.elapsed() >= MOVE_GRACE {
-                    bail!("Lost the stream connection: {reason}");
-                }
+            Some(Link::Ended(reason)) if self.server.is_none() => {
+                self.lost_link(reason, report);
             }
             _ => self.lost = None,
         }
@@ -1927,15 +1943,6 @@ mod tests {
         assert_eq!(fit(801, 601, 1280, 720), (800, 600), "never larger");
     }
 
-    #[test]
-    fn aims_for_discords_bitrates() {
-        assert_eq!(kbps(720, None), 3500);
-        assert_eq!(kbps(1080, None), 9000);
-        assert_eq!(kbps(1080, Some(4_000_000)), 4000, "what the path carries");
-        assert_eq!(kbps(720, Some(9_000_000)), 3500, "never past the cap");
-        assert_eq!(kbps(1080, Some(100_000)), 500, "nor below a screen's floor");
-    }
-
     /// With the GPU, AV1 and H265 before H264 where they open, and an
     /// encoder for the first; without it, H264 alone, on x264.
     #[test]
@@ -1969,6 +1976,44 @@ mod tests {
         sink.hardware = false;
         let (offers, encoder) = sink.offers(320, 180).unwrap();
         assert_eq!((offers, encoder.engine()), (vec![Codec::H264], "x264"));
+    }
+
+    #[test]
+    fn a_lost_outgoing_link_requests_a_new_server_after_the_move_grace() {
+        let frames = Frames::create(PREVIEW_WIDTH, PREVIEW_HEIGHT).unwrap();
+        let (_controls, received) = channel::channel();
+        let mut sink = Sink {
+            writer: Writer::open(&frames.path().unwrap()).unwrap(),
+            controls: received,
+            server: None,
+            sound: false,
+            video: None,
+            fps: 30,
+            effort: Effort::Light,
+            hardware: false,
+            started: Instant::now(),
+            streaming: true,
+            preview_due: Some(Instant::now()),
+            thumbnail: None,
+            lost: None,
+        };
+        let mut reports = Vec::new();
+        sink.lost_link("I/O closed".into(), &mut |report| reports.push(report));
+        assert!(reports.is_empty());
+        assert!(sink.streaming);
+
+        sink.lost = Some(Instant::now() - MOVE_GRACE);
+        sink.lost_link("I/O closed".into(), &mut |report| reports.push(report));
+        assert_eq!(
+            reports,
+            [Report::ReconnectShare {
+                reason: "I/O closed".into(),
+            }]
+        );
+        assert!(!sink.streaming);
+        assert!(sink.preview_due.is_none() && sink.lost.is_none());
+        assert!(sink.check(&mut |report| reports.push(report)).is_ok());
+        assert_eq!(reports.len(), 1);
     }
 
     #[test]

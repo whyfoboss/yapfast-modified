@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::{
     activity, activity_feed,
     api::{self, Api, PAGE, Span},
-    cache, forum, gift, guild, invite, limits,
+    cache, commands, forum, gift, guild, interactions, invite, limits,
     marked::MarkedServer,
     member_list::{ListedMember, Presence},
     message::{self, Message, Names, Page, Reply},
@@ -107,6 +107,14 @@ pub struct Account {
     /// not the address.
     #[serde(default)]
     pub has_email: bool,
+    /// Discord lets it see age-restricted content, as its `nsfw_allowed`
+    /// says: an adult's, by the birthday it gave. Apps' age-restricted
+    /// commands are offered to no other.
+    #[serde(default)]
+    pub nsfw_allowed: bool,
+    /// Its settings offer apps' age-restricted commands in DMs.
+    #[serde(default)]
+    pub nsfw_commands_in_dms: bool,
 }
 
 /// A DM or group DM, as the DM list shows it.
@@ -389,6 +397,41 @@ impl std::fmt::Debug for SharedNames {
 /// A message event from the gateway, for any channel.
 #[derive(Clone, Debug)]
 pub enum Live {
+    /// INTERACTION_CREATE: Discord passed this account's interaction to its
+    /// app, which gave it `id`. A message that answers it names that id in
+    /// its `interaction_metadata`.
+    InteractionCreated {
+        nonce: String,
+        id: String,
+    },
+    /// INTERACTION_MODAL_CREATE: an app answered with a form, as Discord
+    /// sends it, with the interaction's `nonce`.
+    InteractionModal(Value),
+    /// INTERACTION_IFRAME_MODAL_CREATE: an app answered with a web page to
+    /// show in a window, as Discord sends it. Yapfast doesn't show those.
+    InteractionPage(Value),
+    /// INTERACTION_FAILURE, with Discord's `reason_code`; see
+    /// [`interactions::failure_reason`].
+    InteractionFailure {
+        nonce: String,
+        reason: u64,
+    },
+    /// INTERACTION_SUCCESS: the app answered.
+    InteractionSuccess {
+        nonce: String,
+    },
+    /// APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE: an app's choices for the
+    /// option being typed, as Discord sends them; [`Discord::autocomplete`]
+    /// waits for its own.
+    AutocompleteChoices {
+        nonce: String,
+        choices: Value,
+    },
+    /// Kept command indexes are out of date, which
+    /// [`Discord::command_index`] then fetches again: a new gateway
+    /// session's, GUILD_APPLICATION_COMMAND_INDEX_UPDATE's or
+    /// USER_APPLICATION_UPDATE's.
+    CommandIndexStale(commands::Stale),
     /// The Activity panel's feed has something new, to fetch after this long.
     ActivityFeedStale {
         refresh_after_ms: Option<u64>,
@@ -704,6 +747,9 @@ pub struct Discord {
     notes: Notes,
     /// Profile effects fetched lately, oldest first.
     effects: Arc<Mutex<Vec<Arc<profile_effect::Effect>>>>,
+    /// The layers of the profile frames asked for, by SKU; none for one the
+    /// shop has no frame for. They're a few addresses each.
+    frames: Frames,
     /// The threads a list of a channel's threads found, by id, while it's
     /// open: one opens from what Discord gave rather than asking again.
     listed_threads: Arc<Mutex<HashMap<String, Value>>>,
@@ -718,6 +764,11 @@ pub struct Discord {
     /// Discord's own soundboard sounds, once a call asked for them: Discord's
     /// client asks once a session too.
     default_sounds: Arc<tokio::sync::Mutex<Option<Arc<[soundboard::Sound]>>>>,
+    /// The command indexes fetched, until Discord says they changed; see
+    /// [`Self::command_index`].
+    commands: commands::Kept,
+    /// The newest autocomplete, the only one whose answer is wanted.
+    autocompletes: interactions::Autocompletes,
 }
 
 /// Discord allows starting 10 new DMs with people in 10 minutes, and treats
@@ -751,6 +802,9 @@ const PROFILES: usize = 32;
 const NOTES: usize = 256;
 
 type Notes = Arc<Mutex<HashMap<String, String>>>;
+
+/// Profile frames' layers by SKU, as [`Discord::kept_frame`] gives them.
+type Frames = Arc<Mutex<HashMap<String, Option<Arc<[profile::FrameLayer]>>>>>;
 
 /// Keeps a note this account has on `user`.
 fn keep_note(notes: &Notes, user: &str, note: &str) {
@@ -822,6 +876,7 @@ impl Discord {
                 beside: None,
             },
         ));
+        let kept_commands = commands::Kept::watching(live.subscribe());
         Ok(Self {
             requests,
             snapshots: watcher,
@@ -832,11 +887,14 @@ impl Discord {
             feed_place: Arc::default(),
             notes,
             effects: Arc::default(),
+            frames: Arc::default(),
             listed_threads: Arc::default(),
             new_dms: Arc::new(Mutex::new(limits::Window::new(NEW_DMS, NEW_DM_SPAN))),
             application_icons: Arc::default(),
             mfa: Arc::default(),
             default_sounds: Arc::default(),
+            commands: kept_commands,
+            autocompletes: interactions::Autocompletes::default(),
         })
     }
 
@@ -847,6 +905,61 @@ impl Discord {
     /// Message events for every channel, from now on.
     pub fn live(&self) -> broadcast::Receiver<Live> {
         self.live.subscribe()
+    }
+
+    /// The apps' commands for a channel: its server's index, or the DM
+    /// with a bot's, merged with this account's own. Discord's client asks
+    /// for no other DM's or group DM's. Each index is fetched when first
+    /// asked for, which the person typing `/` or opening a menu with Apps
+    /// does, and kept until Discord's client would count it out of date
+    /// ([`commands::Stale`]). A DM's that can't be had leaves the account's
+    /// own.
+    pub async fn command_index(
+        &self,
+        guild: Option<&str>,
+        channel: &str,
+    ) -> Result<Arc<commands::CommandIndex>> {
+        let fetch = |resource: String| async move { self.api.command_index(&resource).await };
+        let place = match guild {
+            Some(guild) => {
+                let owner = commands::Owner::Guild(guild.to_owned());
+                Some(self.commands.get(owner, None, fetch).await?)
+            }
+            None => match self.dm_bot(channel) {
+                Some(bot) => {
+                    let owner = commands::Owner::Channel(channel.to_owned());
+                    self.commands
+                        .get(owner, Some(&bot), fetch)
+                        .await
+                        .inspect_err(|error| tracing::debug!(%error, "no command index for a DM"))
+                        .ok()
+                }
+                None => None,
+            },
+        };
+        let own = self
+            .commands
+            .get(commands::Owner::User, None, fetch)
+            .await?;
+        Ok(match place {
+            // The account's own come first: a command in both is theirs,
+            // as Discord's client takes it.
+            Some(place) => Arc::new(own.merged(&place)),
+            None => own,
+        })
+    }
+
+    /// The bot a one-to-one DM is with, if it's with one.
+    fn dm_bot(&self, channel: &str) -> Option<String> {
+        let person = self
+            .snapshots
+            .borrow()
+            .conversations
+            .iter()
+            .find(|dm| dm.id == channel && !dm.group)?
+            .person
+            .clone()?;
+        self.read_names().is_bot(&person).then_some(person)
     }
 
     /// Tells Discord a server's channel is on screen, so its messages arrive
@@ -999,6 +1112,164 @@ impl Discord {
     /// Votes for `answers` of a message's poll; none takes the vote back.
     pub async fn vote(&self, channel: &str, id: &str, answers: &[u64]) -> Result<()> {
         self.api.vote(channel, id, answers).await
+    }
+
+    /// Uses a bot's message component or submits its form in this gateway
+    /// session, as the person just did. Discord takes the request at once
+    /// and tells the app's answer over the gateway, as
+    /// [`Live::InteractionSuccess`], [`Live::InteractionFailure`] or
+    /// [`Live::InteractionModal`]; this waits for it, up to
+    /// [`interactions::UNANSWERED`], and says whether it came. It is never
+    /// sent again.
+    pub async fn interact(&self, interaction: &interactions::Interaction) -> Result<bool> {
+        self.interact_with_files(interaction, Vec::new()).await
+    }
+
+    /// Runs an app's command as the person just sent it, with the contents
+    /// of its files, in the order its `files` names them, uploaded first
+    /// as Discord's client does. Like [`Self::interact`], this waits for
+    /// the app's answer; the answer's message then comes as any other,
+    /// naming the [`Live::InteractionCreated`] id in its
+    /// `interaction_metadata`.
+    pub async fn run_command(
+        &self,
+        run: interactions::CommandUse,
+        files: Vec<Vec<u8>>,
+    ) -> Result<bool> {
+        if files.len() != run.files.len() {
+            bail!("Yapfast lost a file of this command. Choose it again.");
+        }
+        let files = run.files.iter().cloned().zip(files).collect();
+        self.interact_with_files(&interactions::Interaction::Command(run), files)
+            .await
+    }
+
+    /// Submits a bot's form as the person just did, with the contents of
+    /// the files its file uploads carry, in the order its `files` names
+    /// them, uploaded first. Like [`Self::interact`], this waits for the
+    /// app's answer.
+    pub async fn submit_form(
+        &self,
+        form: &interactions::Interaction,
+        files: Vec<Vec<u8>>,
+    ) -> Result<bool> {
+        let interactions::Interaction::Modal { files: names, .. } = form else {
+            bail!("Only a form carries files.");
+        };
+        if files.len() != names.len() {
+            bail!("Yapfast lost a file of this form. Choose it again.");
+        }
+        let files = names.iter().cloned().zip(files).collect();
+        self.interact_with_files(form, files).await
+    }
+
+    /// Asks an app for its choices for the option being typed: at once, or
+    /// within [`interactions::AUTOCOMPLETE_PAUSE`] of another, once typing
+    /// pauses that long, as Discord's client. Only the newest is answered:
+    /// this gives `None` for one a newer one replaced, before or after it
+    /// was sent, and for one Discord said nothing more of within
+    /// [`interactions::UNANSWERED`]. It is never sent again.
+    pub async fn autocomplete(&self, run: interactions::CommandUse) -> Result<Option<Value>> {
+        let (turn, at_once) = self.autocompletes.start(std::time::Instant::now());
+        if !at_once {
+            while let Some(due) = self.autocompletes.due()
+                && due > std::time::Instant::now()
+            {
+                tokio::time::sleep_until(due.into()).await;
+                if !self.autocompletes.newest(turn) {
+                    return Ok(None);
+                }
+            }
+            self.autocompletes.went(turn);
+        }
+        let session = self.session().await?;
+        let mut live = self.live.subscribe();
+        let interaction = interactions::Interaction::Autocomplete(run);
+        self.api
+            .interact(&interaction.body(&session, &[]), false)
+            .await?;
+        let nonce = interaction.nonce();
+        let answered = async {
+            loop {
+                match live.recv().await {
+                    Ok(Live::AutocompleteChoices {
+                        nonce: answered,
+                        choices,
+                    }) if answered == nonce => return Ok(choices),
+                    Ok(Live::InteractionFailure {
+                        nonce: answered,
+                        reason,
+                    }) if answered == nonce => {
+                        return Err(anyhow!(interactions::failure_reason(reason)));
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        };
+        let Ok(choices) = tokio::time::timeout(interactions::UNANSWERED, answered).await else {
+            return Ok(None);
+        };
+        let choices = choices?;
+        Ok(self.autocompletes.newest(turn).then_some(choices))
+    }
+
+    /// This gateway session's id, which an interaction names.
+    async fn session(&self) -> Result<String> {
+        let (reply, answer) = oneshot::channel();
+        self.requests
+            .send(Request::Session(reply))
+            .map_err(|_| anyhow!("Discord isn't connected. Restart Yapfast and try again."))?;
+        answer
+            .await
+            .ok()
+            .flatten()
+            .context("Discord isn't connected yet. Try again in a moment.")
+    }
+
+    async fn interact_with_files(
+        &self,
+        interaction: &interactions::Interaction,
+        files: Vec<(String, Vec<u8>)>,
+    ) -> Result<bool> {
+        let session = self.session().await?;
+        let uploads = self.upload(interaction.channel(), files).await?;
+        // Listening before sending, so an answer that comes first is heard.
+        let mut live = self.live.subscribe();
+        let body = interaction.body(&session, &uploads);
+        let sent = self
+            .api
+            .interact(&body, interaction.again_when_limited())
+            .await;
+        if sent.is_err() {
+            self.discard(&uploads).await;
+        }
+        sent?;
+        let nonce = interaction.nonce();
+        let answered = async {
+            loop {
+                match live.recv().await {
+                    Ok(
+                        Live::InteractionSuccess { nonce: answered }
+                        | Live::InteractionFailure {
+                            nonce: answered, ..
+                        },
+                    ) if answered == nonce => return,
+                    Ok(Live::InteractionModal(form) | Live::InteractionPage(form))
+                        if form["nonce"] == nonce =>
+                    {
+                        return;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+                }
+            }
+        };
+        Ok(tokio::time::timeout(interactions::UNANSWERED, answered)
+            .await
+            .is_ok())
     }
 
     /// Closes this account's poll now.
@@ -1925,6 +2196,35 @@ impl Discord {
         self.lock_profiles().retain(|kept| {
             Some(&kept.user) != me.as_ref() || guild.is_some_and(|guild| kept.guild != guild)
         });
+    }
+
+    /// The layers of the profile frame sold as `sku`, if they were asked
+    /// for already: `Some(None)` for a SKU that isn't a frame.
+    pub fn kept_frame(&self, sku: &str) -> Option<Option<Arc<[profile::FrameLayer]>>> {
+        self.frames
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(sku)
+            .cloned()
+    }
+
+    /// The layers of the profile frame sold as `sku`, from the shop's
+    /// `GET /collectibles-products/{sku}`, asked for once and kept. None for
+    /// a SKU that isn't one.
+    pub async fn profile_frame(&self, sku: &str) -> Result<Option<Arc<[profile::FrameLayer]>>> {
+        if let Some(kept) = self.kept_frame(sku) {
+            return Ok(kept);
+        }
+        let product = self.api.collectibles_product(sku).await?;
+        let frame = profile::frame(&product).map(Arc::from);
+        if frame.is_none() {
+            tracing::info!(sku, "the shop has no profile frame with this SKU");
+        }
+        self.frames
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(sku.to_owned(), frame.clone());
+        Ok(frame)
     }
 
     /// The profile effect sold as `sku`: its layers, from the shop, asked for
@@ -3213,7 +3513,7 @@ impl Discord {
     }
 
     /// Downloads a file from Discord's CDN into `file` as it arrives,
-    /// returning its size; a video plays while it does.
+    /// returning its size, as a GIF favourite's is kept.
     pub async fn download_into(
         &self,
         url: &str,
@@ -3221,6 +3521,25 @@ impl Discord {
         limit: u64,
     ) -> Result<u64> {
         self.api.download_into(url, file, limit).await
+    }
+
+    /// Asks Discord's CDN for a file's bytes from `from`, up to `to`, as
+    /// [`Api::download_part`] does; a video plays while it downloads.
+    pub async fn download_part(
+        &self,
+        url: &str,
+        from: u64,
+        to: Option<u64>,
+        limit: u64,
+    ) -> Result<
+        api::FilePart<
+            impl futures_util::Stream<Item = Result<impl std::ops::Deref<Target = [u8]> + Send + use<>>>
+            + Send
+            + Unpin
+            + use<>,
+        >,
+    > {
+        self.api.download_part(url, from, to, limit).await
     }
 
     /// Changes whenever a name, avatar or role that messages show changes.

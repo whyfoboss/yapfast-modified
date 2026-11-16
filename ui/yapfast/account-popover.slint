@@ -1,11 +1,13 @@
 import { ScrollView } from "../scrollview.slint";
 import { Theme, Middle, Popup, Looks } from "../theme.slint";
-import { MenuItem } from "../controls.slint";
-import { ProfileData } from "../people.slint";
+import { Avatar, MenuItem, StatusText, StyledName, ServerTagChip, AccountLook } from "../controls.slint";
+import { ProfileData, ProfileBadge, ProfileBadgeRow, BadgeTipCard, ProfileTheme } from "../people.slint";
 import { StatusDot } from "../rail.slint";
 import { StatusOption } from "../dialogs.slint";
 
-// Compact action menu opened from the user panel at the bottom left.
+// Uses the account summary already supplied by Yapfast, and, once it has
+// come, the account's own profile: its banner or colour, theme, decoration,
+// styled name, server tag and badges, as Discord's own card shows them.
 export component AccountPopover inherits Rectangle {
     in property <string> name;
     in property <string> initial;
@@ -21,10 +23,17 @@ export component AccountPopover inherits Rectangle {
     /// The account's own profile; its id is empty until it has come.
     in property <ProfileData> profile;
     property <bool> themed: root.profile.has-theme;
+    property <bool> light: root.themed && ProfileTheme.light(root.profile.theme-primary);
+    property <color> theme-start: ProfileTheme.wash(root.profile.theme-primary, root.light);
+    /// The text on the theme, whatever Yapfast's own theme is.
+    property <color> ink: root.themed ? ProfileTheme.ink(root.light) : Theme.text;
     /// Opened, so the profile can be asked for.
     callback opened;
     callback open-link(string);
     init => { root.opened(); self.enter-amount = 1; }
+    property <float> enter-amount: Looks.better-animations ? 0 : 1;
+    animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
+    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1;
     in-out property <bool> expanded;
     in property <length> available-height: 100000px;
     callback choose(string);
@@ -33,77 +42,161 @@ export component AccountPopover inherits Rectangle {
     callback settings;
     callback copy-id;
     callback game-duration-due;
-    property <float> enter-amount: Looks.better-animations ? 0 : 1;
-    animate enter-amount { duration: Popup.popover-enter; easing: ease-out; }
-    opacity: Looks.better-animations ? (0.2 + 0.8 * self.enter-amount) : 1.0;
     property <string> presence-label: root.status == "idle" ? "Idle" : root.status == "dnd" ? "Do Not Disturb" : root.status == "invisible" ? "Invisible" : "Online";
     background: root.themed
-        ? @linear-gradient(180deg, root.profile.theme-primary.mix(#000000, 0.4) 0%, root.profile.theme-secondary.mix(#000000, 0.4) 100%)
+        ? @linear-gradient(180deg, root.theme-start 0%, ProfileTheme.wash(root.profile.theme-secondary, root.light) 100%)
         : Theme.panel;
     border-radius: 8px;
     border-width: 1px; border-color: root.themed ? root.profile.theme-primary : Theme.line;
     drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 8px;
     accessible-role: groupbox; accessible-label: "Account";
-    clip: true;
+    property <ProfileBadgeRow> hovered-badge;
+    property <length> badge-x;
+    property <length> badge-y;
     height: min(root.available-height, content.preferred-height);
     ScrollView {
-        width: 100%;
-        height: 100%;
+        expand-scrollbars: false;
         content-height: content.preferred-height;
+        changed content-y => { root.hovered-badge = {}; }
         content := VerticalLayout {
-            padding: 8px; spacing: 8px;
-            Rectangle {
-                background: Theme.raised; border-radius: 8px;
-                VerticalLayout {
-                    padding: 6px; spacing: 2px;
-                    MenuItem { height: 40px; text: "Edit Profile"; icon: @image-url("../icons/pencil.svg"); clicked => { root.edit-profile(); } }
-                    Rectangle { height: 1px; background: Theme.line; }
-                    Rectangle {
-                        height: 40px; border-radius: 4px;
-                        background: status-touch.has-hover ? Theme.active : transparent;
-                        border-width: status-focus.has-focus ? 2px : 0px; border-color: Theme.accent;
-                        accessible-role: button; accessible-label: "Change status"; accessible-description: root.presence-label;
-                        accessible-expanded: root.expanded;
-                        accessible-action-default => { root.expanded = !root.expanded; }
-                        forward-focus: status-focus;
-                        HorizontalLayout {
-                            padding-left: 8px; padding-right: 8px; spacing: 8px;
-                            Middle { StatusDot { presence: root.status == "invisible" ? "offline" : root.status; ring: Theme.raised; } }
-                            Text { text: root.presence-label; color: Theme.secondary; font-size: 15px; vertical-alignment: center; horizontal-stretch: 1; }
-                            Image { source: root.expanded ? @image-url("../icons/chevron-down.svg") : @image-url("../icons/chevron-right.svg"); width: 16px; image-fit: contain; colorize: Theme.muted; }
+            spacing: 0px;
+            header := Rectangle {
+                property <length> banner-height: 120px;
+                height: self.banner-height + 76px;
+                property <color> banner-colour: root.profile.has-accent ? root.profile.accent : root.themed ? root.profile.theme-primary : Theme.sunken;
+                property <color> ring: root.themed ? root.theme-start : Theme.panel;
+                Rectangle {
+                    y: 0px; height: header.banner-height; background: header.banner-colour;
+                    border-top-left-radius: 8px; border-top-right-radius: 8px; clip: true;
+                    if root.profile.banner.width > 0: Image { width: parent.width; height: parent.height; source: root.profile.banner; image-fit: cover; }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        accessible-role: button; accessible-label: "Edit profile from banner";
+                        accessible-action-default => { root.edit-profile(); }
+                        clicked => { root.edit-profile(); }
+                    }
+                }
+                Rectangle {
+                    x: 12px; y: header.banner-height - 44px; width: 88px; height: 88px;
+                    border-radius: 44px; background: header.ring;
+                    Avatar { size: 80px; initial: root.initial; tint: root.tint; picture: root.picture; decoration-url: AccountLook.decoration-url; animate: true; }
+                    StatusDot { x: 66px; y: 65px; width: 20px; height: 20px; border-radius: 10px; presence: root.status == "invisible" ? "offline" : root.status; ring: header.ring; }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        accessible-role: button; accessible-label: "Edit profile from avatar";
+                        accessible-action-default => { root.edit-profile(); }
+                        clicked => { root.edit-profile(); }
+                    }
+                }
+                HorizontalLayout {
+                    x: 16px; y: header.banner-height + 48px; width: parent.width - 32px; height: 24px; spacing: 6px; alignment: start;
+                    if root.profile.name-style.length == 0: Text { text: root.name; color: root.ink; font-size: 20px; font-weight: 700; overflow: elide; }
+                    if root.profile.name-style.length > 0: StyledName { text: root.name; styles: root.profile.name-style; ink: root.ink; font-size: 20px; font-weight: 700; }
+                    if root.profile.tag != "": Middle { ServerTagChip { text: root.profile.tag; badge: root.profile.tag-badge; fill: root.light ? #ffffff3d : #97979f33; } }
+                }
+            }
+            // Its badges, in Discord's pills.
+            if root.profile.badges.length > 0: HorizontalLayout {
+                padding-left: 16px; spacing: 4px; alignment: start;
+                for badge[index] in root.profile.badges: Rectangle {
+                    width: index < 6 ? 20px : 0px; height: 20px;
+                    if index < 6: ProfileBadge {
+                        badge: badge; local-tip: true;
+                        show-tip(info, x, y) => {
+                            root.badge-x = x - root.absolute-position.x;
+                            root.badge-y = y - root.absolute-position.y;
+                            root.hovered-badge = info;
                         }
-                        status-focus := FocusScope {
-                            key-pressed(event) => {
-                                if event.text == " " || event.text == "\n" { root.expanded = !root.expanded; return accept; }
-                                return reject;
+                        hide-tip => { root.hovered-badge = {}; }
+                        open-link(url) => { root.open-link(url); }
+                    }
+                }
+            }
+            VerticalLayout {
+                padding: 16px; padding-top: 8px; spacing: 12px;
+                if root.has-custom-status: StatusText { text: root.custom-text; emoji-url: root.custom-emoji; color: root.themed ? root.ink : Theme.muted; }
+                if root.game-name != "": Rectangle {
+                    height: 80px; border-radius: 8px; background: Theme.raised;
+                    VerticalLayout {
+                        padding: 12px; spacing: 4px; alignment: center;
+                        Text { text: "Playing"; color: Theme.secondary; font-size: 12px; font-weight: 700; }
+                        Text { text: root.game-name; color: Theme.text; font-size: 15px; font-weight: 600; overflow: elide; }
+                        if root.game-duration != "": Text { text: root.game-duration; color: Theme.live; font-size: 12px; }
+                    }
+                    Timer { interval: 20s; running: root.game-duration != ""; triggered => { root.game-duration-due(); } }
+                }
+                Rectangle {
+                    background: Theme.raised; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 8px; spacing: 4px;
+                        MenuItem { height: 40px; text: "Edit Profile"; icon: @image-url("../icons/pencil.svg"); clicked => { root.edit-profile(); } }
+                        Rectangle { height: 1px; background: Theme.line; }
+                        Rectangle {
+                            height: 40px; border-radius: 4px;
+                            background: status-touch.has-hover ? Theme.active : transparent;
+                            border-width: status-focus.has-focus ? 2px : 0px; border-color: Theme.accent;
+                            accessible-role: button; accessible-label: "Change status"; accessible-description: root.presence-label;
+                            accessible-expanded: root.expanded;
+                            accessible-action-default => { root.expanded = !root.expanded; }
+                            forward-focus: status-focus;
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 8px; spacing: 8px;
+                                Middle { StatusDot { presence: root.status == "invisible" ? "offline" : root.status; ring: Theme.raised; } }
+                                Text { text: root.presence-label; color: Theme.secondary; font-size: 15px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Image { source: root.expanded ? @image-url("../icons/chevron-down.svg") : @image-url("../icons/chevron-right.svg"); width: 16px; image-fit: contain; colorize: Theme.muted; }
                             }
-                            status-touch := TouchArea { mouse-cursor: pointer; clicked => { root.expanded = !root.expanded; } }
+                            status-focus := FocusScope {
+                                key-pressed(event) => {
+                                    if event.text == " " || event.text == "\n" { root.expanded = !root.expanded; return accept; }
+                                    return reject;
+                                }
+                                status-touch := TouchArea { mouse-cursor: pointer; clicked => { root.expanded = !root.expanded; } }
+                            }
                         }
-                    }
-                    if root.expanded: VerticalLayout {
-                        spacing: 2px;
-                        for option in [
-                            { key: "online", name: "Online", note: "" },
-                            { key: "idle", name: "Idle", note: "" },
-                            { key: "dnd", name: "Do Not Disturb", note: "You won't get message notifications." },
-                            { key: "invisible", name: "Invisible", note: "You'll appear offline." },
-                        ]: StatusOption {
-                            key: option.key; name: option.name; note: option.note; checked: root.status == option.key;
-                            clicked => { root.choose(option.key); }
+                        if root.expanded: VerticalLayout {
+                            spacing: 2px;
+                            for option in [
+                                { key: "online", name: "Online", note: "" },
+                                { key: "idle", name: "Idle", note: "" },
+                                { key: "dnd", name: "Do Not Disturb", note: "You won't get message notifications." },
+                                { key: "invisible", name: "Invisible", note: "You'll appear offline." },
+                            ]: StatusOption {
+                                key: option.key; name: option.name; note: option.note; checked: root.status == option.key;
+                                clicked => { root.choose(option.key); }
+                            }
                         }
+                        MenuItem { height: 40px; text: root.has-custom-status ? "Change custom status" : "Set a custom status"; icon: @image-url("../icons/smile-plus.svg"); clicked => { root.custom-status(); } }
                     }
-                    Rectangle { height: 1px; background: Theme.line; }
-                    MenuItem { height: 40px; text: root.has-custom-status ? "Change custom status" : "Set a custom status"; icon: @image-url("../icons/smile-plus.svg"); clicked => { root.custom-status(); } }
+                }
+                Rectangle {
+                    background: Theme.raised; border-radius: 8px;
+                    VerticalLayout {
+                        padding: 8px; spacing: 4px;
+                        if root.user-id != "": MenuItem { height: 40px; text: "Copy User ID"; icon: @image-url("../icons/copy.svg"); clicked => { root.copy-id(); } }
+                        MenuItem { height: 40px; text: "User Settings"; icon: @image-url("../icons/settings.svg"); clicked => { root.settings(); } }
+                    }
                 }
             }
-            Rectangle {
-                background: Theme.raised; border-radius: 8px;
-                VerticalLayout {
-                    padding: 6px; spacing: 2px;
-                    if root.user-id != "": MenuItem { height: 40px; text: "Copy User ID"; icon: @image-url("../icons/copy.svg"); clicked => { root.copy-id(); } }
-                    MenuItem { height: 40px; text: "User Settings"; icon: @image-url("../icons/settings.svg"); clicked => { root.settings(); } }
-                }
-            }
+        }
+    }
+    if root.hovered-badge.title != "": BadgeTipCard {
+        title: root.hovered-badge.title; kind: root.hovered-badge.kind;
+        progress: root.hovered-badge.progress; picture-url: root.hovered-badge.picture;
+        x: clamp(root.badge-x - self.width / 2, 8px, root.width - self.width - 8px);
+        y: root.badge-y >= self.height + 12px
+            ? root.badge-y - self.height - 10px
+            : min(root.height - self.height - 8px, root.badge-y + 28px);
+        caret-x: clamp(root.badge-x - self.x, 8px, self.width - 8px);
+        caret-below: self.y < root.badge-y;
+    }
+    if root.hovered-badge.title == "" && root.hovered-badge.description != "": Rectangle {
+        x: clamp(root.badge-x - self.width / 2, 8px, root.width - self.width - 8px);
+        y: root.badge-y >= self.height + 8px ? root.badge-y - self.height - 6px : root.badge-y + 26px;
+        width: min(badge-label.preferred-width + 20px, root.width - 16px);
+        height: 32px; border-radius: 6px; background: Theme.tooltip;
+        badge-label := Text {
+            x: 10px; width: parent.width - 20px; overflow: elide;
+            text: root.hovered-badge.description; color: Theme.text; font-size: 14px; font-weight: 700;
         }
     }
 }

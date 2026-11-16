@@ -49,6 +49,16 @@ pub enum FeedEntry {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedPerson {}
 
+/// The apps' commands a place offers, as Discord's command indexes list
+/// them; see `yapfast_discord::commands`.
+#[cfg(feature = "discord")]
+pub use yapfast_discord::commands::CommandIndex;
+
+/// Only Discord has apps' commands.
+#[cfg(not(feature = "discord"))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandIndex {}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ChatRoom {
     pub id: String,
@@ -809,6 +819,18 @@ impl ProfileEffect {
 /// card's size rather than an avatar's.
 pub const EFFECT_PICTURE: &str = "#effect";
 
+/// A frame layer's URL includes both its SKU and layer ID.
+pub fn is_frame_layer(url: &str) -> bool {
+    url.split_once("/collectibles-shop/")
+        .is_some_and(|(_, rest)| rest.ends_with("/static") && rest.matches('/').count() == 2)
+}
+
+/// A banner with an animated Discord hash has a matching GIF.
+pub fn moving_banner(url: &str) -> Option<String> {
+    let (path, query) = url.split_once(".png?")?;
+    path.rsplit('/').next()?.starts_with("a_").then(|| format!("{path}.gif?{query}"))
+}
+
 #[cfg(feature = "discord")]
 impl From<&yapfast_discord::profile_effect::Effect> for ProfileEffect {
     fn from(effect: &yapfast_discord::profile_effect::Effect) -> Self {
@@ -851,6 +873,10 @@ pub struct Profile {
     /// The SKU of the profile effect they equip, which
     /// [`Event::ProfileEffect`] describes.
     pub effect: Option<String>,
+    /// The layers of the frame around their card, the back ones first; none
+    /// without one, or until [`Event::ProfileFrame`] says what it is.
+    pub frame: Arc<[ProfileFrameLayer]>,
+    pub frame_sku: Option<String>,
     /// The two colours of their profile's theme, when they set one.
     pub theme: Option<[u32; 2]>,
     /// The address of their banner, and its colour when there's no picture.
@@ -895,6 +921,27 @@ pub struct Profile {
     /// What they did lately, once asked for.
     pub recent: Vec<RecentActivity>,
     pub recent_asked: bool,
+}
+
+/// One picture of a profile frame; see `yapfast_discord::profile::FrameLayer`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileFrameLayer {
+    pub src: String,
+    pub kind: String,
+    pub anchor: String,
+    pub front: bool,
+}
+
+#[cfg(feature = "discord")]
+impl From<&yapfast_discord::profile::FrameLayer> for ProfileFrameLayer {
+    fn from(layer: &yapfast_discord::profile::FrameLayer) -> Self {
+        Self {
+            src: layer.src.clone(),
+            kind: layer.kind.clone(),
+            anchor: layer.anchor.clone(),
+            front: layer.front,
+        }
+    }
 }
 
 /// A past thing on someone's Activity tab.
@@ -1146,6 +1193,28 @@ pub struct Reply {
     pub item: Option<String>,
     /// The author's role colour, where the network gives one.
     pub color: Option<u32>,
+}
+
+/// Who used which Discord app command a message answers, as the line
+/// above it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsedCommand {
+    /// Who used it, by name in the conversation, and Matrix-style user id,
+    /// which opens their card.
+    pub user: String,
+    pub sender: String,
+    /// The address of their avatar; see [`DiscordCommand::Pictures`].
+    pub avatar: Option<String>,
+    /// Their role colour, where the network gives one.
+    pub color: Option<u32>,
+    /// The command as the line names it: `/name sub` for a slash command,
+    /// its name for one used from a person's or message's menu.
+    pub name: String,
+    /// A slash command, which clicking puts in the composer for its picker
+    /// to find: its name without the `/` or its subcommands.
+    pub slash: Option<String>,
+    /// The person a command from their menu was used on, by name.
+    pub target: Option<String>,
 }
 
 /// A Discord thread a message leads to: the one started from it, or that
@@ -1637,6 +1706,7 @@ impl Picture {
 pub struct Attachment {
     /// Discord voice recording, with duration in milliseconds (0 if unknown).
     pub voice_ms: Option<u32>,
+    pub voice_waveform: Option<std::sync::Arc<[u8]>>,
     pub name: String,
     pub size: Option<u64>,
     pub image: bool,
@@ -1657,6 +1727,8 @@ pub struct Attachment {
     /// which [`Command::CopyAttachment`] copies its picture. Only Discord's
     /// attachments have one.
     pub url: Option<Arc<str>>,
+    /// Its alt text, which a screen reader reads in place of the picture.
+    pub description: Option<String>,
 }
 
 /// What [`Command::Video`] tells the video playing.
@@ -1781,6 +1853,13 @@ pub enum CardRow {
     Select {
         text: String,
         disabled: bool,
+        kind: u64,
+        custom_id: String,
+        options: Vec<CardOption>,
+        defaults: Vec<String>,
+        channel_types: Vec<u64>,
+        min_values: u64,
+        max_values: u64,
     },
     /// Components of a kind Yapfast can't show.
     Unknown,
@@ -1803,7 +1882,23 @@ pub struct CardButton {
     pub style: ButtonStyle,
     /// Where a link button leads.
     pub url: Option<String>,
+    /// What its app knows it by, when using it asks the app.
+    pub custom_id: Option<String>,
+    /// What a premium button offers in its app's store.
+    pub sku_id: Option<String>,
     pub disabled: bool,
+}
+
+/// An option of a select menu in an app's message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardOption {
+    pub label: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub default: bool,
+    /// Shown before its label: the emoji itself, or a custom one by
+    /// `:name:`.
+    pub emoji: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1813,6 +1908,7 @@ pub enum ButtonStyle {
     Success,
     Danger,
     Link,
+    Premium,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1821,6 +1917,14 @@ pub struct ChatMessage {
     pub id: String,
     /// The timeline item that actions apply to: `e:` event ID or `t:` transaction ID.
     pub item: String,
+    /// The Discord app that owns interactive components, when one is known.
+    pub application_id: Option<String>,
+    /// The Discord interaction it answers, by its id.
+    pub interaction: Option<String>,
+    /// The command whose answer it is, which shows above it as Discord's
+    /// "{user} used /{name}", when it doesn't quote a message instead.
+    pub used: Option<UsedCommand>,
+    pub flags: u64,
     pub author: String,
     /// The author's Matrix user ID, which tells apart people sharing a display name.
     pub sender: String,
@@ -2497,6 +2601,74 @@ pub struct OAuthPreview {
     pub guilds: Vec<OAuthGuild>,
 }
 
+/// A use of a bot's control or form, as [`DiscordCommand::Interact`] sends
+/// it; `discord_text` turns it into Discord's body.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Interaction {
+    /// A button clicked, or options picked in a select menu, under a message.
+    Component {
+        nonce: String,
+        /// None in a DM.
+        guild: Option<String>,
+        channel: String,
+        message: String,
+        message_flags: u64,
+        /// The message's `application_id`, or else its author's id, which a
+        /// bot's user shares with its app, as Discord's client sends it.
+        application: String,
+        /// 2 for a button, 3 and 5-8 for the select menus.
+        component_type: u64,
+        custom_id: String,
+        /// The options picked, for a select menu.
+        values: Option<Vec<String>>,
+    },
+    /// A form a bot opened, submitted with what was entered.
+    Modal {
+        nonce: String,
+        guild: Option<String>,
+        channel: String,
+        application: String,
+        id: String,
+        custom_id: String,
+        /// A file upload's `values` are its files' places in `files`, as
+        /// `"0"` for the first.
+        components: serde_json::Value,
+        /// The files its file uploads carry, which go in the same request.
+        files: Vec<PathBuf>,
+    },
+}
+
+impl Interaction {
+    pub fn nonce(&self) -> &str {
+        match self {
+            Self::Component { nonce, .. } | Self::Modal { nonce, .. } => nonce,
+        }
+    }
+}
+
+/// An app command to run or to complete, with the options entered so far;
+/// `discord_text/interactions.rs` sends it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandRun {
+    pub nonce: String,
+    pub room: String,
+    pub application: String,
+    /// The command as Discord's index gives it.
+    pub command: Arc<serde_json::Value>,
+    /// The options as `/interactions` takes them: `{type, name, value}`
+    /// each, a subcommand or group as `{type: 1 or 2, name, options}`. A
+    /// file option's `value` is its index in `files` as a string, `"0"`
+    /// for the first. For an autocomplete, the option being typed has
+    /// `focused: true`.
+    pub options: serde_json::Value,
+    /// The message or user a context-menu command acts on.
+    pub target: Option<String>,
+    /// The files of its attachment options, in order, which go in the same
+    /// request: an attachment option's `value` is its file's place here, as
+    /// `"0"`. An autocomplete sends none.
+    pub files: Vec<PathBuf>,
+}
+
 /// Commands only the linked Discord account carries out.
 #[derive(Clone)]
 pub enum DiscordCommand {
@@ -2513,6 +2685,38 @@ pub enum DiscordCommand {
     /// holding none in memory: what a start prefetches so that the picker's
     /// first look finds its emoji kept. See [`Pictures::prefetch`].
     PrefetchPictures(Vec<String>),
+    /// Uses a bot's button or select menu, or submits the form it opened,
+    /// as the person just did. [`Event::InteractionSucceeded`],
+    /// [`Event::InteractionFailed`], [`Event::InteractionModal`] or, with no
+    /// word from Discord, [`Event::InteractionSettled`] follows, by its nonce.
+    /// See `discord_text/interactions.rs`.
+    Interact(Box<Interaction>),
+    /// The commands of `room`: its server's command index, or its DM's,
+    /// with the user-installed apps'. Sent only once the person types `/`,
+    /// never ahead; the service keeps each index until Discord says it
+    /// changed. [`Event::CommandIndex`] follows. See
+    /// `discord_text/app_commands.rs`.
+    CommandIndex {
+        room: String,
+    },
+    /// Runs an app's command in `room`, as typed or chosen from a menu.
+    /// [`Event::InteractionCreated`] follows once Discord passed it to the
+    /// app, then [`Event::InteractionSucceeded`],
+    /// [`Event::InteractionFailed`], [`Event::InteractionModal`] or
+    /// [`Event::InteractionSettled`], by its nonce. See
+    /// `discord_text/interactions.rs`.
+    RunCommand(Box<CommandRun>),
+    /// Asks an app for its choices for the option being typed, on a
+    /// keystroke in it, once typing pauses for 300 ms.
+    /// [`Event::AutocompleteChoices`] follows for the newest alone; an
+    /// older one, or one the app didn't answer, gets nothing.
+    Autocomplete(Box<CommandRun>),
+    /// Hides the ephemeral message `item` in `room`, as Discord's "Dismiss
+    /// message" does: only here, with no request, for good.
+    DismissEphemeral {
+        room: String,
+        item: String,
+    },
     /// The GIF picker's home: trending terms with a GIF each, and a GIF for
     /// "Trending GIFs"; [`Event::GifCategories`] follows.
     GifCategories,
@@ -2936,10 +3140,13 @@ pub enum DiscordCommand {
     /// the other person in a DM. It comes back as [`Event::Profile`], and
     /// the effect it names as [`Event::ProfileEffect`] when `effect` asks
     /// for it; without, the shop isn't asked what the effect is made of.
+    /// Its frame comes with it, or as [`Event::ProfileFrame`] the first time,
+    /// when `frame` asks for it.
     Profile {
         room: String,
         user: String,
         effect: bool,
+        frame: bool,
     },
     /// Download server icons and avatars by address. Each that arrives comes
     /// back as [`Event::Picture`]; one that fails doesn't.
@@ -3788,6 +3995,47 @@ pub enum ForwardFailure {
 }
 
 pub enum Event {
+    /// A bot answered an interaction with a form, as Discord sent it, with
+    /// the interaction's `nonce`.
+    InteractionModal(serde_json::Value),
+    /// Discord or the bot refused the interaction with this nonce, and why,
+    /// in words to show.
+    InteractionFailed {
+        nonce: String,
+        reason: String,
+    },
+    /// The bot answered the interaction with this nonce.
+    InteractionSucceeded(String),
+    /// Discord took the interaction with this nonce but said nothing more of
+    /// it in time, as across a reconnect.
+    InteractionSettled(String),
+    /// Discord passed the interaction with this nonce to its app, which gave
+    /// it `id`: the answer's message names it in `interaction_metadata`
+    /// ([`ChatMessage::interaction`]), which ends a command's "Sending
+    /// command…" row.
+    InteractionCreated {
+        nonce: String,
+        id: String,
+    },
+    /// The commands of `room`'s indexes, its server's or DM's merged with
+    /// the account's own, or why they couldn't be fetched. Which of them
+    /// the person may use there is `Application::slash_commands`'s to say.
+    CommandIndex {
+        room: String,
+        index: Result<Arc<CommandIndex>, String>,
+    },
+    /// A server's command index is out of date, and those of the DMs with
+    /// its bots, or with none every index: the next use asks again.
+    CommandIndexChanged {
+        guild: Option<String>,
+    },
+    /// An app's choices for the option being typed, for the autocomplete
+    /// with this nonce, the newest, as Discord sent them: `{name, value}`
+    /// each.
+    AutocompleteChoices {
+        nonce: String,
+        choices: serde_json::Value,
+    },
     /// The GIF picker's home, or why it couldn't load.
     GifCategories(Result<(Vec<GifCategory>, Option<Gif>), String>),
     /// GIFs for a search, or with `None` those trending, or why not.
@@ -3844,6 +4092,13 @@ pub enum Event {
     },
     /// The layers of a profile effect a [`Profile::effect`] names.
     ProfileEffect(Arc<ProfileEffect>),
+    /// The layers of the frame of `user`'s profile, which the shop
+    /// described after [`Event::Profile`] came.
+    ProfileFrame {
+        user: String,
+        sku: String,
+        frame: Arc<[ProfileFrameLayer]>,
+    },
     /// The Activity panel's feed, in Discord's order; empty if it can't be had.
     ActivityFeed(Arc<[FeedEntry]>),
     /// It's time to ask for the Activity panel's feed again.

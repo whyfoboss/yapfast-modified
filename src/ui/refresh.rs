@@ -490,6 +490,7 @@ impl Adapter {
         self.show_server_settings(window);
         self.show_channel_settings(window);
         self.show_mfa(window);
+        self.show_bot_interactions(window);
         self.show_dialogs(window);
         self.show_reactions(window);
         self.show_gifs(window);
@@ -690,6 +691,169 @@ impl Adapter {
         window.set_emoji_card(card);
     }
 
+    /// Bots' controls waiting for Discord, and the select menu and form
+    /// one opened.
+    pub(super) fn show_bot_interactions(&mut self, window: &YapfastWindow) {
+        let state = &self.app.state;
+        // The newest control waiting shows so; the core holds back any.
+        window.set_bot_busy_item(state.interactions.newest_busy().unwrap_or("").into());
+        let (failed, why) = state
+            .interaction_failed
+            .as_ref()
+            .map_or(("", ""), |(item, why)| (item.as_str(), why.as_str()));
+        window.set_bot_failed_item(failed.into());
+        window.set_bot_failed_text(why.into());
+        let select = self.app.state.select_menu.as_ref();
+        window.set_bot_select_open(select.is_some());
+        if let Some(select) = select {
+            window.set_bot_select_heading(select.label.as_str().into());
+            window.set_bot_select_query(select.query.as_str().into());
+            window.set_bot_select_min(select.min as i32);
+            window.set_bot_select_max(select.max as i32);
+            window.set_bot_select_searchable(matches!(select.kind, 5..=8));
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::hash::DefaultHasher::new();
+            select.hash(&mut hasher);
+            let shown = hasher.finish();
+            if self.bot_select_shown != Some(shown) {
+                let query = select.query.to_lowercase();
+                // A message's menu shows its custom emoji as the message does.
+                let emoji = self
+                    .app
+                    .state
+                    .message(&select.item)
+                    .map(|message| message.emoji.as_slice())
+                    .unwrap_or_default();
+                let rows = select
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, choice)| {
+                        query.is_empty()
+                            || choice.label.to_lowercase().contains(&query)
+                            || choice.description.to_lowercase().contains(&query)
+                    })
+                    .map(|(index, choice)| SelectChoice {
+                        index: index as i32,
+                        label: choice.label.as_str().into(),
+                        value: choice.value.as_str().into(),
+                        description: choice.description.as_str().into(),
+                        selected: choice.selected,
+                        emoji: custom_emoji::text(&choice.emoji, emoji).into(),
+                    })
+                    .collect::<Vec<_>>();
+                let current = window.get_bot_select_choices();
+                if let Some(model) = current.as_any().downcast_ref::<VecModel<SelectChoice>>() {
+                    update_model(model, rows);
+                } else {
+                    window.set_bot_select_choices(ModelRc::new(VecModel::from(rows)));
+                }
+                self.bot_select_shown = Some(shown);
+            }
+        } else if self.bot_select_shown.take().is_some() {
+            window.set_bot_select_choices(ModelRc::default());
+        }
+        let modal = self.app.state.interaction_modal.as_ref();
+        window.set_bot_modal_open(modal.is_some());
+        if let Some(modal) = modal {
+            window.set_bot_modal_heading(modal.title.as_str().into());
+            window.set_bot_modal_supported(modal.supported);
+            window.set_bot_modal_saving(modal.saving());
+            window.set_bot_modal_error(modal.error.as_deref().unwrap_or_default().into());
+            let current = window.get_bot_modal_fields();
+            let shown = current.as_any().downcast_ref::<VecModel<ModalField>>();
+            let fields = modal
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| ModalField {
+                    label: field.label.as_str().into(),
+                    description: field.description.as_str().into(),
+                    // Text to read is laid out again only when it changes.
+                    blocks: match shown.and_then(|shown| shown.row_data(index)) {
+                        Some(row) if row.kind == 10 && row.value == field.value.as_str() => {
+                            row.blocks
+                        }
+                        _ if field.kind == 10 => {
+                            ModelRc::new(VecModel::from(messages::text_blocks(&field.value)))
+                        }
+                        _ => ModelRc::default(),
+                    },
+                    choices: if matches!(field.kind, 21 | 22) {
+                        ModelRc::new(VecModel::from(
+                            field
+                                .options
+                                .iter()
+                                .enumerate()
+                                .map(|(index, option)| SelectChoice {
+                                    index: index as i32,
+                                    label: option.label.as_str().into(),
+                                    value: option.value.as_str().into(),
+                                    description: option.description.as_str().into(),
+                                    selected: field.values.contains(&option.value),
+                                    emoji: option.emoji.as_str().into(),
+                                })
+                                .collect::<Vec<_>>(),
+                        ))
+                    } else {
+                        ModelRc::default()
+                    },
+                    checked: field.checked,
+                    files: ModelRc::new(VecModel::from(
+                        field
+                            .files
+                            .iter()
+                            .map(|path| {
+                                SharedString::from(
+                                    path.file_name()
+                                        .unwrap_or(path.as_os_str())
+                                        .to_string_lossy()
+                                        .as_ref(),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                    max_files: field.max_values as i32,
+                    value: field.value.as_str().into(),
+                    placeholder: field.placeholder.as_str().into(),
+                    required: field.required,
+                    paragraph: field.paragraph,
+                    kind: field.kind as i32,
+                    summary: field
+                        .values
+                        .iter()
+                        .map(|value| {
+                            field
+                                .options
+                                .iter()
+                                .find(|option| &option.value == value)
+                                .map_or(value.as_str(), |option| option.label.as_str())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                        .into(),
+                })
+                .collect::<Vec<_>>();
+            // Keep the repeater's model alive while typing so Slint keeps
+            // each input's focus and cursor. Only a row that changed is
+            // set again: its lists are compared by what they hold.
+            if let Some(model) = shown
+                && model.row_count() == fields.len()
+            {
+                for (index, field) in fields.into_iter().enumerate() {
+                    if model
+                        .row_data(index)
+                        .is_none_or(|shown| !same_field(&shown, &field))
+                    {
+                        model.set_row_data(index, field);
+                    }
+                }
+            } else {
+                window.set_bot_modal_fields(ModelRc::new(VecModel::from(fields)));
+            }
+        }
+    }
+
     /// The card a clicked sticker opened, as the message and the picker's
     /// lists show it.
     fn show_sticker_card(&mut self, window: &YapfastWindow) {
@@ -707,6 +871,9 @@ impl Adapter {
     fn show_workspace(&mut self, window: &YapfastWindow) {
         let state = &self.app.state;
         let workspace = state.preview || state.account.is_some();
+        if !state.preview && !window.get_workspace() && workspace {
+            tracing::debug!(target: "yapfast_startup", "desktop workspace published");
+        }
         window.set_workspace(workspace);
         window.set_preview(state.preview);
         window.set_busy(state.busy);
@@ -722,7 +889,7 @@ impl Adapter {
         window.set_online(state.online);
         // Only the sign-in screen offers it, and finding out reads the OS
         // credential store or the disk.
-        if !workspace {
+        if !workspace && !state.busy {
             window.set_restore_available(yapfast_core::chat::can_restore(&self.root));
         }
         if !self.nav_transition.is_workspace_exiting() {
@@ -1437,7 +1604,12 @@ impl Adapter {
         );
         window.set_discord_status(state.discord_presence.as_deref().unwrap_or("online").into());
         window.set_storage(state.storage.unwrap_or_default().into());
-        window.set_notice(state.notice.as_deref().unwrap_or_default().into());
+        let notice = state.notice.as_deref().unwrap_or_default();
+        let connecting = notice == "Connecting to Discord...";
+        if connecting != (window.get_notice() == "Connecting to Discord...") {
+            tracing::debug!(target: "yapfast_startup", visible = connecting, "desktop Discord connection notice");
+        }
+        window.set_notice(notice.into());
         if (window.get_settings_open() && window.get_settings_section() == 8)
             || state.profile_editor.is_some()
         {
@@ -2041,6 +2213,8 @@ impl Adapter {
         window.set_search_open(search.is_some());
         window.set_search_loading(search.is_some_and(|search| search.loading));
         window.set_search_more(search.is_some_and(Search::more));
+        window.set_search_total(search.map_or(0, |search| search.total.min(i32::MAX as u32) as i32));
+        window.set_search_first(search.map_or(1, |search| search.total.saturating_sub(search.first).min(i32::MAX as u32) as i32));
         window.set_search_heading(
             match search {
                 Some(search) if search.results.is_empty() && search.loading => {
@@ -3097,8 +3271,7 @@ impl Adapter {
             // its pictures from showing.
             decoration_set: own.is_some_and(|own| own.decoration.is_some()),
             effect_set: own.is_some_and(|own| own.effect.is_some()),
-            // Yapfast doesn't read profile frames.
-            frame_set: false,
+            frame_set: own.is_some_and(|own| own.frame_sku.is_some()),
             name_font_id: editor.name_font.map_or(11, |font| font as i32),
             name_effect_id: editor.name_effect as i32,
             name_colours_key: editor
@@ -3748,6 +3921,15 @@ impl Adapter {
         window.set_has_voice_chat(room.is_some_and(|room| room.voice_chat()));
         window.set_room_encrypted(room.is_some_and(|room| room.encrypted));
         window.set_call_encrypted(room.is_some_and(|room| room.call_encrypted()));
+        if !self.first_chat_logged
+            && !state.preview
+            && state.room_ready
+            && state.shows_text()
+            && room.is_some()
+        {
+            self.first_chat_logged = true;
+            tracing::debug!(target: "yapfast_startup", "desktop first chat published");
+        }
         window.set_room_ready(state.room_ready);
         window.set_draft(state.draft().into());
         let discord_room = room.is_some_and(|room| room.network == Network::Discord);
@@ -3912,6 +4094,8 @@ impl Adapter {
             self.emoji_word = None;
             self.show_emoji_suggestions(window);
         }
+        // The `/` picker and the command being written follow each keystroke.
+        self.show_app_commands(window);
     }
 
     /// Emoji for the `:name` being typed, or none.
@@ -4451,6 +4635,28 @@ impl Adapter {
             .into(),
         );
         window.set_voice_error(voice.error.as_deref().unwrap_or_default().into());
+        let notice = voice
+            .error
+            .as_ref()
+            .filter(|_| voice.phase == Phase::Connected)
+            .map(|_| voice.error_id);
+        if self.voice_notice != notice {
+            self.voice_notice = notice;
+            self.voice_notice_timer.stop();
+            if let Some(message) = voice.error.as_ref().filter(|_| notice.is_some()) {
+                let seconds = if message.chars().count() > 96 { 10 } else { 8 };
+                let window = window.as_weak();
+                self.voice_notice_timer.start(
+                    slint::TimerMode::SingleShot,
+                    Duration::from_secs(seconds),
+                    move || {
+                        if let Some(window) = window.upgrade() {
+                            window.invoke_dismiss_voice_error();
+                        }
+                    },
+                );
+            }
+        }
         window.set_voice_warning(voice.warning.as_deref().unwrap_or_default().into());
         let stream_frames = &self.models.stream_frames;
         update_model(
@@ -4865,6 +5071,8 @@ impl Adapter {
             if let Some(data) = changed_profile(&shown, data) {
                 window.set_panel_profile(data);
             }
+        } else if !window.get_panel_profile().id.is_empty() {
+            window.set_panel_profile(ProfileData::default());
         }
         let Some(view) = &state.profile else {
             window.set_profile_member(SharedString::default());
@@ -4885,6 +5093,11 @@ impl Adapter {
         );
         #[cfg(feature = "discord")]
         if state.relation(&view.profile.id) == Relation::Me {
+            if let Some(status) = &state.custom_status {
+                let (text, emoji) = status_line(status);
+                data.activity = text.into();
+                data.activity_emoji = emoji.unwrap_or_default().into();
+            }
             data.activities = games::own_activity_rows(
                 &self.activity_manager,
                 state.discord_playing.as_ref(),
@@ -5255,7 +5468,11 @@ pub(super) fn rail_rows(
         };
         (
             rooms().any(|room| {
-                room.mentions > 0 || (room.unread > 0 && !server.muted && !room.unlisted)
+                room.mentions > 0
+                    || (room.unread > 0
+                        && !server.muted
+                        && !room.unlisted
+                        && !(server.discord && room.voice))
             }),
             rooms().map(|room| room.mentions).sum::<u64>(),
         )
@@ -5838,6 +6055,24 @@ fn thread_row(thread: &yapfast_core::chat::ListedThread, now: u64, role_colors: 
 }
 
 /// A forum's tag, or an emoji, as a card or the form for a post shows it.
+/// Whether a form's field shows the same: its text laid out is the same
+/// model when its text is, and its lists hold the same.
+fn same_field(shown: &ModalField, field: &ModalField) -> bool {
+    shown.label == field.label
+        && shown.description == field.description
+        && shown.value == field.value
+        && shown.placeholder == field.placeholder
+        && shown.required == field.required
+        && shown.paragraph == field.paragraph
+        && shown.kind == field.kind
+        && shown.summary == field.summary
+        && shown.checked == field.checked
+        && shown.max_files == field.max_files
+        && shown.blocks == field.blocks
+        && shown.choices.iter().eq(field.choices.iter())
+        && shown.files.iter().eq(field.files.iter())
+}
+
 fn post_tag(name: &str, emoji: Option<&yapfast_core::chat::ShownEmoji>) -> PostTag {
     PostTag {
         name: name.into(),

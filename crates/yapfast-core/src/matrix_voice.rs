@@ -127,6 +127,7 @@ async fn joining(
     let deadline = tokio::time::sleep(Duration::from_secs(35));
     tokio::pin!(deadline);
     let mut cancelled = false;
+    let mut timed_out = false;
     loop {
         tokio::select! {
             biased;
@@ -148,8 +149,8 @@ async fn joining(
             }
             _ = &mut deadline, if !cancelled => {
                 cancelled = true;
-                state.phase = Phase::Leaving;
-                state.error = Some("Voice joining timed out. Check the calling service and retry.".into());
+                timed_out = true;
+                state.leaving();
                 cancel.send_replace(true);
                 snapshots.send_replace(state.clone());
             }
@@ -157,7 +158,7 @@ async fn joining(
                 // A connection may finish in the same turn as Leave. Never
                 // publish Connected for a join the user has cancelled.
                 if cancelled {
-                    return match result {
+                    let departure = match result {
                         Ok(Some((call, _audio))) => {
                             tokio::time::timeout(Duration::from_secs(10), call.leave()).await
                                 .context("Voice departure timed out. Check the connection before retrying.")?
@@ -166,6 +167,10 @@ async fn joining(
                         }
                         other => other,
                     };
+                    if timed_out && departure.is_ok() {
+                        bail!("Voice joining timed out. Check the calling service and retry.");
+                    }
+                    return departure;
                 }
                 return result;
             }
@@ -608,7 +613,7 @@ async fn connected(
         }
         Ok(())
     }.await;
-    state.phase = Phase::Leaving;
+    state.leaving();
     snapshots.send_replace(state.clone());
     let departure = tokio::time::timeout(Duration::from_secs(10), call.leave()).await;
     if result.is_ok() && !matches!(departure, Ok(Ok(()))) {

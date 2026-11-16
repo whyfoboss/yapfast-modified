@@ -241,10 +241,12 @@ full profile, and ends in a box, "Message @name", as Discord's does: Enter
 opens or starts the DM with them and sends what it holds there, without
 touching the DM's own composer. The box shows only for someone Yapfast can
 message, never for this account; right-clicking a DM and choosing "Profile"
-opens the full one. The full profile is one column with no tabs: the banner,
+opens the full one. The full profile is one scrollable column: the banner,
 the avatar and the name, the relationship buttons and a small "Edit Profile"
 on one's own, the activities, About Me, the roles, any connections, Member
-since, then the mutual servers and friends. Badges sit as small icons beside
+since, then the mutual servers and friends. Profiles with a Board or Wishlist
+can switch between those sections and Activity beneath the profile actions.
+The first visit to a section loads its Discord data. Badges sit as small icons beside
 the name. The note box has left the profile card; notes are still written
 from a DM's "Add note" dialog. A one-to-one DM shows the same card in a 300px
 panel on the right, on the theme's sidebar surface; its avatar and banner
@@ -499,6 +501,34 @@ each card's profile points to one by SKU. A layer plays as many times as its
 APNG's `acTL` says, then holds its last frame, as a browser does, and stops
 asking for frames; a file that says 0 plays for as long as its layer shows.
 
+## Profile frames
+
+A profile names the frame its person equips in its `collectibles`, the item
+of type 3 (`profile_frame` in some answers), in `guild_member_profile` before
+`user_profile`. The frame itself is the shop's: Yapfast asks for it with
+`GET /collectibles-products/{sku}`, as for an effect, and takes the item with
+`layers`, each `{id, type, order, anchor}` and a still at
+`/media/v1/collectibles-shop/{sku}/{id}/static`; the client has no moving
+version of these. `Discord::profile_frame` keeps each SKU's layers, a few
+addresses, for as long as the session runs, so a frame seen once comes with
+its card; the first time, `Event::ProfileFrame` brings it after the card.
+
+The card draws the layers as Discord's stylesheet does, from 12px past each
+side of a small card and 16px past a full one's: a `staple` once past the
+end it's anchored to, hanging 77 parts in 332 of the frame's width above
+and 53 below; a `rail` the card's height with its picture at its anchor; a
+`border` repeated down the card. The `back` layers go behind the card's
+contents and the others over them. The full profile leaves out the layers
+anchored at the foot, and shows none in a window under 785 pixels tall,
+which leaves no room above the card. The DM's panel and the editor's preview
+show none. Each layer decodes at up to 460 by 1600 (`FRAME_SIZE`), as wide
+as a card draws it.
+
+A banner whose hash starts with `a_` moves: the card shows its still PNG and
+plays the GIF at the same address once it has come, while animations play
+(`Motion.playing`), as a moving decoration does. With animations off in
+Settings the GIF isn't asked for.
+
 ## Display name styles
 
 A name can carry a style, `display_name_styles: {font_id, effect_id, colors}`,
@@ -562,6 +592,7 @@ window draws carry no address for it, so Slint asks for nothing either.
 | Animate decorations and nameplates (`moving_cosmetics`) | Their `/animated` APNG is never asked for (`animated_url` gives none), so only the still is fetched and decoded | On |
 | Show name styles (`name_styles`) | Names in the UI's typeface and the theme's colour | On |
 | Show server tags (`server_tags`) | No tag chip, and no badge picture | On |
+| Show profile frames (`profile_frames`) | No `/collectibles-products/` request for a profile's frame (`DiscordCommand::Profile`'s `frame`), and none of its layers | On |
 
 Every switch starts on, so profiles look as in Discord's client. The
 switches are there for the cheaper side: an effect's layers are APNGs up
@@ -575,8 +606,8 @@ next time the profile is fetched.
 
 ## Editing one's main profile
 
-Edit Profile, in the account's menu bottom left, or Edit profile in My
-account, opens Yapfast's version of the "Main Profile" tab of Discord's
+Edit Profile, the avatar and the banner in the account's menu at bottom left,
+and Edit profile in My account open Yapfast's version of the "Main Profile" tab of Discord's
 Profiles settings (`application/profile_editor.rs`, the dialog in
 `ui/server.slint`, which it shares with the [server
 profile's](#editing-ones-server-profile)). It reads the profile with `GET
@@ -604,12 +635,12 @@ and banner, and the profile effect, each showing what's set: the decoration
 and effect say they're on even when the [profile
 switches](#profile-switches) keep their pictures from showing. Yapfast has no
 windows to choose those collectibles, so their tiles open Discord's shop.
-Hide Styles folds the column away, sliding, and the Show Styles tab on the
-card's edge brings it back.
+The panel button at the bottom of the editor shows or hides the styles column.
 
 The name, bio and note are outlined while pointed at. Clicking the name or
-bio opens its field in place. The bio field grows with its text and scrolls when it reaches its maximum height. The pronouns field is directly after the username
-and takes focus by click or Tab. Activity cards appear below it. Profile badges
+bio opens its field in place. Long bios scroll within their preview and editor,
+with independent height limits. The pronouns field is directly after the
+username and takes focus by click or Tab. Activity cards appear below it. Profile badges
 are shown in profile views outside this editor. Enter, Escape
 or a click elsewhere on the card ends text editing. The note
 opens the note's dialog, as on anyone's profile. Hovering the avatar or banner

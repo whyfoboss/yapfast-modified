@@ -98,6 +98,8 @@ pub(super) fn found(
     ChatMessage {
         id: format!("d:{}", message.id),
         item: format!("d:{}", message.id),
+        application_id: message.application_id.clone(),
+        flags: message.flags,
         sender: discord::sender_id(&message.author_id),
         spoilers: true,
         avatar: Some(discord.avatar(guild, &message.author_id)),
@@ -120,6 +122,7 @@ pub(super) fn found(
             .filter(|attachment| attachment.shown == Shown::Message)
             .map(|attachment| Attachment {
                 voice_ms: attachment.voice_ms,
+                voice_waveform: attachment.voice_waveform.clone(),
                 name: attachment.name.clone(),
                 size: attachment.size,
                 image: attachment.image,
@@ -136,6 +139,7 @@ pub(super) fn found(
                         .clone()
                         .unwrap_or_else(|| attachment.url.clone()),
                 ),
+                description: attachment.description.clone(),
             })
             .collect(),
         mentions,
@@ -143,8 +147,53 @@ pub(super) fn found(
         // Shown, not voted in: its author can't end it from here either.
         poll: message.poll.as_ref().map(|poll| chat_poll(poll, false)),
         notice: chat_notice(message),
+        used: used_command(discord, guild, server, message),
         ..Default::default()
     }
+}
+
+/// The line above an app's answer: who used which command, in `guild`'s
+/// names and `server`'s colours, unless it quotes a message instead, as
+/// one to a message's command or a button does.
+pub(super) fn used_command(
+    discord: &Discord,
+    guild: Option<&str>,
+    server: Option<&yapfast_discord::ready::Server>,
+    message: &Message,
+) -> Option<crate::chat::UsedCommand> {
+    if message.reply.is_some() {
+        return None;
+    }
+    let interaction = message.interaction.as_ref()?;
+    let name = interaction.name.as_deref()?;
+    let user = interaction.user_id.as_str();
+    let named = |user: &str, fallback: &str| {
+        discord
+            .name(guild.unwrap_or(yapfast_discord::ready::PRIVATE), user)
+            .unwrap_or_else(|| fallback.to_owned())
+    };
+    // The deprecated object, without a type, answers a slash command.
+    let slash = interaction
+        .command_type
+        .is_none_or(|kind| kind == yapfast_discord::message::CHAT_INPUT);
+    Some(crate::chat::UsedCommand {
+        user: named(user, &interaction.user),
+        sender: discord::sender_id(user),
+        avatar: (!user.is_empty()).then(|| discord.avatar(guild, user)),
+        color: server.and_then(|server| discord.color(server, user)),
+        name: if slash {
+            format!("/{name}")
+        } else {
+            name.to_owned()
+        },
+        // The picker finds a command by its own name, without its
+        // subcommands'.
+        slash: slash.then(|| name.split(' ').next().unwrap_or(name).to_owned()),
+        target: interaction
+            .target_user
+            .as_ref()
+            .map(|(target, fallback)| named(target, fallback)),
+    })
 }
 
 /// A Discord message's notice, as the timeline marks it.
@@ -578,6 +627,10 @@ pub(super) fn chat_profile(
             .style(Some(guild), &profile.user_id)
             .map(|style| Arc::new(style.into())),
         effect: profile.effect,
+        // `chat_profile`'s caller adds the frame's layers, which the shop
+        // describes.
+        frame: Default::default(),
+        frame_sku: profile.frame,
         theme: profile.theme,
         banner: profile.banner,
         accent: profile.accent,
@@ -676,9 +729,15 @@ pub(super) fn chat_profile(
     }
 }
 
-/// The emoji of a row's buttons, in Discord's markup.
+/// The emoji of a row's buttons and menu options, in Discord's markup.
 fn button_emoji(row: &yapfast_discord::components::Row) -> Vec<&str> {
     use yapfast_discord::components::{Beside, Row};
+    if let Row::Select { options, .. } = row {
+        return options
+            .iter()
+            .filter_map(|option| option.emoji.as_deref())
+            .collect();
+    }
     let buttons = match row {
         Row::Buttons(buttons) => buttons.iter().collect(),
         Row::Text {
@@ -714,8 +773,11 @@ pub(super) fn chat_card(
             Style::Success => ButtonStyle::Success,
             Style::Danger => ButtonStyle::Danger,
             Style::Link => ButtonStyle::Link,
+            Style::Premium => ButtonStyle::Premium,
         },
         url: button.url.clone(),
+        custom_id: button.custom_id.clone(),
+        sku_id: button.sku_id.clone(),
         disabled: button.disabled,
     };
     Card {
@@ -738,9 +800,38 @@ pub(super) fn chat_card(
                     large: *large,
                 },
                 Row::Buttons(buttons) => CardRow::Buttons(buttons.iter().map(button).collect()),
-                Row::Select { text, disabled } => CardRow::Select {
-                    text: text.clone(),
+                Row::Select {
+                    text,
+                    disabled,
+                    kind,
+                    custom_id,
+                    options,
+                    defaults,
+                    channel_types,
+                    min_values,
+                    max_values,
+                } => CardRow::Select {
+                    text: discord.render(server, text),
                     disabled: *disabled,
+                    kind: *kind,
+                    custom_id: custom_id.clone(),
+                    options: options
+                        .iter()
+                        .map(|option| crate::chat::CardOption {
+                            label: option.label.clone(),
+                            value: option.value.clone(),
+                            description: option.description.clone(),
+                            default: option.default,
+                            emoji: option
+                                .emoji
+                                .as_ref()
+                                .map(|emoji| discord.render(server, emoji)),
+                        })
+                        .collect(),
+                    defaults: defaults.clone(),
+                    channel_types: channel_types.clone(),
+                    min_values: *min_values,
+                    max_values: *max_values,
                 },
                 Row::Unknown => CardRow::Unknown,
             })

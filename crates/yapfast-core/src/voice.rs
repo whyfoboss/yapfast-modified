@@ -237,6 +237,7 @@ pub struct State {
     /// The chosen camera's id; none for the first one.
     pub camera: Option<String>,
     pub error: Option<String>,
+    pub error_id: u64,
     /// A problem that leaves the call usable, such as a participant who has
     /// not received this device's audio key.
     pub warning: Option<String>,
@@ -309,6 +310,7 @@ impl Default for State {
             speaker: None,
             camera: None,
             error: None,
+            error_id: 0,
             warning: None,
             sharing: None,
             watching: vec![],
@@ -324,10 +326,23 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn report_error(&mut self, error: Option<String>) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        self.error_id = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.error = error;
+    }
+
     pub fn active(&self) -> bool {
         self.phase != Phase::Disconnected
     }
+    pub(crate) fn leaving(&mut self) {
+        self.phase = Phase::Leaving;
+        self.error = None;
+    }
+
     fn disconnected(&mut self) {
+        self.error = None;
         self.phase = Phase::Disconnected;
         self.room = None;
         self.participants.clear();
@@ -530,15 +545,15 @@ async fn worker(
                     remembered.as_deref(),
                 )
                 .await;
-                if let Err(error) = result {
-                    state.error = Some(error.to_string());
-                }
                 state.disconnected();
+                if let Err(error) = result {
+                    state.report_error(Some(error.to_string()));
+                }
                 trim_after_call();
             }
             Command::Devices => match devices(&mut state) {
                 Ok(()) => state.error = None,
-                Err(error) => state.error = Some(error.to_string()),
+                Err(error) => state.report_error(Some(error.to_string())),
             },
             Command::Microphone(id) => {
                 state.microphone = Some(id);
@@ -719,6 +734,34 @@ pub const NAMED: &str = "name:";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_notices_end_with_the_call_and_connection_failures_survive() {
+        let mut state = State {
+            phase: Phase::Connected,
+            room: Some("first".into()),
+            ..Default::default()
+        };
+        state.report_error(Some("Camera unavailable".into()));
+        let old = state.error_id;
+        state.leaving();
+        assert!(state.error.is_none());
+        state.disconnected();
+        assert!(!state.active());
+        assert!(state.error.is_none());
+
+        state.report_error(Some("Lost the connection".into()));
+        assert!(!state.active());
+        assert_ne!(state.error_id, old);
+        assert_eq!(state.error.as_deref(), Some("Lost the connection"));
+
+        state.disconnected();
+        state.phase = Phase::Connected;
+        state.room = Some("second".into());
+        state.report_error(Some("Camera unavailable".into()));
+        assert_ne!(state.error_id, old);
+        assert_eq!(state.error.as_deref(), Some("Camera unavailable"));
+    }
 
     #[test]
     fn devices_without_a_guid_are_known_by_name_and_choices_stay_on_disk() {

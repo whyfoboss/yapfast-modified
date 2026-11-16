@@ -685,6 +685,8 @@ fn gallery_cells(previews: &[Preview<'_>], covered: &dyn Fn(usize) -> bool) -> (
     let cell = |index: usize,
                 attachment: &yapfast_core::chat::Attachment,
                 preview: Option<&Arc<Picture>>| {
+        let description: SharedString =
+            attachment.description.as_deref().unwrap_or_default().into();
         // A video whose poster didn't come plays all the same.
         let Some(preview) = preview else {
             return ImageCell {
@@ -692,6 +694,7 @@ fn gallery_cells(previews: &[Preview<'_>], covered: &dyn Fn(usize) -> bool) -> (
                 name: attachment.name.clone().into(),
                 loading: loading(attachment),
                 video: attachment.video,
+                description: description.clone(),
                 ..Default::default()
             };
         };
@@ -702,6 +705,7 @@ fn gallery_cells(previews: &[Preview<'_>], covered: &dyn Fn(usize) -> bool) -> (
                 name: attachment.name.clone().into(),
                 spoiler,
                 video: attachment.video,
+                description: description.clone(),
                 ..Default::default()
             };
         }
@@ -717,6 +721,7 @@ fn gallery_cells(previews: &[Preview<'_>], covered: &dyn Fn(usize) -> bool) -> (
                 .as_ref()
                 .map(|gif| gif.url.as_str().into())
                 .unwrap_or_default(),
+            description,
             ..Default::default()
         }
     };
@@ -767,6 +772,7 @@ mod tests {
         let attachments: Vec<_> = (0..40)
             .map(|index| yapfast_core::chat::Attachment {
                 voice_ms: None,
+                voice_waveform: None,
                 name: format!("{index}.png"),
                 size: None,
                 image: true,
@@ -783,6 +789,7 @@ mod tests {
                 spoiler: false,
                 video: false,
                 url: None,
+                description: None,
             })
             .collect();
         let row = message_row(
@@ -832,6 +839,7 @@ mod tests {
         let attachment = |name: &str, image: bool, preview: Option<&Arc<Picture>>| {
             yapfast_core::chat::Attachment {
                 voice_ms: None,
+                voice_waveform: None,
                 name: name.into(),
                 size: None,
                 image,
@@ -843,6 +851,7 @@ mod tests {
                 spoiler: false,
                 video: false,
                 url: None,
+                description: None,
             }
         };
         let one = found_row(
@@ -889,6 +898,7 @@ mod tests {
         });
         let attachment = |placement| yapfast_core::chat::Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "bridge.png".into(),
             size: None,
             image: true,
@@ -900,6 +910,7 @@ mod tests {
             spoiler: false,
             video: false,
             url: None,
+            description: None,
         };
         let message = ChatMessage {
             attachments: vec![

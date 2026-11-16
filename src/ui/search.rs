@@ -374,10 +374,10 @@ pub(super) fn apply_search_suggestion(
             } else {
                 format!("{label} ")
             };
-            let op = current_query
-                .rfind("mentions:")
-                .map(|idx| (idx, "mentions:"))
-                .or_else(|| current_query.rfind("from:").map(|idx| (idx, "from:")));
+            let op = ["mentions:", "from:"]
+                .into_iter()
+                .filter_map(|op| current_query.rfind(op).map(|index| (index, op)))
+                .max_by_key(|(index, _)| *index);
             if let Some((idx, op_str)) = op {
                 format!("{}{op_str}{val}", &current_query[..idx])
             } else {

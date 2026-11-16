@@ -1,7 +1,7 @@
 import { ClientStyle } from "yapfast/style.slint";
 import { ScrollView, ListView } from "scrollview.slint";
 import { Theme, Middle, Label } from "theme.slint";
-import { ActionButton, IconButton, Avatar, Picture, Skeleton, SpoilerCover } from "controls.slint";
+import { ActionButton, IconButton, Avatar, Picture, Skeleton, SpoilerCover, TextField } from "controls.slint";
 import { StatusDot } from "rail.slint";
 import { ImageCell, PollCard, PollView, TextBlock, TextBlocks } from "messages.slint";
 
@@ -86,6 +86,14 @@ export component HeaderSearch inherits Rectangle {
     in-out property <bool> dropdown-open: false;
     in-out property <int> selected-suggestion: -1;
     in property <int> suggestion-count: 0;
+    in property <int> suggestion-caret: -1;
+    in property <int> suggestion-edit;
+    changed suggestion-edit => {
+        if root.suggestion-caret >= 0 {
+            input.focus();
+            input.set-selection-offsets(root.suggestion-caret, root.suggestion-caret);
+        }
+    }
 
     callback search(string);
     callback clear;
@@ -146,7 +154,7 @@ export component HeaderSearch inherits Rectangle {
                         root.selected-suggestion = mod(root.selected-suggestion - 1 + root.suggestion-count, root.suggestion-count);
                         return accept;
                     }
-                    if event.text == Key.Return || event.text == Key.Tab {
+                    if event.text == Key.Tab {
                         if root.selected-suggestion >= 0 && root.selected-suggestion < root.suggestion-count {
                             root.choose-suggestion(root.selected-suggestion);
                             return accept;
@@ -207,6 +215,7 @@ export component SearchFilterDropdown inherits Rectangle {
     clip: true;
 
     ScrollView {
+        expand-scrollbars: false;
         content := VerticalLayout {
             padding: 6px;
             spacing: 2px;
@@ -801,6 +810,11 @@ export component AddPeoplePopover inherits Rectangle {
 // a page at a time.
 export component SearchPanel inherits Rectangle {
     in property <[FoundRow]> results;
+    in property <int> total;
+    in property <int> first: 1;
+    callback start-at(string);
+    property <string> position;
+    changed first => { root.position = ""; results-scroll.content-y = 0px; }
     /// How many it found, or that it's searching, or why it couldn't.
     in property <string> heading;
     in property <string> note;
@@ -826,8 +840,19 @@ export component SearchPanel inherits Rectangle {
             Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
         }
         if root.note != "": HorizontalLayout { padding: 16px; Label { text: root.note; } }
-        ScrollView {
+        if root.total > 25: HorizontalLayout {
+            padding-left: 12px; padding-right: 12px; padding-top: 6px; spacing: 6px;
+            TextField {
+                text <=> root.position;
+                placeholder: "Result " + root.first + " of " + root.total;
+                label: "Start at result (1 is oldest)"; text-size: 13px;
+                accepted => { root.start-at(root.position); }
+            }
+            ActionButton { text: "Go"; small: true; clicked => { root.start-at(root.position); } }
+        }
+        results-scroll := ScrollView {
             vertical-stretch: 1;
+            expand-scrollbars: false;
             VerticalLayout {
                 padding: 12px; spacing: 8px; alignment: start;
                 for found in root.results: VerticalLayout {

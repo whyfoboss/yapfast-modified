@@ -32,13 +32,13 @@ mod icon;
 #[cfg(feature = "desktop")]
 mod instance;
 #[cfg(feature = "desktop")]
+mod keybinds;
+#[cfg(feature = "desktop")]
 mod notify;
 #[cfg(feature = "desktop")]
 mod paste;
 #[cfg(feature = "desktop")]
 mod protocol;
-#[cfg(feature = "desktop")]
-mod push_to_talk;
 #[cfg(feature = "desktop")]
 mod tray;
 #[cfg(feature = "desktop")]
@@ -75,6 +75,7 @@ fn fix_mmap_threshold() {
 }
 
 fn main() -> Result<()> {
+    let started = std::time::Instant::now();
     fix_mmap_threshold();
     // A stream worker starts nothing else: no UI, runtime or TLS.
     #[cfg(feature = "discord")]
@@ -108,6 +109,7 @@ fn main() -> Result<()> {
     }
     #[cfg(not(all(windows, feature = "desktop")))]
     logging::init();
+    tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "process startup logging ready");
     if let Err(refused) = handed {
         tracing::warn!(
             refused,
@@ -294,8 +296,10 @@ fn relaunch(arguments: &[String], gpu_failure: Option<&str>, link: Option<&str>)
     }
     #[cfg(not(unix))]
     {
-        let status = command.status().context("could not restart Yapfast")?;
-        std::process::exit(status.code().unwrap_or(1));
+        // Waiting for the replacement would keep this process and its stopped
+        // window alive until the new client closes.
+        command.spawn().context("could not restart Yapfast")?;
+        std::process::exit(0);
     }
 }
 

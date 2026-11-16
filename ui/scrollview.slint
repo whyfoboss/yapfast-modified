@@ -54,6 +54,7 @@ component ScrollBar inherits Rectangle {
     in property <ScrollBarPolicy> policy: ScrollBarPolicy.as-needed;
     in property <bool> enabled;
 
+    in property <bool> expand-on-hover: true;
     callback scrolled();
 
     property <length> offset: 16px;
@@ -73,7 +74,7 @@ component ScrollBar inherits Rectangle {
     clip: true;
 
     states [
-        hover when touch-area.has-hover || down-scroll-button.has-hover || up-scroll-button.has-hover : {
+        hover when root.expand-on-hover && (touch-area.has-hover || down-scroll-button.has-hover || up-scroll-button.has-hover) : {
             root.background: Theme.dark ? #2C2C2C : #f0f0f0;
             root.size: 6px;
             up-scroll-button.opacity: 1;
@@ -137,6 +138,7 @@ component ScrollBar inherits Rectangle {
     }
 
     up-scroll-button := ScrollBarButton {
+        enabled: root.expand-on-hover; visible: root.expand-on-hover;
         opacity: 0;
         x: !root.horizontal ? (parent.width - self.width) / 2 : 4px;
         y: root.horizontal ? (parent.height - self.height) / 2 : 4px;
@@ -149,6 +151,7 @@ component ScrollBar inherits Rectangle {
     }
 
     down-scroll-button := ScrollBarButton {
+        enabled: root.expand-on-hover; visible: root.expand-on-hover;
         opacity: 0;
         x: !root.horizontal ? (parent.width - self.width) / 2 : root.width - self.width - 4px;
         y: root.horizontal ? (parent.height - self.height) / 2 : root.height - self.height - 4px;
@@ -163,6 +166,7 @@ component ScrollBar inherits Rectangle {
 
 export component ScrollView {
     in property <bool> enabled: true;
+    in property <bool> expand-scrollbars: true;
     out property <length> visible-width <=> flickable.width;
     out property <length> visible-height <=> flickable.height;
     in-out property <length> content-width <=> flickable.content-width;
@@ -194,6 +198,7 @@ export component ScrollView {
 
     vertical-bar := ScrollBar {
         enabled: root.enabled;
+        expand-on-hover: root.expand-scrollbars;
         width: 14px;
         x: flickable.width + flickable.x - self.width;
         y: flickable.y;
@@ -207,6 +212,7 @@ export component ScrollView {
 
     horizontal-bar := ScrollBar {
         enabled: root.enabled;
+        expand-on-hover: root.expand-scrollbars;
         width: vertical-bar.visible ? parent.width - vertical-bar.width : parent.width;
         height: 14px;
         y: flickable.height + flickable.y - self.height;

@@ -38,12 +38,14 @@ use crate::{
 };
 
 mod account;
+mod app_commands;
 mod audit_log;
 mod channels;
 mod commands;
 mod expressions;
 mod gifs;
 pub mod logger;
+mod interactions;
 mod open_channel;
 mod overwrites;
 mod own_profile;
@@ -189,11 +191,13 @@ impl Chat {
     /// Connects when this device has a linked account; without one, there's
     /// nothing to start.
     pub(crate) fn start() -> anyhow::Result<Option<Self>> {
+        let started = std::time::Instant::now();
         let token = match yapfast_discord::token::load() {
             Ok(token) => token,
             Err(error) if error.is::<yapfast_discord::token::NotLinked>() => return Ok(None),
             Err(error) => return Err(error),
         };
+        tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord credentials restored");
         let discord = Discord::start(token)?;
         let (done, finished) = tokio::sync::mpsc::unbounded_channel();
         Ok(Some(Self {
@@ -346,8 +350,9 @@ impl Chat {
         } else {
             MAX_VIDEO_BYTES
         };
-        let download = move |mut file: std::fs::File| async move {
-            discord.download_into(&url, &mut file, limit).await
+        let fetch = move |from, to| {
+            let (discord, url) = (discord.clone(), url.clone());
+            async move { discord.download_part(&url, from, to, limit).await }
         };
         match crate::playback::Playback::start(
             video.clone(),
@@ -355,7 +360,7 @@ impl Chat {
             size,
             frame,
             speakers,
-            download,
+            fetch,
         ) {
             Ok(playback) => {
                 let _ = events.send(Event::Video(Some(playback.video.clone())));

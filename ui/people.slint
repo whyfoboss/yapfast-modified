@@ -1,7 +1,7 @@
 import { ClientStyle } from "yapfast/style.slint";
 import { ScrollView, ListView } from "scrollview.slint";
 import { Theme, Middle, Label, Tip, BadgeTip, Popup, Looks } from "theme.slint";
-import { ActionButton, IconButton, Avatar, Nameplate, StatusText, StyledName, NameStyleRow, EffectLayer, ProfileEffect, PictureStore, TextField, ServerTagChip, TipIcon } from "controls.slint";
+import { ActionButton, IconButton, Avatar, Nameplate, StatusText, StyledName, NameStyleRow, EffectLayer, ProfileEffect, PictureStore, Picture, Motion, TextField, ServerTagChip, TipIcon } from "controls.slint";
 import { StatusDot } from "rail.slint";
 import { BotTag } from "messages.slint";
 
@@ -405,6 +405,11 @@ export struct ProfileWishlistRow { name: string, initial: string, url: string }
 /// A past thing on someone's Activity tab.
 export struct ProfileRecentRow { title: string, subtitle: string, url: string, initial: string, music: bool, when: string }
 
+/// A layer of a profile frame: its picture, `staple`, `rail` or `border`,
+/// where it's anchored (`top`, `bottom` or `center`), and whether it goes
+/// over the card rather than behind it.
+export struct ProfileFrameRow { url: string, kind: string, anchor: string, front: bool }
+
 export struct ProfileData {
     id: string, name: string, name-color: color, name-has-color: bool, initial: string, tint: color, picture: image,
     /// The address of the decoration around their avatar, and how their name
@@ -463,6 +468,12 @@ export struct ProfileData {
     board-tab: bool, wishlist-tab: bool,
     /// It's this account's own profile.
     own: bool,
+    /// The layers of the frame around their card, the back ones first; none
+    /// without one, or with frames switched off.
+    frame: [ProfileFrameRow],
+    /// The address of their banner's moving version, a GIF, which their
+    /// card plays; empty when it doesn't move.
+    banner-moving: string,
 }
 
 // A picture on the Board or Wishlist tab, asked for as it shows. What has none,
@@ -542,11 +553,66 @@ export component ProfileHeading inherits Text {
     color: Theme.muted; font-size: 12px; font-weight: 700; letter-spacing: 0.6px;
 }
 
+export global ProfileTheme {
+    public pure function light(primary: color) -> bool {
+        0.299 * primary.red + 0.587 * primary.green + 0.114 * primary.blue >= 127.5
+    }
+    /// One of the theme's colours under the wash.
+    public pure function wash(colour: color, light: bool) -> color {
+        colour.mix(light ? #ffffff : #000000, 0.4)
+    }
+    /// Text over the wash: Discord's strong, subtle and muted text, black or
+    /// white at 96%, 88% and 76%.
+    public pure function ink(light: bool) -> color { light ? #000000f5 : #fffffff5 }
+    public pure function ink2(light: bool) -> color { light ? #000000e0 : #ffffffe0 }
+    public pure function ink3(light: bool) -> color { light ? #000000c2 : #ffffffc2 }
+}
+
+// Member Since's dates in one row, as Discord's: the Discord logo and the
+// account's date, then a bullet, the server's icon and the date of joining it.
+export component MemberSince inherits HorizontalLayout {
+    in property <string> created;
+    in property <string> joined;
+    in property <string> server-name;
+    in property <string> server-initial;
+    in property <image> server-icon;
+    in property <color> ink: Theme.secondary;
+    in property <length> font-size: 14px;
+    spacing: 8px; alignment: start;
+    if root.created != "": HorizontalLayout {
+        spacing: 8px;
+        accessible-role: text; accessible-label: "On Discord since " + root.created;
+        Middle { Image { source: @image-url("icons/discord.svg"); width: 16px; height: 16px; colorize: root.ink; } }
+        Text { text: root.created; color: root.ink; font-size: root.font-size; vertical-alignment: center; }
+    }
+    if root.created != "" && root.joined != "": Text { text: "\u{2022}"; color: root.ink; font-size: root.font-size; vertical-alignment: center; }
+    if root.joined != "": HorizontalLayout {
+        spacing: 8px;
+        accessible-role: text; accessible-label: "In " + root.server-name + " since " + root.joined;
+        Middle {
+            Rectangle {
+                width: 16px; height: 16px; border-radius: 4px; clip: true;
+                background: root.server-icon.width > 0 ? transparent : Theme.raised;
+                if root.server-icon.width == 0: Text {
+                    text: root.server-initial; color: root.ink; font-size: 8px; font-weight: 700;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                if root.server-icon.width > 0: Image { source: root.server-icon; width: 16px; height: 16px; image-fit: cover; }
+            }
+        }
+        Text { text: root.joined; color: root.ink; font-size: root.font-size; vertical-alignment: center; }
+    }
+}
+
 // A badge on a profile: its picture, with its name on hover, opening its
 // page when Discord gives it one.
 export component ProfileBadge inherits Rectangle {
     in property <ProfileBadgeRow> badge;
     callback open-link(string);
+    // An embedded popup draws its own tooltips in its local coordinates.
+    in property <bool> local-tip;
+    callback show-tip(ProfileBadgeRow, length, length);
+    callback hide-tip;
     property <image> picture: root.badge.icon != "" ? PictureStore.picture(root.badge.icon, PictureStore.revision) : @image-url("");
     property <image> level-picture: root.badge.picture != "" ? PictureStore.picture(root.badge.picture, PictureStore.revision) : @image-url("");
     function request() {
@@ -573,7 +639,9 @@ export component ProfileBadge inherits Rectangle {
                 tip-delay.running = true;
             } else {
                 tip-delay.running = false;
-                if BadgeTip.title == root.badge.title && root.badge.title != "" {
+                if root.local-tip {
+                    root.hide-tip();
+                } else if BadgeTip.title == root.badge.title && root.badge.title != "" {
                     BadgeTip.title = "";
                 } else if Tip.text == root.badge.description {
                     Tip.text = "";
@@ -589,7 +657,9 @@ export component ProfileBadge inherits Rectangle {
         running: false;
         triggered => {
             self.running = false;
-            if root.badge.title != "" {
+            if root.local-tip {
+                root.show-tip(root.badge, badge-pointer.absolute-position.x + badge-pointer.width / 2, badge-pointer.absolute-position.y);
+            } else if root.badge.title != "" {
                 BadgeTip.kind = root.badge.kind;
                 BadgeTip.title = root.badge.title;
                 BadgeTip.progress = root.badge.progress;
@@ -612,7 +682,13 @@ export component ProfileBadge inherits Rectangle {
 // the sides and 16px above and below, the level's picture 64px high, then
 // the kind, the level in capitals and the progress 4px apart.
 export component BadgeTipCard inherits Rectangle {
-    property <image> level-picture: BadgeTip.picture-url != "" ? PictureStore.picture(BadgeTip.picture-url, PictureStore.revision) : @image-url("");
+    in property <string> kind: BadgeTip.kind;
+    in property <string> title: BadgeTip.title;
+    in property <string> progress: BadgeTip.progress;
+    in property <string> picture-url: BadgeTip.picture-url;
+    in property <length> caret-x: self.width / 2;
+    in property <bool> caret-below: true;
+    property <image> level-picture: root.picture-url != "" ? PictureStore.picture(root.picture-url, PictureStore.revision) : @image-url("");
     // It pops up: fades in and grows from the caret, as Discord's does.
     property <bool> shown: false;
     opacity: root.shown ? 1 : 0;
@@ -634,13 +710,14 @@ export component BadgeTipCard inherits Rectangle {
     drop-shadow-blur: 24px; drop-shadow-color: #0000003d; drop-shadow-offset-y: 12px;
     // The caret under it, pointing at the badge.
     Path {
-        x: parent.width / 2 - 8px; y: parent.height - 1px; width: 16px; height: 9px;
-        commands: "M 0 0 L 16 0 L 8 9 Z";
+        x: root.caret-x - 8px; y: root.caret-below ? parent.height - 1px : -8px;
+        width: 16px; height: 9px;
+        commands: root.caret-below ? "M 0 0 L 16 0 L 8 9 Z" : "M 0 9 L 16 9 L 8 0 Z";
         fill: Theme.tooltip;
     }
     card := VerticalLayout {
         padding-left: 12px; padding-right: 12px; padding-top: 16px;
-        padding-bottom: BadgeTip.progress != "" ? 16px : 24px;
+        padding-bottom: root.progress != "" ? 16px : 24px;
         spacing: 16px;
         HorizontalLayout {
             alignment: center;
@@ -654,9 +731,9 @@ export component BadgeTipCard inherits Rectangle {
         }
         VerticalLayout {
             spacing: 4px;
-            if BadgeTip.kind != "": Text { text: BadgeTip.kind; color: Theme.secondary; font-size: 14px; font-weight: 500; horizontal-alignment: center; wrap: word-wrap; }
-            Text { text: BadgeTip.title.to-uppercase(); color: Theme.text; font-size: 16px; font-weight: 900; horizontal-alignment: center; wrap: word-wrap; }
-            if BadgeTip.progress != "": Text { text: BadgeTip.progress; color: Theme.secondary; font-size: 14px; font-weight: 500; horizontal-alignment: center; wrap: word-wrap; }
+            if root.kind != "": Text { text: root.kind; color: Theme.secondary; font-size: 14px; font-weight: 500; horizontal-alignment: center; wrap: word-wrap; }
+            Text { text: root.title.to-uppercase(); color: Theme.text; font-size: 16px; font-weight: 900; horizontal-alignment: center; wrap: word-wrap; }
+            if root.progress != "": Text { text: root.progress; color: Theme.secondary; font-size: 14px; font-weight: 500; horizontal-alignment: center; wrap: word-wrap; }
         }
     }
 }
@@ -883,9 +960,54 @@ export component ProfileListRow inherits Rectangle {
 // A person's profile: a card beside the member list, large over the
 // window, where it scrolls once it's taller than the window allows, or
 // docked beside a one-to-one DM, where it fills the height.
+// A layer of a profile frame around a card, drawn as Discord's stylesheet does:
+// across the card and past its sides, a staple once beyond the end it's anchored
+// to, a rail the card's height with its picture at its anchor, and a border
+// repeated down the card. All are stills, as the client's, and take no clicks.
+component ProfileFrameLayer {
+    in property <ProfileFrameRow> layer;
+    in property <length> card-height;
+    in property <length> over-top;
+    in property <length> over-bottom;
+    property <image> picture: PictureStore.picture(root.layer.url, PictureStore.revision);
+    property <length> art-height: root.picture.width > 0 ? self.width * root.picture.height / root.picture.width : 0px;
+    function request() {
+        if root.picture.width == 0 {
+            PictureStore.request(root.layer.url);
+        }
+    }
+    init => { root.request(); }
+    changed picture => { root.request(); }
+    if root.layer.kind == "staple": Image {
+        x: 0px; width: root.width; height: root.art-height;
+        y: root.layer.anchor == "bottom" ? root.card-height + root.over-bottom - self.height
+            : root.layer.anchor == "center" ? (root.card-height - self.height) / 2
+            : -root.over-top;
+        source: root.picture; image-fit: fill;
+    }
+    if root.layer.kind == "rail": Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.card-height; clip: true;
+        Image {
+            x: 0px; width: parent.width; height: root.art-height;
+            y: root.layer.anchor == "bottom" ? parent.height - self.height
+                : root.layer.anchor == "center" ? (parent.height - self.height) / 2
+                : 0px;
+            source: root.picture; image-fit: fill;
+        }
+    }
+    if root.layer.kind == "border" && root.art-height > 0px: Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.card-height; clip: true;
+        for copy in ceil(root.card-height / root.art-height) + 1: Image {
+            x: 0px; y: copy * root.art-height; width: parent.width; height: root.art-height;
+            source: root.picture; image-fit: fill;
+        }
+    }
+}
+
 export component ProfileCard inherits Rectangle {
     in property <ProfileData> data;
     in property <bool> large;
+    in property <bool> separate-tabs;
     in property <bool> docked;
     /// A preview of one's own, as the server profile editor shows it, which
     /// opens nothing.
@@ -894,6 +1016,9 @@ export component ProfileCard inherits Rectangle {
     property <bool> full: root.large || root.docked;
     /// The tallest the card may be.
     in property <length> limit: 100000px;
+    /// Whether its frame shows; the full profile hides it in a short window,
+    /// having no room above it.
+    in property <bool> show-frame: true;
     callback enlarge;
     callback close;
     callback open-link(string);
@@ -910,9 +1035,16 @@ export component ProfileCard inherits Rectangle {
     callback send-message(string);
     /// Edit Profile, on one's own card.
     callback edit-profile;
-    property <length> banner-height: root.large ? 210px : root.docked ? 120px : 105px;
-    property <length> avatar-size: root.large ? 120px : 80px;
-    property <length> pad: root.large ? 24px : 16px;
+    callback tab-opened(int);
+    property <int> tab;
+    property <string> tab-person: root.data.id;
+    changed tab-person => {
+        root.tab = 0;
+        if root.large && !root.separate-tabs && root.tab-person != "" { root.tab-opened(0); }
+    }
+    property <length> banner-height: root.separate-tabs ? 140px : root.large ? 210px : root.docked ? 120px : 105px;
+    property <length> avatar-size: root.separate-tabs ? 104px : root.large ? 120px : 80px;
+    property <length> pad: root.separate-tabs ? 20px : root.large ? 24px : 16px;
     // A profile theme, as Discord draws it: the card's gradient runs from
     // the first colour to the second under a black wash, flat down to the
     // banner's end, inside a 2px border that is the same two colours at
@@ -930,12 +1062,49 @@ export component ProfileCard inherits Rectangle {
     // themed card, the colours measured off Discord's.
     property <color> bubble: root.themed ? #232427 : Theme.raised;
     property <color> bubble-edge: root.themed ? #404044 : Theme.edge;
-    height: min(body.preferred-height, root.limit);
+    out property <length> natural-height: min(body.preferred-height, root.limit);
+    height: root.natural-height;
     background: root.themed ? @linear-gradient(180deg, root.data.theme-primary 0%, root.data.theme-secondary 100%) : root.plain-ground;
     border-radius: root.docked ? 0px : 12px; border-width: root.themed || root.docked ? 0px : 1px; border-color: Theme.edge;
-    drop-shadow-blur: root.docked ? 0px : 24px; drop-shadow-color: root.docked ? transparent : #00000080; drop-shadow-offset-y: root.docked ? 0px : 8px;
+    drop-shadow-blur: root.docked || root.separate-tabs ? 0px : 24px; drop-shadow-color: root.docked ? transparent : #00000080; drop-shadow-offset-y: root.docked ? 0px : 8px;
     accessible-role: groupbox;
     accessible-label: root.data.name + "'s profile";
+    // As Discord's stylesheet: the frame reaches 12px past each side of a card,
+    // 16px past the full profile's, and its staples hang 77 and 53 parts in 332
+    // of its width above and below, whatever the frame. The DM's panel and the
+    // editor's preview have none.
+    // A moving banner's frames, once its GIF has come, as Discord's card
+    // plays it; with animations off it isn't asked for.
+    property <string> banner-moving: Motion.never ? "" : root.data.banner-moving;
+    property <[image]> banner-frames: root.banner-moving != "" ? PictureStore.frames(root.banner-moving, PictureStore.revision) : [];
+    property <[int]> banner-delays: root.banner-moving != "" ? PictureStore.delays(root.banner-moving, PictureStore.revision) : [];
+    function request-banner() {
+        if root.banner-moving != "" && root.banner-frames.length == 0 {
+            PictureStore.request(root.banner-moving);
+        }
+    }
+    init => {
+        root.request-banner();
+        if root.large && !root.separate-tabs && root.tab-person != "" { root.tab-opened(0); }
+    }
+    changed banner-frames => { root.request-banner(); }
+    changed banner-moving => { root.request-banner(); }
+    property <length> frame-side: root.large ? 16px : 12px;
+    property <length> frame-width: root.width + 2 * root.frame-side;
+    property <length> frame-over-top: root.frame-width * 77 / 332 - (root.large ? 8px : 0px);
+    property <length> frame-over-bottom: root.frame-width * 53 / 332;
+    property <bool> has-frame: root.data.frame.length > 0 && root.show-frame && !root.docked && !root.preview;
+    // What of the frame goes behind the card's contents; the full profile
+    // leaves out every layer anchored at the foot, as Discord's does.
+    if root.has-frame: Rectangle {
+        for layer in root.data.frame: Rectangle {
+            if !layer.front && !(root.large && layer.anchor == "bottom"): ProfileFrameLayer {
+                x: -root.frame-side; y: 0px; width: root.frame-width; height: root.height;
+                layer: layer; card-height: root.height;
+                over-top: root.frame-over-top; over-bottom: root.frame-over-bottom;
+            }
+        }
+    }
     // Clicks on the card stay on it, instead of closing it, and it knows when
     // the pointer is on it.
     card-pointer := TouchArea {
@@ -960,8 +1129,9 @@ export component ProfileCard inherits Rectangle {
                         Rectangle {
                             y: 0px; height: root.banner-height;
                             background: root.data.has-accent ? root.data.accent : root.themed ? root.data.theme-primary : Theme.raised;
-                            if root.data.banner.width > 0: Image {
-                                width: parent.width; height: parent.height; source: root.data.banner; image-fit: cover;
+                            if root.data.banner.width > 0: Picture {
+                                width: parent.width; height: parent.height; image-fit: cover;
+                                still: root.data.banner; frames: root.banner-frames; delays: root.banner-delays;
                             }
                             if !root.large && !root.preview: TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
@@ -1171,9 +1341,56 @@ export component ProfileCard inherits Rectangle {
                                 action-more := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.more(self.absolute-position.x, self.absolute-position.y + self.height); } }
                             }
                         }
-                        for activity in root.data.activities: ActivityCard {
+                        if root.large && !root.separate-tabs && (root.data.board-tab || root.data.wishlist-tab): HorizontalLayout {
+                            alignment: start; spacing: 8px;
+                            for page in [
+                                { id: 3, title: "Board", available: root.data.board-tab },
+                                { id: 0, title: "Activity", available: true },
+                                { id: 4, title: "Wishlist", available: root.data.wishlist-tab },
+                            ]: HorizontalLayout {
+                                if page.available: ActionButton {
+                                    text: page.title; small: true; primary: root.tab == page.id;
+                                    clicked => { root.tab = page.id; root.tab-opened(page.id); }
+                                }
+                            }
+                        }
+                        for activity in (!root.separate-tabs && (!root.large || root.tab == 0) ? root.data.activities : []): ActivityCard {
                             activity: activity;
                             open-link(url) => { root.open-link(url); }
+                        }
+                        if root.large && !root.separate-tabs && root.tab == 0 && root.data.recent.length > 0: VerticalLayout {
+                            spacing: 6px;
+                            ProfileHeading { text: "RECENT ACTIVITY"; }
+                            for entry in root.data.recent: HorizontalLayout {
+                                height: 52px; spacing: 10px;
+                                ShowcasePicture {
+                                    width: 48px; height: 48px; border-radius: 8px;
+                                    url: entry.url; label: entry.title; initial: entry.initial;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: entry.title; color: Theme.text; font-weight: 600; overflow: elide; }
+                                    Text { text: entry.subtitle; color: Theme.secondary; overflow: elide; }
+                                    Text { text: entry.when; color: Theme.muted; font-size: 12px; overflow: elide; }
+                                }
+                            }
+                        }
+                        if root.large && !root.separate-tabs && root.tab == 3: VerticalLayout {
+                            spacing: 8px;
+                            if root.data.board-note != "" || root.data.widgets.length == 0: Label {
+                                text: root.data.board-note == "" ? "Nothing on the board yet." : root.data.board-note;
+                            }
+                            for widget in root.data.widgets: BoardCard { widget: widget; }
+                        }
+                        if root.large && !root.separate-tabs && root.tab == 4: VerticalLayout {
+                            spacing: 8px;
+                            if root.data.wishlist-note != "" || root.data.wishlist.length == 0: Label {
+                                text: root.data.wishlist-note == "" ? "Nothing on the wishlist." : root.data.wishlist-note;
+                            }
+                            for item in root.data.wishlist: WishlistCard {
+                                width: 168px; height: 194px;
+                                item: item;
+                            }
                         }
                         // The card names what is shared, with a few of the faces; the
                         // full profile lists it in its tabs. "5 mutual friends", a bullet,
@@ -1245,8 +1462,12 @@ export component ProfileCard inherits Rectangle {
                         // date over "On Discord", and when they joined this server.
                         if root.full && (root.data.created != "" || root.data.joined != ""): VerticalLayout {
                             spacing: 6px;
-                            ProfileHeading { text: "MEMBER SINCE"; }
-                            HorizontalLayout {
+                            if root.separate-tabs: ProfileTitle { text: "Member Since"; }
+                            if !root.separate-tabs: ProfileHeading { text: "MEMBER SINCE"; }
+                            if root.separate-tabs: MemberSince {
+                                created: root.data.created; joined: root.data.joined;
+                            }
+                            if !root.separate-tabs: HorizontalLayout {
                                 spacing: 24px; alignment: start;
                                 if root.data.created != "": VerticalLayout {
                                     TextInput {
@@ -1366,7 +1587,17 @@ export component ProfileCard inherits Rectangle {
             }
         }
     }
-    if root.large: Rectangle {
+    // What of the frame goes over the card.
+    if root.has-frame: Rectangle {
+        for layer in root.data.frame: Rectangle {
+            if layer.front && !(root.large && layer.anchor == "bottom"): ProfileFrameLayer {
+                x: -root.frame-side; y: 0px; width: root.frame-width; height: root.height;
+                layer: layer; card-height: root.height;
+                over-top: root.frame-over-top; over-bottom: root.frame-over-bottom;
+            }
+        }
+    }
+    if root.large && !root.separate-tabs: Rectangle {
         x: parent.width - 44px; y: 10px; width: 34px; height: 34px; border-radius: 17px; background: Theme.tooltip.with-alpha(0.8);
         IconButton { icon: @image-url("icons/x.svg"); label: "Close profile"; tint: Theme.text; clicked => { root.close(); } }
     }

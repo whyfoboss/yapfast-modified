@@ -14,6 +14,30 @@ fn message(id: &str, nonce: Option<&str>) -> Message {
 }
 
 #[test]
+fn unavailable_discord_fails_the_interaction_with_its_nonce() {
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    without(
+        Command::Discord(DiscordCommand::Interact(Box::new(
+            crate::chat::Interaction::Modal {
+                nonce: "click".into(),
+                guild: None,
+                channel: "1".into(),
+                application: "2".into(),
+                id: "3".into(),
+                custom_id: "form".into(),
+                components: serde_json::json!([]),
+                files: Vec::new(),
+            },
+        ))),
+        "Offline",
+        &events,
+    );
+    assert!(
+        matches!(received.try_recv(), Ok(Event::InteractionFailed { nonce, reason }) if nonce == "click" && reason == "Offline")
+    );
+}
+
+#[test]
 fn answers_discord_commands_while_discord_is_away() {
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let why = "Discord couldn't start: the credential store is locked";
@@ -27,6 +51,7 @@ fn answers_discord_commands_while_discord_is_away() {
             room: "discord:10:11".into(),
             user: "2".into(),
             effect: false,
+            frame: false,
         },
     ] {
         without(Command::Discord(command), why, &events);
@@ -234,6 +259,7 @@ fn closed_channels_keep_metadata_without_pinning_previews() {
     let with_image = |id: u64| Message {
         attachments: vec![yapfast_discord::message::Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "a.png".into(),
             size: None,
             url: "".into(),
@@ -247,6 +273,7 @@ fn closed_channels_keep_metadata_without_pinning_previews() {
             link_url: None,
             animated: false,
             spoiler: false,
+            description: None,
         }],
         ..message(&id.to_string(), None)
     };
@@ -284,6 +311,7 @@ fn changes_render_again_only_the_messages_they_change() {
     let with_image = Message {
         attachments: vec![yapfast_discord::message::Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "a.png".into(),
             size: None,
             url: "".into(),
@@ -297,6 +325,7 @@ fn changes_render_again_only_the_messages_they_change() {
             link_url: None,
             animated: false,
             spoiler: false,
+            description: None,
         }],
         ..message("9", None)
     };
@@ -573,6 +602,44 @@ fn channels_go_to_disk_once_they_change() {
             .collect::<Vec<_>>(),
         ["1", "3"]
     );
+}
+
+#[test]
+fn an_answer_only_this_account_sees_stays_off_disk_and_goes_when_dismissed() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    open.loaded(Load::Latest, shown(page(1..=3)));
+    open.take_changes();
+    let ephemeral = |id: &str, loading: bool| Message {
+        ephemeral: true,
+        loading,
+        content: if loading {
+            String::new()
+        } else {
+            "Noted".into()
+        },
+        ..message(id, None)
+    };
+    // The app thinks, then answers, only to this account.
+    assert!(open.live(&Live::Created(ephemeral("4", true))));
+    assert!(open.live(&Live::Updated(ephemeral("4", false))));
+    let (_, saved) = open.take_changes().unwrap();
+    assert_eq!(
+        saved
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        ["1", "2", "3"],
+        "never on disk"
+    );
+    // Discord's history never lists it; it stays till dismissed.
+    open.loaded(Load::Latest, shown(page([1, 2, 3, 5])));
+    assert!(open.message(4).is_some_and(|kept| kept.content == "Noted"));
+    assert!(!open.dismiss("d:3"), "only an ephemeral one is dismissed");
+    assert!(open.dismiss("d:4"));
+    assert!(open.message(4).is_none());
+    // An update the app sends after doesn't bring it back.
+    assert!(!open.live(&Live::Updated(ephemeral("4", false))));
+    assert!(open.message(4).is_none());
 }
 
 #[test]
@@ -1568,6 +1635,7 @@ fn changing_the_view_drops_old_previews_and_ignores_late_downloads() {
             Message {
                 attachments: vec![yapfast_discord::message::Attachment {
                     voice_ms: None,
+                    voice_waveform: None,
                     name: "a.png".into(),
                     size: None,
                     url: "image".into(),
@@ -1581,6 +1649,7 @@ fn changing_the_view_drops_old_previews_and_ignores_late_downloads() {
                     link_url: None,
                     animated: false,
                     spoiler: false,
+                    description: None,
                 }],
                 ..message("1", None)
             },
@@ -1634,6 +1703,7 @@ async fn previews_follow_the_view_and_share_cache_across_channels() {
     let with_image = |id: &str| Message {
         attachments: vec![yapfast_discord::message::Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "a.png".into(),
             size: None,
             url: "".into(),
@@ -1650,6 +1720,7 @@ async fn previews_follow_the_view_and_share_cache_across_channels() {
             link_url: None,
             animated: false,
             spoiler: false,
+            description: None,
         }],
         ..message(id, None)
     };
@@ -1902,6 +1973,30 @@ async fn a_servers_card_shows_how_many_of_its_members_are_online() {
 }
 
 #[test]
+fn message_logger_does_not_keep_private_interaction_answers() {
+    let mut open = OpenChannel::new("discord:10:11").unwrap();
+    let mut answer = message("5", None);
+    answer.ephemeral = true;
+    open.loaded(Load::Latest, shown(vec![answer.clone()]));
+    let mut logger = MessageLogger::new();
+    logger.set_enabled(true);
+
+    // A partial update can omit the private flag.
+    answer.ephemeral = false;
+    answer.content = "Updated private answer".into();
+    open.live_with_logger(&Live::Updated(answer), Some(&mut logger));
+    assert!(open.shown.messages[&5].ephemeral);
+    assert!(!logger.has_history("5"));
+
+    open.live_with_logger(
+        &Live::Deleted { channel: "11".into(), id: "5".into() },
+        Some(&mut logger),
+    );
+    assert!(!open.shown.messages.contains_key(&5));
+    assert!(!logger.is_deleted("5"));
+}
+
+#[test]
 fn message_logger_retains_deleted_messages() {
     let mut open = OpenChannel::new("discord:10:11").unwrap();
     open.loaded(
@@ -2065,4 +2160,71 @@ fn hide_all_deleted_messages() {
     assert!(open.shown.messages.contains_key(&1));
     assert!(open.shown.messages.contains_key(&3));
     assert!(open.shown.messages.contains_key(&5));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs testing/fake_discord.ts and YAPFAST_DISCORD_TEST_SERVER"]
+async fn an_apps_answer_says_who_used_which_command() {
+    use yapfast_discord::message::{CHAT_INPUT, Interaction, USER_COMMAND};
+    let discord = fake_discord().await;
+    let snapshot = discord.snapshots().borrow().clone();
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|server| server.id == FAKE_GUILD)
+        .map(|server| &*server.server);
+    let answer = |interaction: Interaction| Message {
+        interaction: Some(interaction),
+        ..message("9", None)
+    };
+    // Names come from the server, not the interaction's own copy.
+    let used = |interaction| {
+        found(&discord, server, &answer(interaction))
+            .used
+            .expect("a line above it")
+    };
+    let slash = used(Interaction {
+        id: "8".into(),
+        user_id: "1400000000000000001".into(),
+        user: "alice".into(),
+        name: Some("config set".into()),
+        command_type: Some(CHAT_INPUT),
+        ..Default::default()
+    });
+    assert_eq!(
+        (
+            slash.user.as_str(),
+            slash.name.as_str(),
+            slash.slash.as_deref()
+        ),
+        ("Alice", "/config set", Some("config"))
+    );
+    assert_eq!(slash.sender, discord::sender_id("1400000000000000001"));
+    let user = used(Interaction {
+        id: "8".into(),
+        user_id: "1400000000000000001".into(),
+        user: "alice".into(),
+        name: Some("High five".into()),
+        command_type: Some(USER_COMMAND),
+        target_user: Some(("1400000000000000002".into(), "bob".into())),
+        ..Default::default()
+    });
+    assert_eq!(
+        (user.name.as_str(), user.slash, user.target.as_deref()),
+        ("High five", None, Some("Bob"))
+    );
+    // A button's answer, or one that quotes a message, has none.
+    let button = answer(Interaction {
+        id: "8".into(),
+        ..Default::default()
+    });
+    assert!(found(&discord, server, &button).used.is_none());
+    let quoting = Message {
+        reply: Some(yapfast_discord::message::Reply::Deleted),
+        ..answer(Interaction {
+            name: Some("Quote".into()),
+            ..Default::default()
+        })
+    };
+    assert!(found(&discord, server, &quoting).used.is_none());
 }
