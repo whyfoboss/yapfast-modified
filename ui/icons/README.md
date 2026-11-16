@@ -20,7 +20,7 @@ glyphs such as check, x and chevrons.
   (pen-new-square), star (star, Linear style), star-filled (star), sticky-note
   (notes), text-select (text-selection), trash-2 (trash-bin-trash),
   trending-up (graph-up), triangle-alert (danger-triangle), user, users
-  (users-group-rounded) and video (videocamera).
+  (users-group-rounded), video (videocamera) and keyboard.
 - Adapted from Solar: headphone-off, eye-off, pin-off and video-off are the
   icon of the same name with a slash, and a gap cut around it; screen-share is
   Solar's monitor with an arrow cut out of its screen, and screen-share-off
@@ -65,5 +65,5 @@ licence (GPL-3.0-only, the Royalty-free License 2.0 or the Software License 3.0)
 - Drawn for Yapfast: moon and sun, for the name style preview light and dark switch.
 - Drawn for Yapfast: shop, for the profile editor.
 - Drawn for Yapfast: pen, for the profile editor name field.
-- Drawn for Yapfast: brush and chevrons-right, for the profile editor's Show
-  Styles and Hide Styles.
+- Drawn for Yapfast: styles-open and styles-closed, for the profile editor's
+  styles toggle, and layout-grid, for switching the stream layout.

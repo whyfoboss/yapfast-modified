@@ -144,6 +144,7 @@ export global Looks {
     in-out property <bool> moving: true;
     in-out property <bool> name-styles: true;
     in-out property <bool> server-tags: true;
+    in-out property <bool> profile-frames: true;
     in-out property <bool> better-animations: false;
 }
 
@@ -162,8 +163,7 @@ export global Popup {
     out property <duration> duration-exit: Looks.better-animations ? 135ms : 0ms;
     out property <duration> duration: Looks.better-animations ? 200ms : 0ms;
     out property <duration> menu-enter: Looks.better-animations ? 140ms : 0ms;
-    out property <duration> tooltip-enter: Looks.better-animations ? 100ms : 0ms;
-    out property <duration> anchor-tooltip-enter: Looks.better-animations ? 140ms : 0ms;
+    out property <duration> tooltip-enter: Looks.better-animations ? 150ms : 0ms;
     out property <duration> popover-enter: Looks.better-animations ? 160ms : 0ms;
     out property <duration> hover-enter: Looks.better-animations ? 160ms : 0ms;
     out property <duration> hover-exit: Looks.better-animations ? 130ms : 0ms;

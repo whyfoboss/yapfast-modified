@@ -14,7 +14,8 @@ use crate::chat::SendOptions;
 use super::{
     channels::SharedPreviews,
     render::{
-        chat_card, chat_embed, chat_notice, chat_poll, custom_emoji, rendered, sent_id, system_body,
+        chat_card, chat_embed, chat_notice, chat_poll, custom_emoji, rendered, sent_id,
+        system_body, used_command,
     },
     *,
 };
@@ -104,8 +105,11 @@ impl Run {
         };
         let until = last.order();
         let listed: HashSet<u64> = page.messages.iter().map(Message::order).collect();
-        self.messages
-            .retain(|order, _| *order < since || *order > until || listed.contains(order));
+        // Discord's history never has an answer only this account sees, so
+        // one stays until it's dismissed or the app closes.
+        self.messages.retain(|order, message| {
+            *order < since || *order > until || listed.contains(order) || message.ephemeral
+        });
     }
 
     /// Keeps only the newest `count`; the older ones load again.
@@ -553,19 +557,42 @@ impl OpenChannel {
             .keep_newest(KEPT_MESSAGES);
     }
 
-    /// Its newest messages to keep on disk, once they've changed.
+    /// Its newest messages to keep on disk, once they've changed. An answer
+    /// only this account sees is never kept: it lives as long as the app.
     pub(super) fn take_changes(&mut self) -> Option<(String, Vec<Message>)> {
         if !std::mem::take(&mut self.dirty) {
             return None;
         }
         let newest = &self.latest.as_ref().unwrap_or(&self.shown).messages;
-        let skip = newest
-            .len()
+        let kept = || newest.values().filter(|message| !message.ephemeral);
+        let skip = kept()
+            .count()
             .saturating_sub(yapfast_discord::cache::CHANNEL_MESSAGES);
-        Some((
-            self.channel.clone(),
-            newest.values().skip(skip).cloned().collect(),
-        ))
+        Some((self.channel.clone(), kept().skip(skip).cloned().collect()))
+    }
+
+    /// Hides the ephemeral message `item` for good, as Discord's "Dismiss
+    /// message" does, asking Discord nothing: there's no endpoint for it.
+    /// Returns whether it was here to hide.
+    pub fn dismiss(&mut self, item: &str) -> bool {
+        let Some(order) = item
+            .strip_prefix("d:")
+            .and_then(|id| id.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        if !self.message(order).is_some_and(|message| message.ephemeral) {
+            return false;
+        }
+        self.shown.messages.remove(&order);
+        if let Some(latest) = &mut self.latest {
+            latest.messages.remove(&order);
+        }
+        self.rendered.remove(&order);
+        // An update the app sends after, as to a deferred answer, finds
+        // nothing to change; this keeps a page from bringing it back.
+        self.deleted.insert(order);
+        true
     }
 
     fn insert(&mut self, message: Message) {
@@ -980,6 +1007,7 @@ impl OpenChannel {
         let order = id.parse().unwrap_or_default();
         if let Some(logger) = logger
             && logger.enabled
+            && !self.message(order).is_some_and(|message| message.ephemeral)
         {
             if let Some(known) = self.shown.messages.get_mut(&order) {
                 known.deleted = true;
@@ -1667,6 +1695,7 @@ impl OpenChannel {
                     .iter()
                     .map(|file| Attachment {
                         voice_ms: None,
+                        voice_waveform: None,
                         name: file.name.clone(),
                         size: Some(file.size),
                         image: false,
@@ -1678,6 +1707,7 @@ impl OpenChannel {
                         url: None,
                         spoiler: file.spoiler,
                         video: false,
+                        description: None,
                     })
                     .collect(),
                 ..Default::default()
@@ -1746,6 +1776,7 @@ impl OpenChannel {
                 }
                 Attachment {
                     voice_ms: attachment.voice_ms,
+                    voice_waveform: attachment.voice_waveform.clone(),
                     name: attachment.name.clone(),
                     size: attachment.size,
                     image: attachment.image && attachment.preview_url.is_some(),
@@ -1768,6 +1799,7 @@ impl OpenChannel {
                             .clone()
                             .unwrap_or_else(|| attachment.url.clone()),
                     ),
+                    description: attachment.description.clone(),
                 }
             })
             .collect();
@@ -1816,9 +1848,20 @@ impl OpenChannel {
         });
         let timestamp = message.timestamp();
         let ordinary = message.system.is_none();
+        // An answer only this account sees can only be dismissed, as in
+        // Discord's client: Discord has no copy to reply to, react to, pin
+        // or delete.
+        let shared = !message.ephemeral;
         ChatMessage {
             id,
             item: format!("d:{}", message.id),
+            application_id: message.application_id.clone(),
+            interaction: message
+                .interaction
+                .as_ref()
+                .map(|interaction| interaction.id.clone()),
+            used: used_command(discord, Some(&self.guild), server, message),
+            flags: message.flags,
             author,
             sender: discord::sender_id(&message.author_id),
             spoilers: true,
@@ -1858,13 +1901,13 @@ impl OpenChannel {
             cards,
             mentions,
             emoji: custom_emoji(message),
-            can_reply: ordinary && !message.deleted,
+            can_reply: ordinary && shared && !message.deleted,
             can_edit: own && message.editable && !message.deleted,
-            can_delete: self.rendered_with.deletes.allow(message, me) && !message.deleted,
-            can_react: ordinary && !message.deleted,
-            can_forward: message.forwardable && self.rendered_with.may_forward && !message.deleted,
+            can_delete: self.rendered_with.deletes.allow(message, me) && shared && !message.deleted,
+            can_react: ordinary && shared && !message.deleted,
+            can_forward: message.forwardable && self.rendered_with.may_forward && shared && !message.deleted,
             pinned: message.pinned,
-            can_pin: ordinary && self.rendered_with.may_pin && !message.deleted,
+            can_pin: ordinary && shared && self.rendered_with.may_pin && !message.deleted,
             thread: self.thread_link(server, message),
             poll: message.poll.as_ref().map(|poll| chat_poll(poll, own)),
             notice: chat_notice(message),
@@ -2008,7 +2051,10 @@ fn change(
                 return (None, Vec::new());
             };
             let mut evicted = Vec::new();
-            if let Some(logger) = logger.as_deref_mut() {
+            if let Some(logger) = logger.as_deref_mut()
+                && !known.ephemeral
+                && !message.ephemeral
+            {
                 let (recorded, ev) = logger.record_edit(channel, known, message, now_sec);
                 if recorded {
                     history_messages.insert(order);
@@ -2028,11 +2074,13 @@ fn change(
                 poll => poll.clone(),
             };
             let deleted = known.deleted;
+            let ephemeral = known.ephemeral || message.ephemeral;
             *known = Message {
                 reactions,
                 poll,
                 reply,
                 deleted,
+                ephemeral,
                 ..message.clone()
             };
             (Some(message.order()), evicted)
@@ -2058,6 +2106,7 @@ fn change(
             let order = message.parse().unwrap_or_default();
             if let Some(logger) = logger
                 && logger.enabled
+                && !messages.get(&order).is_some_and(|message| message.ephemeral)
             {
                 if let Some(known) = messages.get_mut(&order) {
                     known.deleted = true;

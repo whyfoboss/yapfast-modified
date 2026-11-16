@@ -57,6 +57,20 @@ impl Application {
         }))]
     }
 
+    pub(super) fn search_start_at(&mut self, position: u32) -> Vec<Effect> {
+        let Some(search) = self.state.search.as_mut().filter(|search| {
+            !search.loading && position > 0 && position <= search.total
+        }) else {
+            return vec![];
+        };
+        // Number results from oldest to newest; Discord pages in reverse order.
+        let offset = search.total - position;
+        search.first = offset;
+        search.next = offset;
+        search.results.clear();
+        self.more_results()
+    }
+
     pub(super) fn more_results(&mut self) -> Vec<Effect> {
         let Some(search) = self
             .state

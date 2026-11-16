@@ -71,6 +71,7 @@ fn picture(value: &Value, shown: Shown, thumbnail: bool) -> Option<Attachment> {
     let name = file_name(value["url"].as_str().unwrap_or(proxy)).unwrap_or("image");
     Some(Attachment {
         voice_ms: None,
+        voice_waveform: None,
         name: name.to_owned(),
         size: None,
         url: proxy.into(),
@@ -84,6 +85,7 @@ fn picture(value: &Value, shown: Shown, thumbnail: bool) -> Option<Attachment> {
         animated: crate::message::animated(value),
         shown,
         spoiler: false,
+        description: None,
     })
 }
 

@@ -23,13 +23,16 @@ mod aside;
 mod browse;
 mod calls;
 mod channel_settings;
+mod commands;
 mod compose;
 mod cosmetics;
 mod discord_account;
+mod ephemeral;
 mod forum;
 mod gifs;
 mod gift;
 mod header;
+mod interactions;
 mod join;
 mod members;
 mod messages;
@@ -48,6 +51,7 @@ mod scheduled_event;
 mod server;
 mod server_settings;
 mod session;
+mod slash;
 mod stickers;
 mod threads;
 
@@ -57,10 +61,12 @@ pub use channel_settings::{
     ChannelInput, ChannelSection, ChannelSettingsScreen, OverwriteConfirm, OverwriteRules,
     OverwriteState, Overwrites, channel_groups, channel_permission,
 };
+pub use commands::{AppCommands, CommandTarget, SlashCommand};
 pub use cosmetics::Cosmetics;
 pub use forum::{ForumInfo, ForumPost, ForumPosts, ForumView};
 pub use gifs::{AskedPicture, GifPicker, GifPicture, GifView};
 pub use gift::GiftDialog;
+pub use interactions::{InteractionModal, Interactions, ModalField, SelectChoice, SelectMenu};
 pub use join::JoinDialog;
 pub use members::{BAN_HISTORY, RoleChoice, TIMEOUT_TIMES};
 #[cfg(all(feature = "discord", any(test, feature = "test-fixtures")))]
@@ -96,6 +102,7 @@ pub use server_settings::{
     SettingsText, SettingsToggle, StickerCard, StickerDraft, StickerInput, StickersPage,
     TransferAsk, WELCOME, WELCOME_STICKER, emoji_name,
 };
+pub use slash::{CommandDraft, CommandRow, OptionDraft};
 pub use stickers::{FREQUENT_STICKERS, ServerStickers, StickerPicker, StickerPicture, StickerUse};
 pub use threads::{
     NewThread, THREAD_NAME_LIMIT, ThreadFrom, ThreadList, ThreadSearch, ThreadSections,
@@ -259,6 +266,7 @@ pub struct Search {
     /// the newest first.
     pub total: u32,
     pub results: Vec<chat::SearchHit>,
+    pub first: u32,
     /// Where the next page of results starts among them all.
     pub next: u32,
     /// A page of results is on its way.
@@ -424,6 +432,18 @@ pub enum Compose {
 
 #[derive(Default)]
 pub struct AppState {
+    /// Bots' controls and forms used, waiting for Discord's word.
+    pub interactions: Interactions,
+    /// The open room's apps' commands, once the person typed `/`.
+    pub app_commands: AppCommands,
+    /// A bot's form, open.
+    pub interaction_modal: Option<InteractionModal>,
+    /// The `/` picker and the app command being written in the composer.
+    slash: slash::Slash,
+    /// The message whose control last failed, and what its components say.
+    pub interaction_failed: Option<(String, String)>,
+    /// The choices of a bot's select menu, in a message or a form, open.
+    pub select_menu: Option<SelectMenu>,
     pub voice: voice::State,
     /// Discord is linked on this device and connected.
     pub discord_online: bool,
@@ -864,7 +884,9 @@ impl AppState {
     /// A dialog that takes the keyboard is open, over which the quick
     /// switcher doesn't open and a link handed from outside waits.
     pub fn dialog_open(&self) -> bool {
-        !self.mfa.is_empty()
+        self.interaction_modal.is_some()
+            || self.select_menu.is_some()
+            || !self.mfa.is_empty()
             || self.forwarding.is_some()
             || self.new_dm.is_some()
             || self.add_friend.is_some()
@@ -1437,6 +1459,70 @@ pub enum Relation {
 }
 
 pub enum Action {
+    UseButton {
+        item: String,
+        custom_id: String,
+    },
+    OpenSelect {
+        item: String,
+        custom_id: String,
+    },
+    OpenModalSelect(usize),
+    ToggleSelect(usize),
+    SearchSelect(String),
+    SubmitSelect,
+    /// Closes the open menu: a menu of several options sends what changed,
+    /// as Discord's does when its dropdown closes.
+    CloseSelect,
+    /// The form's field at `index` takes `value`: a text input's text, the
+    /// option a radio group picks, the option a checkbox group checks or
+    /// unchecks; a checkbox is checked or unchecked whatever it is.
+    SetModalField {
+        index: usize,
+        value: String,
+    },
+    /// Files for the form's file upload at `index`, after those it has.
+    AddModalFiles {
+        index: usize,
+        files: Vec<PathBuf>,
+    },
+    /// The form's file upload at `index` leaves out its `file`th file.
+    RemoveModalFile {
+        index: usize,
+        file: usize,
+    },
+    SubmitModal,
+    CloseModal,
+    /// The draft is `/` and what follows it, to find an app command by.
+    /// See application/slash.rs.
+    SlashQuery(String),
+    /// One of the commands the picker offers, by its place.
+    PickCommand(usize),
+    /// What the person entered for an option of the command being written.
+    SetCommandOption {
+        index: usize,
+        value: String,
+    },
+    /// Runs the command `command` (its id in the index), on `target`, the
+    /// message item or user a context-menu command acts on, or as written
+    /// in the composer with none.
+    RunAppCommand {
+        command: String,
+        target: Option<String>,
+    },
+    /// A message's or a person's menu opened: asks for the open room's
+    /// command index, unless it's kept, for the menu's "Apps".
+    AskAppCommands,
+    /// The composer writes this option of the command, as Tab or a click on
+    /// its pill moves to it.
+    FocusCommandOption(usize),
+    /// Escape closes the list over the composer, then the command being
+    /// written; with `true`, Backspace in an empty first option puts the
+    /// command's name back to pick another.
+    CloseCommand(bool),
+    /// Hides an ephemeral message, the item, as Discord's "Dismiss message"
+    /// does: only here, with no request. Phase 1d; application/ephemeral.rs.
+    DismissEphemeral(String),
     Navigate(Navigation),
     SelectRoom(String),
     /// Mark a listed conversation read, or every conversation of a listed
@@ -1816,6 +1902,7 @@ pub enum Action {
     Search(String),
     /// Load the next page of the search's results.
     MoreResults,
+    SearchStartAt(u32),
     /// Open the picker that adds friends to the selected DM, look among
     /// them, choose a friend or unchoose them, add those chosen, or close it.
     OpenAddPeople,
@@ -2273,6 +2360,8 @@ pub struct Application {
     /// How many pictures other than custom emoji were kept the last time
     /// those off screen went.
     pictures_kept: usize,
+    /// Decoded bytes of large banners added since the last off-screen trim.
+    large_banner_arrivals: usize,
     /// How many of the pictures kept are custom emoji, which stay.
     emoji_pictures: usize,
     /// Custom emoji pictures queued for the disk cache this session. Shared by
@@ -2363,6 +2452,9 @@ const LISTED_PICTURES: usize = 150;
 /// decoded, and the window keeps a copy of each it shows. The rail, the DMs
 /// listed, a member list and a timeline show a few hundred at most.
 const KEPT_PICTURES: usize = 400;
+/// A few banners can outweigh hundreds of avatars before the count limit trips.
+const LARGE_BANNER_BYTES: usize = 256 * 1024;
+const LARGE_BANNER_TRIM_BYTES: usize = 12 * 1024 * 1024;
 /// Timeline rows either side of those on screen whose avatars stay when
 /// pictures go.
 const PICTURED_AROUND: usize = 30;
@@ -2597,6 +2689,12 @@ fn pictures_on_screen<'a>(
                         .filter_map(Option::as_deref)
                         .chain(cosmetics.decoration(profile.decoration.as_deref()))
                         .chain(tag_badge(cosmetics, &profile.tag))
+                        .chain(
+                            cosmetics
+                                .frame(Some(&profile.frame))
+                                .into_iter()
+                                .flat_map(|frame| frame.iter().map(|layer| layer.src.as_str())),
+                        )
                         .chain(profile.bio_emoji.iter().map(|emoji| emoji.picture.as_str()))
                         // Its layers are asked for when it first plays.
                         .chain(effect.into_iter().flat_map(move |effect| {
@@ -2636,12 +2734,17 @@ fn pictures_on_screen<'a>(
                         .reply
                         .as_ref()
                         .and_then(|reply| reply.avatar.as_deref());
+                    let used = message
+                        .used
+                        .as_ref()
+                        .and_then(|used| used.avatar.as_deref());
                     message
                         .avatar
                         .as_deref()
                         .into_iter()
                         .chain(cosmetics.decoration(message.decoration.as_deref()))
                         .chain(reply)
+                        .chain(used)
                         .chain(tag_badge(cosmetics, &message.tag))
                 })
                 .chain(
@@ -2697,6 +2800,13 @@ fn tag_badge(cosmetics: Cosmetics, tag: &Option<chat::ServerTag>) -> Option<&str
 }
 
 /// Discord's CDN keeps custom emoji under /emojis/.
+fn profile_art_visible(state: &AppState, url: &str) -> bool {
+    state.profile.iter().chain(&state.panel_profile).any(|view| {
+        view.profile.frame.iter().any(|layer| layer.src == url)
+            || view.profile.banner.as_deref().and_then(chat::moving_banner).as_deref() == Some(url)
+    })
+}
+
 fn is_custom_emoji(url: &str) -> bool {
     url.contains("/emojis/")
 }
@@ -2781,7 +2891,7 @@ impl Application {
             .collect();
         let (kept, gone): (Vec<String>, Vec<String>) = std::mem::take(&mut self.effect_pictures)
             .into_iter()
-            .partition(|url| shown.contains(&url.as_str()));
+            .partition(|url| shown.contains(&url.as_str()) || profile_art_visible(state, url));
         self.effect_pictures = kept;
         for url in &gone {
             self.state.pictures.remove(url);
@@ -2971,17 +3081,29 @@ impl Application {
             return;
         }
         let emoji = is_custom_emoji(&url);
-        if url.ends_with(chat::EFFECT_PICTURE) {
+        let profile_art = chat::is_frame_layer(&url)
+            || (url.contains("/banners/") && url.contains(".gif?"));
+        if profile_art && !profile_art_visible(&self.state, &url) {
+            self.requested_pictures.remove(&url);
+            return;
+        }
+        if url.ends_with(chat::EFFECT_PICTURE) || profile_art {
             self.effect_pictures.push(url.clone());
+        }
+        let bytes = picture.rgba.len();
+        if url.contains("/banners/") && bytes >= LARGE_BANNER_BYTES {
+            self.large_banner_arrivals = self.large_banner_arrivals.saturating_add(bytes);
         }
         if self.state.pictures.insert(url, picture).is_none() && emoji {
             self.emoji_pictures += 1;
         }
         self.state.picture_changes += 1;
         let others = self.state.pictures.len() - self.emoji_pictures;
-        if others <= KEPT_PICTURES.max(2 * self.pictures_kept) {
+        let count_limit = others > KEPT_PICTURES.max(2 * self.pictures_kept);
+        if !count_limit && self.large_banner_arrivals < LARGE_BANNER_TRIM_BYTES {
             return;
         }
+        self.large_banner_arrivals = 0;
         let aside = self
             .state
             .aside
@@ -3004,16 +3126,63 @@ impl Application {
             )
             .map(str::to_owned)
             .collect();
-        let kept = |url: &String| shown.contains(url) || is_custom_emoji(url);
-        self.state.pictures.retain(|url, _| kept(url));
-        let pictures = &self.state.pictures;
-        self.requested_pictures
-            .retain(|url| kept(url) || pictures.contains_key(url));
+        let shown_or_emoji = |url: &String| shown.contains(url) || is_custom_emoji(url);
+        let mut evicted_large = Vec::new();
+        self.state.pictures.retain(|url, picture| {
+            let large_banner = url.contains("/banners/") && picture.rgba.len() >= LARGE_BANNER_BYTES;
+            if shown_or_emoji(url) || (!count_limit && !large_banner) {
+                return true;
+            }
+            if !count_limit {
+                evicted_large.push(url.clone());
+            }
+            false
+        });
+        if count_limit {
+            let pictures = &self.state.pictures;
+            self.requested_pictures
+                .retain(|url| shown_or_emoji(url) || pictures.contains_key(url));
+        } else {
+            for url in evicted_large {
+                self.requested_pictures.remove(&url);
+            }
+        }
         self.pictures_kept = self.state.pictures.len() - self.emoji_pictures;
     }
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
         match action {
+            Action::UseButton { item, custom_id } => self.use_button(item, custom_id),
+            Action::OpenSelect { item, custom_id } => self.open_select(item, custom_id),
+            Action::OpenModalSelect(index) => self.open_modal_select(index),
+            Action::ToggleSelect(index) => self.toggle_select(index),
+            Action::SearchSelect(query) => self.search_select(query),
+            Action::SubmitSelect => self.submit_select(),
+            Action::CloseSelect => self.close_select(),
+            Action::SetModalField { index, value } => self.set_modal_field(index, value),
+            Action::AddModalFiles { index, files } => self.add_modal_files(index, files),
+            Action::RemoveModalFile { index, file } => self.remove_modal_file(index, file),
+            Action::SubmitModal => self.submit_modal(),
+            Action::SlashQuery(_)
+            | Action::PickCommand(_)
+            | Action::SetCommandOption { .. }
+            | Action::RunAppCommand { .. }
+            | Action::AskAppCommands
+            | Action::FocusCommandOption(_)
+            | Action::CloseCommand(_) => self.command_action(action),
+            Action::DismissEphemeral(item) => self.dismiss_ephemeral(item),
+            Action::CloseModal => {
+                // A form being sent stays until Discord answers.
+                if self
+                    .state
+                    .interaction_modal
+                    .as_ref()
+                    .is_none_or(|modal| modal.nonce.is_none())
+                {
+                    self.state.interaction_modal = None;
+                }
+                vec![]
+            }
             Action::VisibleMessages {
                 room,
                 items,
@@ -3214,8 +3383,13 @@ impl Application {
                 vec![]
             }
             Action::ConfirmDelete => self.confirm_delete(),
+            Action::Retry(item) if item.starts_with("c:") => self.retry_command(&item),
             Action::Retry(item) => {
                 self.queue_action(item, |room, item| Command::Retry { room, item })
+            }
+            Action::CancelSend(item) if item.starts_with("c:") => {
+                self.cancel_command(&item);
+                vec![]
             }
             Action::CancelSend(item) => {
                 if !self
@@ -3419,6 +3593,7 @@ impl Application {
             }
             Action::Search(query) => self.search(query),
             Action::MoreResults => self.more_results(),
+            Action::SearchStartAt(position) => self.search_start_at(position),
             Action::OpenAddPeople => self.open_add_people(),
             Action::AddPeopleQuery(query) => {
                 if let Some(picker) = &mut self.state.add_people {
@@ -3913,7 +4088,24 @@ impl Application {
 
     fn apply_event(&mut self, event: Event) -> Vec<Effect> {
         match event {
-            Event::Voice(state) => {
+            Event::InteractionModal(modal) => self.open_interaction_modal(modal),
+            Event::InteractionFailed { nonce, reason } => {
+                self.interaction_answered(&nonce, Some(reason), false)
+            }
+            Event::InteractionSucceeded(nonce) => self.interaction_answered(&nonce, None, false),
+            Event::InteractionSettled(nonce) => self.interaction_answered(&nonce, None, true),
+            // Phase 1 of the bot commands: application/commands.rs.
+            Event::InteractionCreated { .. }
+            | Event::CommandIndex { .. }
+            | Event::CommandIndexChanged { .. }
+            | Event::AutocompleteChoices { .. } => return self.command_event(event),
+            Event::Voice(mut state) => {
+                if state.error_id != 0
+                    && state.error_id == self.state.voice.error_id
+                    && self.state.voice.error.is_none()
+                {
+                    state.error = None;
+                }
                 let sounds = call_sounds(&self.state.voice, &state);
                 // Someone moved the call to another channel, as a bot does
                 // from one that makes rooms: its view goes along.
@@ -4020,6 +4212,7 @@ impl Application {
                     }
                     self.state.room_ready = true;
                     self.state.messages = self.without_blocked(Arc::new(messages));
+                    self.show_sent_commands();
                     let mut effects = self.place_unread();
                     effects.extend(self.seek());
                     effects.extend(self.read_latest());
@@ -4046,6 +4239,7 @@ impl Application {
             Event::ProfileBoard { user, widgets } => self.profile_board_named(&user, widgets),
             Event::ProfileRecent { user, recent } => self.profile_recent_came(&user, recent),
             Event::BadgeLevels { user, badges } => self.show_badge_levels(&user, badges),
+            Event::ProfileFrame { user, sku, frame } => self.show_profile_frame(&user, &sku, &frame),
             Event::ProfileEffect(effect) => {
                 // The few of the cards seen lately.
                 let profile_effects = &mut self.state.profile_effects;
@@ -4385,7 +4579,12 @@ impl Application {
                     self.state.mention_groups = groups;
                 }
             }
-            Event::MemberMatches { room, members, .. } => {
+            Event::MemberMatches {
+                room,
+                query,
+                members,
+            } => {
+                self.select_member_matches(&room, &query, &members);
                 if self.state.selected.as_ref() == Some(&room) {
                     for member in members {
                         if !self

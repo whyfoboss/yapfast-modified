@@ -36,6 +36,7 @@ use yapfast_core::{
 use crate::drop::Drag;
 use crate::{autostart, custom_emoji, emoji, emoji_text, graphics, zoom};
 
+mod app_commands;
 mod appearance;
 mod away;
 mod browser;
@@ -47,6 +48,7 @@ mod emoji_animation;
 mod emoji_grid;
 mod games;
 mod gifs;
+mod keybinds;
 mod menus;
 mod messages;
 #[cfg(windows)]
@@ -158,8 +160,9 @@ pub fn run(
     };
     // Started at sign-in, Yapfast goes to the tray with the saved session.
     // Without one there's nothing to do there but sign in, which needs the window.
-    let hidden =
-        background && open_link.is_none() && !preview && yapfast_core::chat::can_restore(&root);
+    let background_restore = (background && open_link.is_none() && !preview)
+        .then(|| yapfast_core::chat::can_restore(&root));
+    let hidden = background_restore == Some(true);
     // Before the window maps, as the desktop looks up its icon then.
     #[cfg(target_os = "linux")]
     if !preview {
@@ -176,30 +179,38 @@ pub fn run(
     if !hidden && let Err(error) = window.show() {
         return failed(error, "could not show Yapfast");
     }
+    tracing::debug!(target: "yapfast_startup", hidden, "desktop window created");
     if !preview {
         AUTOSTART.set(autostart::SUPPORTED);
         PROTOCOL.set(cfg!(feature = "discord") && crate::protocol::SUPPORTED);
-        if PROTOCOL.get() {
-            crate::protocol::refresh(&root);
+        // A native test window can use a disposable data directory without
+        // repointing the desktop's link handler or sign-in entry to it.
+        if !isolated_display() {
+            if PROTOCOL.get() {
+                crate::protocol::refresh(&root);
+            }
+            autostart::refresh();
         }
-        autostart::refresh();
     }
     prepare(&window);
     let adapter = Adapter::new(Arc::new(runtime), root, &window)?;
     bind_callbacks(&window, &adapter);
     watch_window(&window, &adapter);
     adapter.borrow_mut().watch_away();
-    adapter.borrow_mut().watch_talk_key(&window);
+    adapter.borrow_mut().watch_keybinds(&window);
     adapter.borrow().show_protocol(&window);
     if !preview {
         adapter.borrow_mut().pending_link = open_link;
     }
-    adapter.borrow_mut().refresh(&window);
     if preview {
         adapter.borrow_mut().action(&window, Action::Preview);
-    } else if yapfast_core::chat::can_restore(&adapter.borrow().root) {
+    } else if background_restore
+        .unwrap_or_else(|| yapfast_core::chat::can_restore(&adapter.borrow().root))
+    {
+        window.set_restore_available(true);
         adapter.borrow_mut().action(&window, Action::Restore);
     } else {
+        adapter.borrow_mut().refresh(&window);
         window.invoke_focus_sign_in();
     }
     let notice = SharedString::from(plan.notice.unwrap_or_default());
@@ -266,6 +277,7 @@ fn isolated_display() -> bool {
 }
 
 fn prepare(window: &YapfastWindow) {
+    window.set_build_version(env!("CARGO_PKG_VERSION").into());
     // The entry is the setting, so each window reads it as it is.
     let autostart = AUTOSTART.get();
     window.set_autostart_available(autostart);
@@ -301,6 +313,31 @@ const EVENT_BATCH: usize = 256;
 
 /// How long the zoom level shows after it changes.
 const ZOOM_NOTE: Duration = Duration::from_millis(1200);
+
+/// What the mouse's back and forward buttons do, as Alt+Left and Alt+Right
+/// do.
+fn side_button_action(button: slint::winit_030::winit::event::MouseButton) -> Option<Action> {
+    use slint::winit_030::winit::event::MouseButton;
+    match button {
+        MouseButton::Back => Some(Action::NavigateBack),
+        MouseButton::Forward => Some(Action::NavigateForward),
+        _ => None,
+    }
+}
+
+/// Carries out `action` once the event that asked for it is done.
+fn navigate(
+    adapter: &std::rc::Weak<RefCell<Adapter>>,
+    window: &slint::Weak<YapfastWindow>,
+    action: Action,
+) {
+    let (adapter, window) = (adapter.clone(), window.clone());
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        if let (Some(adapter), Some(window)) = (adapter.upgrade(), window.upgrade()) {
+            adapter.borrow_mut().action(&window, action);
+        }
+    });
+}
 
 /// Follows the native window's focus, for notifications, zooms the window
 /// with Ctrl and +, - and 0 or the scroll wheel, keeping the level in the
@@ -385,7 +422,7 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                         if std::env::var("SLINT_SCALE_FACTOR").is_err()
                             && let Some(scale) = window
                                 .window()
-                                .with_winit_window(|winit| winit.scale_factor() as f32)
+                                .with_winit_window(zoom::window_display_scale)
                         {
                             base.set(scale);
                         }
@@ -488,8 +525,13 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                     move_loop::moved(&weak);
                     // Once for the events a move or resize sends together.
                     if !placing.replace(true) {
-                        let (weak, adapter, placing) =
-                            (weak.clone(), adapter.clone(), placing.clone());
+                        let (weak, adapter, placing, base, level) = (
+                            weak.clone(),
+                            adapter.clone(),
+                            placing.clone(),
+                            base.clone(),
+                            level.clone(),
+                        );
                         slint::Timer::single_shot(Duration::ZERO, move || {
                             placing.set(false);
                             if let (Some(adapter), Some(window)) =
@@ -497,6 +539,22 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                             {
                                 window.set_window_maximized(window.window().is_maximized());
                                 placement::moved(&mut adapter.borrow_mut(), &window);
+                            }
+                            // A window held to one display's density, as by
+                            // Windows' HIGHDPIAWARE compatibility setting, is
+                            // sent no ScaleFactorChanged on the others. The
+                            // monitor it has come to still names its own
+                            // scale, so a move can already mean another one.
+                            if cfg!(windows)
+                                && let Some(window) = weak.upgrade()
+                                && std::env::var("SLINT_SCALE_FACTOR").is_err()
+                                && let Some(scale) = window
+                                    .window()
+                                    .with_winit_window(zoom::window_display_scale)
+                                && (scale - base.get()).abs() >= f32::EPSILON
+                            {
+                                base.set(scale);
+                                zoom::apply(window.window(), base.get(), level.get());
                             }
                         });
                     }
@@ -514,45 +572,11 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                         }
                     });
                 }
-                crate::push_to_talk::window_event(event);
-                // Windows' two side buttons are recordable shortcuts too.
-                #[cfg(windows)]
+                crate::keybinds::window_event(event);
+                // While a keybind records, only the recorder sees its keys.
                 if let Some(window) = weak.upgrade()
-                    && window.get_talk_recording()
-                    && let Some(recorded) = crate::push_to_talk::Keybind::recorded_mouse(event)
+                    && keybinds::record(&window, &adapter, event)
                 {
-                    window.set_talk_recording(false);
-                    let (adapter, weak) = (adapter.clone(), weak.clone());
-                    slint::Timer::single_shot(Duration::ZERO, move || {
-                        if let (Some(adapter), Some(window)) = (adapter.upgrade(), weak.upgrade()) {
-                            adapter.borrow_mut().set_talk_key(&window, recorded);
-                        }
-                    });
-                    return EventResult::PreventDefault;
-                }
-                // While recording the push-to-talk key, the next key becomes
-                // it, and Escape stops; either way only the recorder sees it.
-                if let WindowEvent::KeyboardInput { event: key, .. } = event
-                    && key.state == ElementState::Pressed
-                    && let Some(window) = weak.upgrade()
-                    && window.get_talk_recording()
-                {
-                    if !key.repeat {
-                        window.set_talk_recording(false);
-                        let recorded = (key.logical_key != Key::Named(NamedKey::Escape))
-                            .then(|| crate::push_to_talk::Keybind::recorded(key))
-                            .flatten();
-                        if let Some(recorded) = recorded {
-                            let (adapter, weak) = (adapter.clone(), weak.clone());
-                            slint::Timer::single_shot(Duration::ZERO, move || {
-                                if let (Some(adapter), Some(window)) =
-                                    (adapter.upgrade(), weak.upgrade())
-                                {
-                                    adapter.borrow_mut().set_talk_key(&window, recorded);
-                                }
-                            });
-                        }
-                    }
                     return EventResult::PreventDefault;
                 }
                 // Ctrl+K opens the quick switcher, or closes it, wherever the
@@ -643,19 +667,38 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                     && !window.get_settings_open()
                 {
                     if !key.repeat {
-                        let action = if named == NamedKey::ArrowLeft {
-                            Action::NavigateBack
-                        } else {
-                            Action::NavigateForward
-                        };
-                        let (adapter, weak) = (adapter.clone(), weak.clone());
-                        slint::Timer::single_shot(Duration::ZERO, move || {
-                            if let (Some(adapter), Some(window)) =
-                                (adapter.upgrade(), weak.upgrade())
-                            {
-                                adapter.borrow_mut().action(&window, action);
-                            }
-                        });
+                        navigate(
+                            &adapter,
+                            &weak,
+                            if named == NamedKey::ArrowLeft {
+                                Action::NavigateBack
+                            } else {
+                                Action::NavigateForward
+                            },
+                        );
+                    }
+                    return EventResult::PreventDefault;
+                }
+                // So do the mouse's back and forward buttons. The release is
+                // kept from the window too, so that it isn't taken for a click.
+                if let WindowEvent::MouseInput { state, button, .. } = event
+                    && let Some(action) = side_button_action(*button)
+                    && let Some(window) = weak.upgrade()
+                    && window.get_workspace()
+                    && !window.get_settings_open()
+                {
+                    if *state == ElementState::Pressed {
+                        #[cfg(windows)]
+                        if let Some(adapter) = adapter.upgrade()
+                            && let Ok(adapter) = adapter.try_borrow()
+                            && adapter
+                                .keybinds
+                                .as_ref()
+                                .is_some_and(|watcher| watcher.reserves_mouse_for_talk(*button))
+                        {
+                            return EventResult::PreventDefault;
+                        }
+                        navigate(&adapter, &weak, action);
                     }
                     return EventResult::PreventDefault;
                 }
@@ -771,10 +814,7 @@ fn type_anywhere(window: &YapfastWindow) {
             return false;
         }
         // Holding the key to talk shouldn't also write it.
-        if window.get_voice_active()
-            && !window.get_muted()
-            && crate::push_to_talk::pressed_talk_key()
-        {
+        if window.get_voice_active() && !window.get_muted() && crate::keybinds::pressed_talk_key() {
             return false;
         }
         window.invoke_type_into_composer()
@@ -1255,6 +1295,7 @@ struct Layout {
     moving_cosmetics: Option<bool>,
     name_styles: Option<bool>,
     server_tags: Option<bool>,
+    profile_frames: Option<bool>,
     /// Joining a call turns the microphone on; on unless turned off.
     unmute_on_join: Option<bool>,
     /// Joining a call deafens.
@@ -1269,12 +1310,14 @@ struct Layout {
     reduce_room_echo: bool,
     /// The quietest speech Discord calls send, in dBFS; -60 unless changed.
     input_sensitivity: Option<i32>,
-    /// Whether calls send the voice the gate hears or only while a key is
-    /// held, the key, and how long the microphone sends after it comes up,
+    /// Whether calls send the voice the gate hears or only while keys are
+    /// held, the keys, and how long the microphone sends after they come up,
     /// in ms; Discord's 20 unless changed.
     input_mode: InputMode,
-    push_to_talk_key: Option<crate::push_to_talk::Keybind>,
+    push_to_talk_key: Option<crate::keybinds::Shortcut>,
     push_to_talk_release_delay: Option<u32>,
+    /// The Keybinds page's keybinds, in its order.
+    keybinds: Vec<crate::keybinds::Binding>,
     /// How loud every call sends the microphone and plays, as sliders'
     /// percentages from 0% to 200%; 100% unless changed.
     microphone_volume: Option<u8>,
@@ -1398,6 +1441,7 @@ fn show_motion(window: &YapfastWindow) {
         Animate::Never => false,
     };
     window.global::<Motion>().set_playing(playing);
+    window.global::<Motion>().set_never(ANIMATE.get() == Animate::Never);
     // Animated emoji hold still with everything else, at once rather than at
     // the next refresh.
     i_slint_core::yapfast_emoji::set_playing(playing);
@@ -1441,6 +1485,35 @@ impl Layout {
         self.input_sensitivity
             .unwrap_or(yapfast_core::noise::DEFAULT_SENSITIVITY as i32)
             .clamp(-80, 0)
+    }
+
+    /// The keybinds to watch: the Voice page's push-to-talk keys and the
+    /// Keybinds page's, each set and doing something. Push to talk's only in
+    /// push to talk, where they do something, as Discord's.
+    fn watched_keybinds(&self) -> Vec<crate::keybinds::Watched> {
+        let talking = self.input_mode == InputMode::PushToTalk;
+        let talk = self
+            .push_to_talk_key
+            .iter()
+            .filter(|_| talking)
+            .map(|keys| crate::keybinds::Watched {
+                id: crate::keybinds::TALK_SHORTCUT.to_owned(),
+                action: crate::keybinds::Action::PushToTalk,
+                keys: keys.clone(),
+            });
+        let others = self.keybinds.iter().filter_map(|binding| {
+            let keys = binding.keys.clone()?;
+            match binding.action {
+                crate::keybinds::Action::Unassigned => None,
+                crate::keybinds::Action::PushToTalk if !talking => None,
+                action => Some(crate::keybinds::Watched {
+                    id: binding.shortcut_id(),
+                    action,
+                    keys,
+                }),
+            }
+        });
+        talk.chain(others).collect()
     }
 
     /// How long the microphone sends after the push-to-talk key comes up, in ms.
@@ -1495,6 +1568,7 @@ impl Layout {
             moving: self.moving_cosmetics.unwrap_or(default.moving),
             name_styles: self.name_styles.unwrap_or(default.name_styles),
             server_tags: self.server_tags.unwrap_or(default.server_tags),
+            frames: self.profile_frames.unwrap_or(default.frames),
         }
     }
 
@@ -1508,6 +1582,7 @@ impl Layout {
         looks.set_moving(cosmetics.moving);
         looks.set_name_styles(cosmetics.name_styles);
         looks.set_server_tags(cosmetics.server_tags);
+        looks.set_profile_frames(cosmetics.frames);
         let effective = self.better_animations && self.animate != Animate::Never;
         looks.set_better_animations(effective);
         pictures::set_moving_collectibles(cosmetics.moving);
@@ -1521,6 +1596,7 @@ impl Layout {
         self.moving_cosmetics = Some(looks.get_moving());
         self.name_styles = Some(looks.get_name_styles());
         self.server_tags = Some(looks.get_server_tags());
+        self.profile_frames = Some(looks.get_profile_frames());
         self.better_animations = looks.get_better_animations();
         let effective = self.better_animations && self.animate != Animate::Never;
         looks.set_better_animations(effective);
@@ -1642,7 +1718,7 @@ impl Layout {
         window.set_talk_key(
             self.push_to_talk_key
                 .as_ref()
-                .map(|key| key.name.as_str())
+                .map(crate::keybinds::Shortcut::name)
                 .unwrap_or_default()
                 .into(),
         );
@@ -2063,15 +2139,22 @@ struct Adapter {
     window: slint::Weak<YapfastWindow>,
     away: away::Away,
     call_timer: call_timer::CallTimer,
+    voice_notice: Option<u64>,
+    voice_notice_timer: slint::Timer,
     /// Ticks ActivityClock while a profile on screen times an activity.
     activity_clock: slint::Timer,
     navigation: Navigation,
     /// Whether the forward dialog was open at the last refresh.
     forwarding: bool,
+    /// What the message menu's Apps rows were built for: the room and its
+    /// command index, by address, and the app icons they still lack. A
+    /// menu opening builds them again; see `show_app_menu_commands`.
+    app_menu: Option<(String, usize, Vec<String>)>,
     selection_version: u64,
     /// The conversation just shown was still loading, when its composer is
     /// disabled and takes no focus; it takes it once the messages come.
     focus_when_ready: bool,
+    first_chat_logged: bool,
     reset_version: u64,
     /// The timeline shown, which tells the messages that changed since.
     messages: Arc<Vec<Arc<ChatMessage>>>,
@@ -2104,6 +2187,8 @@ struct Adapter {
     /// A hash of what the friends picker's rows were built from, so they're
     /// built again only once that changes.
     picker_shown: Option<u64>,
+    /// The bot picker rows last shown; unchanged syncs keep their widgets.
+    bot_select_shown: Option<u64>,
     /// The same for the list of threads, and the minute it was built in,
     /// as its rows say how long ago each was active.
     threads_shown: Option<u64>,
@@ -2218,9 +2303,8 @@ struct Adapter {
     /// show the voice gate's sensitivity.
     #[cfg(feature = "discord")]
     gate_meter: Option<yapfast_core::discord_audio::GateMeter>,
-    /// Watches the push-to-talk key while push to talk is on and it's set,
-    /// with or without the window.
-    talk_key: Option<crate::push_to_talk::Watcher>,
+    /// Watches the keybinds while any is set, with or without the window.
+    keybinds: Option<crate::keybinds::Watcher>,
     /// Previews of the pictures waiting in the composer, by file; `None` while
     /// one is read, or when it can't be.
     thumbnails: HashMap<PathBuf, Option<pictures::Thumbnail>>,
@@ -2453,11 +2537,15 @@ impl Adapter {
                 window: window.as_weak(),
                 away: away::Away::default(),
                 call_timer: call_timer::CallTimer::default(),
+                voice_notice: None,
+                voice_notice_timer: slint::Timer::default(),
                 activity_clock: slint::Timer::default(),
                 navigation: Navigation::default(),
                 forwarding: false,
+                app_menu: None,
                 selection_version: 0,
                 focus_when_ready: false,
+                first_chat_logged: false,
                 reset_version: 0,
                 messages: Arc::new(Vec::new()),
                 rows: Vec::new(),
@@ -2471,6 +2559,7 @@ impl Adapter {
                 arranging: None,
                 rail_call: None,
                 picker_shown: None,
+                bot_select_shown: None,
                 threads_shown: None,
                 forum_shown: None,
                 topic_shown: None,
@@ -2525,7 +2614,7 @@ impl Adapter {
                 watched_streams: Vec::new(),
                 #[cfg(feature = "discord")]
                 gate_meter: None,
-                talk_key: None,
+                keybinds: None,
                 thumbnails: HashMap::new(),
                 pasted: None,
                 drag_over: false,
@@ -2545,42 +2634,70 @@ impl Adapter {
         }))
     }
 
-    /// Starts, changes or stops watching the push-to-talk key as settings
-    /// say, and shows where it works.
-    fn watch_talk_key(&mut self, window: &YapfastWindow) {
-        let wanted = self
-            .layout
-            .push_to_talk_key
+    /// Starts, changes or stops watching the keybinds as settings say, and
+    /// shows where they work.
+    fn watch_keybinds(&mut self, window: &YapfastWindow) {
+        let wanted = self.layout.watched_keybinds();
+        let current = self
+            .keybinds
             .as_ref()
-            .filter(|_| self.layout.input_mode == InputMode::PushToTalk);
-        if self
-            .talk_key
-            .as_ref()
-            .map(crate::push_to_talk::Watcher::key)
-            != wanted
-        {
+            .map(crate::keybinds::Watcher::watched)
+            .unwrap_or_default();
+        if current != wanted.as_slice() {
             // The old one goes first, ending its portal session.
-            self.talk_key = None;
-            self.talk_key = wanted.cloned().map(|key| {
+            self.keybinds = None;
+            if !wanted.is_empty() {
                 let weak = window.as_weak();
-                crate::push_to_talk::Watcher::start(key, &self.runtime, move |reach| {
+                let toggled: crate::keybinds::Toggled = Arc::new(move |action| {
                     let _ = weak.upgrade_in_event_loop(move |window| {
-                        window.set_talk_note(reach.note().into());
+                        keybinds::toggled(&window, action);
                     });
-                })
-            });
+                });
+                let weak = window.as_weak();
+                self.keybinds = Some(crate::keybinds::Watcher::start(
+                    wanted,
+                    &self.runtime,
+                    toggled,
+                    move |_| {
+                        let _ = weak.upgrade_in_event_loop(|window| {
+                            window.invoke_keybind_status_changed();
+                        });
+                    },
+                ));
+            }
         }
-        let note = self.talk_key.as_ref().map(|watcher| watcher.reach().note());
-        window.set_talk_note(note.unwrap_or_default().into());
+        self.show_keybinds(window);
     }
 
-    /// Makes a recorded key the push-to-talk key.
-    fn set_talk_key(&mut self, window: &YapfastWindow, key: crate::push_to_talk::Keybind) {
-        tracing::info!(key = key.name, "push-to-talk key recorded");
-        window.set_talk_key(key.name.as_str().into());
-        self.layout.push_to_talk_key = Some(key);
+    /// Shows the keybinds, and where they work.
+    fn show_keybinds(&self, window: &YapfastWindow) {
+        let watched = self
+            .keybinds
+            .as_ref()
+            .map(crate::keybinds::Watcher::watched)
+            .unwrap_or_default();
+        let status = self.keybinds.as_ref().map(crate::keybinds::Watcher::status);
+        let talk = watched
+            .iter()
+            .any(|watched| watched.id == crate::keybinds::TALK_SHORTCUT);
+        window.set_talk_note(
+            status
+                .as_ref()
+                .filter(|_| talk)
+                .map(crate::keybinds::Status::talk_note)
+                .unwrap_or_default()
+                .into(),
+        );
+        keybinds::show(window, &self.layout.keybinds, watched, status.as_ref());
+    }
+
+    /// Makes recorded keys the push-to-talk keybind.
+    fn set_talk_key(&mut self, window: &YapfastWindow, keys: crate::keybinds::Shortcut) {
+        tracing::info!(keys = keys.name(), "push-to-talk keybind recorded");
+        window.set_talk_key(keys.name().into());
+        self.layout.push_to_talk_key = Some(keys);
         self.layout.write(&self.root);
-        self.watch_talk_key(window);
+        self.watch_keybinds(window);
     }
 
     /// Shows whether Discord protocol links open here, as the desktop
@@ -2595,7 +2712,7 @@ impl Adapter {
     fn attach(&mut self, window: &YapfastWindow) {
         self.models.attach(window);
         self.layout.apply(window);
-        self.watch_talk_key(window);
+        self.watch_keybinds(window);
         self.show_protocol(window);
         // The theme being edited goes unsaved with the old window, and rows
         // may carry its mention colour; the refresh after attaching builds
@@ -3372,6 +3489,13 @@ impl Adapter {
         // the profile editor only the editor; the rest of the window
         // stays as it is.
         let composing = matches!(action, Action::SetDraft(_) | Action::MentionQuery(_));
+        let bot_input = matches!(
+            action,
+            Action::SetModalField { .. }
+                | Action::SearchSelect(_)
+                | Action::ToggleSelect(_)
+                | Action::RemoveModalFile { .. }
+        );
         let profiling = matches!(action, Action::WriteProfile { .. });
         // Typing on Roles changes only the settings, too.
         let setting = matches!(
@@ -3409,6 +3533,8 @@ impl Adapter {
             self.show_channel_settings(window);
         } else if composing {
             self.show_composer(window);
+        } else if bot_input {
+            self.show_bot_interactions(window);
         } else if profiling {
             self.show_profile_editor(window);
         } else if setting {

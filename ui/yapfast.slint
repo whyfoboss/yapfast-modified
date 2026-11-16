@@ -48,11 +48,11 @@ import { PersonRow, CallLink, CallLinkCard, LinkTouch, SignalIcon, VoiceDock, St
 import { ServerRow, RoomRow, StatusDot, ServerRail, ServerHeader, RoomList } from "rail.slint";
 import { StagedFile, StagedTile, Composer, MentionRow, MentionList, EmojiSuggestions, RequestBar } from "composer.slint";
 import { EmojiCell, EmojiRow, EmojiTile, EmojiSection, RailSection, EmojiCard, EmojiCardView, MessageStickerCard, MessageStickerCardView, MessageRow, ReactionToggle, EmojiButton, EmojiPicker, MessageHover, MessageMenu, MessageGallery, MessageStickers, FileCard, MessageContent, EmbedView, BotTag, NoConversation, ConversationStart, HistoryEdge, UnreadBar, PresentBar, ImageViewer, VideoViewer, VideoPlayer, Polls } from "messages.slint";
-import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable, DetectedAppRow, PluginsSettings } from "settings.slint";
+import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, KeybindSettings, KeybindRow, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable, DetectedAppRow, PluginsSettings } from "settings.slint";
 import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ServerCard, RoleCard, ActivityRow } from "people.slint";
 import { RequestRow, FriendRow, FriendsScreen, HeaderTab, RequestsScreen, AddFriendDialog } from "friends.slint";
 import { ContactRow, PlaceRow, ReactionPill, ReactorRow, StatusDialog, NewDmDialog, ForwardDialog, QuickSwitcher, ReactionsDialog, StatusMenu, PersonPrompt, PersonDialog, LeavingDialog, PollAnswerDraft, PollDialog } from "dialogs.slint";
-import { InvitePrompt, InviteDialog, JoinPrompt, JoinDialog, EventPrompt, EventDialog, GiftPrompt, GiftDialog, OAuthPrompt, OAuthDialog, ChannelPrompt, ChannelDialog, ProfileEditorPrompt, ProfileEditorDialog } from "server.slint";
+import { InvitePrompt, InviteDialog, JoinPrompt, JoinDialog, EventPrompt, EventDialog, GiftPrompt, GiftDialog, OAuthPrompt, OAuthDialog, ChannelPrompt, ChannelDialog, ProfileEditorPrompt, ProfileEditorDialog, ProfileTabs } from "server.slint";
 import { SignInScreen, VerifyBanner } from "sign-in.slint";
 import { BoostPicture, BoostPrompt, EngagementPrompt, ServerProfilePrompt, ServerSettingsPrompt, ServerSettingsScreen } from "server_settings.slint";
 import { PermissionRow, RoleMemberRow, RoleRow, RoleSwatch, RolesPrompt } from "roles.slint";
@@ -61,6 +61,8 @@ import { ChannelSettingsPrompt, ChannelSettingsScreen, OverwriteRow, ThreeStateR
 import { MfaChoice, MfaPrompt, MfaDialog } from "mfa.slint";
 import { FoundRow, PickRow, ThreadRow, HeaderSearch, PinsPopover, ThreadsPopover, AddPeoplePopover, SearchPanel, TopicPopover, SearchFilterItem, SearchFilterDropdown } from "header.slint";
 import { ThreadPanel, NewThreadPanel } from "thread.slint";
+import { BotSelectDropdown, BotModalDialog, SelectChoice, ModalField } from "interactions.slint";
+import { CommandChoice, CommandOptionPill, CommandList } from "app_commands.slint";
 import { PostTag, PostRow, PostTagChoice, ForumPanel } from "forum.slint";
 import { BrowseRow, BrowseScreen } from "browse.slint";
 import { EditHistoryRow, EditHistoryPanel } from "history.slint";
@@ -84,6 +86,8 @@ export { FoundRow, PickRow } from "header.slint";
 export { EditHistoryRow } from "history.slint";
 export { GifTile, GifFavorites } from "gifs.slint";
 export { GameExecutable, DetectedAppRow } from "settings.slint";
+export { SelectChoice, ModalField } from "interactions.slint";
+export { CommandChoice, CommandOptionPill } from "app_commands.slint";
 
 export component YapfastWindow inherits Window {
     /// "Yapfast", or "(3) Yapfast" with mentions and DMs waiting, as a browser
@@ -304,6 +308,7 @@ export component YapfastWindow inherits Window {
     /// name and badges from; empty until it's come.
     in property <ProfileData> account-profile;
     callback open-profile-wishlist;
+    callback profile-tab-opened(int);
     callback write-profile(int, string);
     callback choose-name-style(int, int, string);
     callback edit-own-note;
@@ -480,6 +485,74 @@ export component YapfastWindow inherits Window {
     callback show-hidden-channels-toggled(bool);
     /// A link in a message was clicked.
     callback open-link(string);
+    callback use-button(string, string);
+    callback open-select(string, string);
+    in property <bool> bot-select-open;
+    /// The message whose bot control waits, and the one whose control
+    /// failed, with why.
+    in property <string> bot-busy-item;
+    in property <string> bot-failed-item;
+    in property <string> bot-failed-text;
+    in property <string> bot-select-heading;
+    in property <[SelectChoice]> bot-select-choices;
+    in property <string> bot-select-query;
+    in property <int> bot-select-min;
+    in property <int> bot-select-max;
+    /// A menu of members, roles or channels, which typing searches.
+    in property <bool> bot-select-searchable;
+    callback bot-select-toggle(int);
+    callback bot-select-search(string);
+    callback bot-select-close;
+    in property <bool> bot-modal-open;
+    in property <string> bot-modal-heading;
+    in property <[ModalField]> bot-modal-fields;
+    in property <bool> bot-modal-supported;
+    in property <bool> bot-modal-saving;
+    in property <string> bot-modal-error;
+    callback bot-modal-field-edited(int, string);
+    callback bot-modal-open-select(int);
+    /// A form's file upload, by its place, asks for files, or lets go of one.
+    callback bot-modal-choose-files(int);
+    callback bot-modal-remove-file(int, int);
+    callback bot-modal-submit;
+    callback bot-modal-close;
+    // Apps' commands (see app_commands.slint and src/ui/app_commands.rs).
+    /// The list over the composer: the `/` picker's commands, or the values
+    /// the focused option of the command being written may take, under a
+    /// heading that says which, or why there are none; the chosen row.
+    in property <bool> command-picker-open;
+    in property <[CommandChoice]> command-choices;
+    in property <string> command-heading;
+    /// The rows are commands rather than an option's values.
+    in property <bool> command-rows-are-commands;
+    in-out property <int> command-choice-index;
+    /// The command being written in the composer, without its `/`, its
+    /// options and the one the composer writes.
+    in property <string> command-name;
+    in property <[CommandOptionPill]> command-options;
+    in property <int> command-focus;
+    /// The composer writes this option; a file is wanted for this one;
+    /// Escape, or with `true` Backspace in the empty first option.
+    callback focus-command-option(int);
+    callback command-file(int);
+    callback close-command(bool);
+    /// The message commands a message's "Apps" submenu offers.
+    in property <[CommandChoice]> app-menu-commands;
+    /// The open room's command index came, so an open person's menu is
+    /// built again with its "Apps".
+    in property <bool> app-commands-ready;
+    /// A message's or a person's menu opened: their "Apps" needs the open
+    /// room's command index.
+    callback ask-app-commands();
+    /// The draft is `/` and this after it; a command picked by its place;
+    /// what was entered for an option; a command, by its id, run on a
+    /// message item or user, or as written with none; an ephemeral message
+    /// dismissed.
+    callback slash-query(string);
+    callback pick-command(int);
+    callback set-command-option(int, string);
+    callback run-app-command(string, string);
+    callback dismiss-ephemeral(string);
     in-out property <bool> sync-discord-reads;
     callback sync-discord-reads-toggled(bool);
     in-out property <bool> show-idle: true;
@@ -787,7 +860,7 @@ export component YapfastWindow inherits Window {
     /// The open profile card: beside the member list, or large over the window.
     in property <bool> profile-open;
     in property <bool> profile-large;
-    in property <ProfileData> profile;
+    in-out property <ProfileData> profile;
     /// Where the member whose card is open is listed.
     property <length> profile-y;
     /// The card opened from a mention or a role's list, beside the pointer rather
@@ -1215,6 +1288,11 @@ export component YapfastWindow inherits Window {
     in-out property <int> search-suggestion-index: -1;
     callback search-input-edited(string);
     callback choose-search-suggestion(int);
+    in property <int> search-suggestion-caret: -1;
+    in property <int> search-suggestion-edit;
+    in property <int> search-total;
+    in property <int> search-first: 1;
+    callback search-start-at(string);
     callback close-search-dropdown;
     /// Show a search result in its room, by room id and item.
     callback jump-in-room(string, string);
@@ -1274,6 +1352,7 @@ export component YapfastWindow inherits Window {
         if !self.settings-open && self.theme-editor { self.cancel-theme(); }
     }
     in-out property <int> settings-section;
+    in property <string> build-version;
     /// Preferences people set in the settings; preferences-changed reports any change.
     in-out property <bool> twelve-hour-clock;
     in-out property <bool> clock-seconds;
@@ -1328,6 +1407,18 @@ export component YapfastWindow inherits Window {
     in-out property <int> talk-delay: 20;
     in-out property <string> talk-note;
     callback record-talk-key(bool);
+    /// Keybinds: see KeybindSettings. The keys pressed so far go to
+    /// whichever recorder is recording, the Voice page's or a row's.
+    in-out property <[KeybindRow]> keybind-rows;
+    in-out property <string> keybinds-note;
+    in-out property <int> keybind-recording: -1;
+    in-out property <string> recorded-keys;
+    callback add-keybind();
+    callback remove-keybind(int);
+    callback keybind-action-chosen(int, int);
+    callback record-keybind(int, bool);
+    /// Where keybinds work changed; Rust shows it again.
+    callback keybind-status-changed();
     /// Calls' microphone and speakers volume: see VoiceSettings.
     in-out property <int> microphone-volume: 100;
     in-out property <int> speaker-volume: 100;
@@ -1982,8 +2073,11 @@ export component YapfastWindow inherits Window {
         y: max(8px, root.menu-y - self.height - 6px);
         // Wider for the screens' pictures.
         width: root.share-screens.length > 0 ? 336px : 240px;
+        // No taller than the window has room for: with many windows and
+        // cameras listed, or the window short or zoomed, its choices scroll.
+        height: min(share-content.full-height, root.height - 16px);
         close-policy: PopupClosePolicy.close-on-click-outside;
-        ShareMenu {
+        share-content := ShareMenu {
             screens: root.share-screens; windows: root.share-windows; cameras: root.share-cameras;
             dialog: !root.share-lists; switching: root.pick-switch;
             pick-source <=> root.pick-source; pick-resolution <=> root.pick-resolution; pick-fps <=> root.pick-fps;
@@ -2113,8 +2207,14 @@ export component YapfastWindow inherits Window {
         root.anchor(x, y, 0px, 0px, true);
         root.menu-target = id;
         root.menu-person = person;
+        if person { root.ask-app-commands(); }
         root.prepare-menu(id, person);
         if root.menu-rows.length > 0 { context-menu.show(); }
+    }
+    changed app-commands-ready => {
+        if root.app-commands-ready && root.menu-person && context-menu.is-open {
+            root.prepare-menu(root.menu-target, true);
+        }
     }
     // The popup spans the menu and room for its submenus, which open to the
     // menu's right, or its left near the window's right edge. The menu opens
@@ -2189,7 +2289,7 @@ export component YapfastWindow inherits Window {
     status-menu := PopupWindow {
         width: ClientStyle.enabled ? 300px : 248px;
         height: ClientStyle.enabled
-            ? min(max(120px, root.menu-y - 12px), 444px)
+            ? min(max(120px, root.menu-y - 12px), 560px)
             : min(max(120px, root.menu-y - 12px), status-menu-content.preferred-height);
         x: max(8px, min(root.width - self.width - 8px, root.menu-x));
         y: max(8px, root.menu-y - self.height - 4px);
@@ -2202,7 +2302,7 @@ export component YapfastWindow inherits Window {
                 clicked => { status-menu.close(); }
             }
             if ClientStyle.enabled: AccountPopover {
-                available-height: min(max(120px, root.menu-y - 12px), 444px);
+                available-height: min(max(120px, root.menu-y - 12px), 560px);
                 name: root.account-name; initial: root.account-initial; tint: root.account-tint; picture: root.account-picture;
                 user-id: root.account-user-id; profile: root.account-profile;
                 opened => { root.account-opened(); }
@@ -2248,6 +2348,7 @@ export component YapfastWindow inherits Window {
         root.menu-media = media;
         root.menu-video = video;
         root.menu-link = media >= 0 ? root.attachment-link(message.item, media) : root.link-at(root.anchor-x, root.anchor-y);
+        root.ask-app-commands();
         message-menu.show();
     }
     property <bool> picker-open: emoji-picker.is-open;
@@ -2457,59 +2558,87 @@ export component YapfastWindow inherits Window {
         property <length> lift: root.voice-menu-rows ? voice-menu-content.lift : 0px;
         property <length> top: root.anchor-y + self.head + self.main <= root.height - 8px
             ? root.anchor-y : max(8px, root.anchor-y - self.head - self.main);
-        width: root.voice-menu-rows ? voice-menu-content.content-width : self.menu-width;
-        height: self.head + (root.voice-menu-rows ? voice-menu-content.content-height : 0px);
-        x: max(8px, min(root.width - self.menu-width - 8px, root.anchor-x))
+        property <length> menu-body-width: root.voice-menu-rows ? voice-menu-content.content-width : self.menu-width;
+        property <length> menu-body-height: self.head + (root.voice-menu-rows ? voice-menu-content.content-height : 0px);
+        property <length> left: max(8px, min(root.width - self.menu-width - 8px, root.anchor-x))
             - (self.flip ? voice-menu-content.content-width - self.menu-width : 0px);
-        y: self.top - self.lift;
+        property <length> left-pad: Looks.better-animations ? clamp(self.left, 0px, 10px) : 0px;
+        property <length> right-pad: Looks.better-animations ? clamp(root.width - self.left - self.menu-body-width, 0px, 10px) : 0px;
+        property <length> top-pad: Looks.better-animations ? clamp(self.top - self.lift, 0px, 10px) : 0px;
+        property <length> bottom-pad: Looks.better-animations ? clamp(root.height - self.top + self.lift - self.menu-body-height, 0px, 10px) : 0px;
+        width: self.left-pad + self.menu-body-width + self.right-pad;
+        height: self.top-pad + self.menu-body-height + self.bottom-pad;
+        x: self.left - self.left-pad;
+        y: self.top - self.lift - self.top-pad;
         close-policy: PopupClosePolicy.close-on-click-outside;
-        volume-content := VolumeMenu {
-            property <float> enter-amount: voice-menu-content.enter-amount;
-            opacity: self.enter-amount;
-            transform-scale: 0.88 + 0.12 * self.enter-amount;
-            transform-rotation: (1 - self.enter-amount) * -5deg;
-            transform-origin: { x: 0px, y: 0px };
-            visible: root.voice-menu-volume;
-            x: voice-menu.flip ? voice-menu-content.content-width - voice-menu.menu-width : 0px;
-            y: voice-menu.lift;
-            width: voice-menu.menu-width; height: self.content-height;
-            volume-person: root.volume-person; volume-name: root.volume-name; volume-live: root.volume-live;
-            voice-volume <=> root.voice-volume; stream-volume <=> root.stream-volume;
-            volume-changed(person, stream, volume, last) => { root.volume-changed(person, stream, volume, last); }
-        }
-        voice-menu-content := ContextMenu {
-            visible: root.voice-menu-rows;
-            x: 0px; y: voice-menu.head;
-            narrowest: 260px;
-            rows: root.menu-rows; submenus: root.menu-submenus;
-            room: root.width - 8px - root.anchor-x; tallest: root.height - 16px - voice-menu.head;
-            room-below: root.height - 8px - voice-menu.top - voice-menu.head;
-            chose(id) => {
-                root.anchor-profile(root.anchor-x, root.anchor-y, root.anchor-width, root.anchor-height);
-                root.profile-at-pointer = true;
-                root.choose-menu(root.menu-target, root.menu-person, id);
-                voice-menu.close();
+        Rectangle {
+            property <bool> above: voice-menu.top < root.anchor-y;
+            property <float> enter: Looks.better-animations ? 0 : 1;
+            init => { self.enter = 1; }
+            animate enter { duration: Popup.tooltip-enter; easing: ease-out; }
+            x: voice-menu.left-pad;
+            y: voice-menu.top-pad + (1 - self.enter) * (self.above ? -4px : 4px);
+            width: voice-menu.menu-body-width;
+            height: voice-menu.menu-body-height;
+            opacity: min(1.0, self.enter * 1.2);
+            transform-rotation: (1 - self.enter) * 0.8deg;
+            transform-origin: {
+                x: clamp(root.anchor-x - voice-menu.left, 0px, self.width),
+                y: self.above ? self.height : voice-menu.lift
+            };
+            volume-content := VolumeMenu {
+                visible: root.voice-menu-volume;
+                x: voice-menu.flip ? voice-menu-content.content-width - voice-menu.menu-width : 0px;
+                y: voice-menu.lift;
+                width: voice-menu.menu-width; height: self.content-height;
+                volume-person: root.volume-person; volume-name: root.volume-name; volume-live: root.volume-live;
+                voice-volume <=> root.voice-volume; stream-volume <=> root.stream-volume;
+                volume-changed(person, stream, volume, last) => { root.volume-changed(person, stream, volume, last); }
             }
-            toggled(id) => { root.choose-menu(root.menu-target, root.menu-person, id); }
-            close => { voice-menu.close(); }
+            voice-menu-content := ContextMenu {
+                animate-main: false;
+                visible: root.voice-menu-rows;
+                x: 0px; y: voice-menu.head;
+                narrowest: 260px;
+                rows: root.menu-rows; submenus: root.menu-submenus;
+                room: root.width - 8px - root.anchor-x; tallest: root.height - 16px - voice-menu.head;
+                room-below: root.height - 8px - voice-menu.top - voice-menu.head;
+                chose(id) => {
+                    root.anchor-profile(root.anchor-x, root.anchor-y, root.anchor-width, root.anchor-height);
+                    root.profile-at-pointer = true;
+                    root.choose-menu(root.menu-target, root.menu-person, id);
+                    voice-menu.close();
+                }
+                toggled(id) => { root.choose-menu(root.menu-target, root.menu-person, id); }
+                close => { voice-menu.close(); }
+            }
         }
     }
     // From a button, the menu opens left of it, level with its top, or right of
     // it when there isn't room.
+    // An Apps submenu opens on the menu's right, or its left near the
+    // window's right edge; the menu stays where it would be without.
     message-menu := PopupWindow {
-        width: min(root.width - 16px, max(root.menu-message.deleted ? 256px : 224px, menu-content.content-width));
-        height: menu-content.content-height;
-        x: root.anchor-pointer ? max(8px, min(root.width - self.width - 8px, root.anchor-x))
-            : root.anchor-x - self.width - 8px >= 8px ? root.anchor-x - self.width - 8px
-            : max(8px, min(root.width - self.width - 8px, root.anchor-x + root.anchor-width + 8px));
+        property <length> menu-width: root.menu-message.deleted ? 256px : 224px;
+        property <length> left: root.anchor-pointer ? max(8px, min(root.width - self.menu-width - 8px, root.anchor-x))
+            : root.anchor-x - self.menu-width - 8px >= 8px ? root.anchor-x - self.menu-width - 8px
+            : max(8px, min(root.width - self.menu-width - 8px, root.anchor-x + root.anchor-width + 8px));
+        property <bool> flip: self.left + menu-content.content-width > root.width - 8px;
+        width: menu-content.content-width; height: menu-content.content-height;
+        x: self.flip ? self.left - (menu-content.content-width - self.menu-width) : self.left;
         y: !root.anchor-pointer ? max(8px, min(root.height - self.height - 8px, root.anchor-y))
             : root.anchor-y + 4px + self.height <= root.height - 8px ? root.anchor-y : max(8px, root.anchor-y - self.height - 4px);
         close-policy: PopupClosePolicy.close-on-click-outside;
         menu-content := MessageMenu {
+            menu-width: message-menu.menu-width;
             opens-above: root.anchor-pointer && message-menu.y < root.anchor-y;
             menu-message: root.menu-message; selection: root.menu-selection; menu-can-react: root.menu-can-react; menu-reactions: root.menu-reactions;
             cancel-send(item) => { root.cancel-send(item); message-menu.close(); }
             can-start-thread: root.can-start-threads && !root.menu-aside;
+            // The open channel's commands, which a thread's message beside
+            // it isn't for.
+            app-commands: root.menu-aside ? [] : root.app-menu-commands; flip: message-menu.flip;
+            run-app-command(command, item) => { root.run-app-command(command, item); message-menu.close(); }
             start-thread(item) => { root.new-thread(item, "message"); message-menu.close(); }
             view-thread(room) => { root.open-aside(room); message-menu.close(); }
             view-reactions(item) => { root.view-reactions(item, ""); message-menu.close(); }
@@ -3086,6 +3215,8 @@ export component YapfastWindow inherits Window {
                                 dropdown-open <=> root.search-dropdown-open;
                                 selected-suggestion <=> root.search-suggestion-index;
                                 suggestion-count: root.search-filter-suggestions.length;
+                                suggestion-caret: root.search-suggestion-caret;
+                                suggestion-edit: root.search-suggestion-edit;
                                 search(text) => { root.search(text); }
                                 clear => { root.search-text = ""; root.search(""); root.search-dropdown-open = false; }
                                 edited(text) => {
@@ -3455,7 +3586,7 @@ export component YapfastWindow inherits Window {
                                                         Rectangle { horizontal-stretch: 1; Rectangle { height: 1px; background: message.unread-start ? Theme.accent : Theme.line; } }
                                                     }
                                                     MessageContent {
-                                                        message: message; active-item: root.active-item; preview: root.preview; reactions-enabled: root.reactions-enabled;
+                                                        message: message; active-item: root.active-item; preview: root.preview; reactions-enabled: root.reactions-enabled; bot-busy-item: root.bot-busy-item; bot-failed-item: root.bot-failed-item; bot-failed-text: root.bot-failed-text;
                                                         emoji-font: root.emoji-font; message-font-size: root.message-font-size;
                                                         collapse-long: root.collapse-long;
                                                         // The view keeps the message's top: it stops following
@@ -3471,15 +3602,26 @@ export component YapfastWindow inherits Window {
                                                         author-card(item, sender, x, y, width, height) => { root.author-card(item, sender, x, y, width, height); }
                                                         author-menu(item, sender, x, y) => { root.author-menu(item, sender, x, y); }
                                                         jump-to(item) => { root.jump-to(item); }
+                                                        // The command an app's answer names, written for its picker.
+                                                        can-use-commands: root.composer-enabled;
+                                                        use-command(name) => {
+                                                            root.slash-query(name);
+                                                            root.place-composer-caret(1000000);
+                                                            root.focus-composer();
+                                                        }
                                                         // A mention's card opens beside the pointer.
                                                         link-clicked(link) => {
                                                             root.anchor(row-pointer.absolute-position.x + row-pointer.mouse-x, row-pointer.absolute-position.y + row-pointer.mouse-y, 0px, 0px, true);
                                                             root.open-link(link);
                                                         }
                                                         open-link(link) => { root.open-link(link); }
+                                                        use-button(item, id) => { root.use-button(item, id); }
+                                                        open-select(item, id) => { root.open-select(item, id); }
                                                         open-thread(room) => { root.open-aside(room); }
                                                         react(item, key) => { root.react(item, key); }
                                                         retry(item) => { root.retry(item); }
+                                                        cancel-send(item) => { root.cancel-send(item); }
+                                                        dismiss-ephemeral(item) => { root.dismiss-ephemeral(item); }
                                                         reveal-attachment(id, index) => { root.reveal-attachment(id, index); }
                                                         view-image(id, index) => { root.view-image(id, index); }
                                                         open-sticker(item, index, x, y, width, height) => {
@@ -3774,21 +3916,31 @@ export component YapfastWindow inherits Window {
                                             placeholder: root.is-editing ? "Edit your message" : root.compose-label != "" ? "Write a reply" : root.room-selected ? root.composer-placeholder : "Write a message";
                                             edited(text) => { root.draft-edited(text); }
                                             accepted => { root.send(); }
-                                            suggesting: !root.suggesting-aside && (root.mentions.length > 0 || root.emoji-suggestions.length > 0);
+                                            suggesting: !root.suggesting-aside && ((root.command-picker-open && root.command-choices.length > 0) || root.mentions.length > 0 || root.emoji-suggestions.length > 0);
+                                            picking: !root.suggesting-aside && root.command-picker-open;
                                             caret(text, offset) => { root.composer-caret(text, offset); }
+                                            command-name: root.command-name; command-options: root.command-options; command-focus: root.command-focus;
+                                            command-option-clicked(index) => { root.focus-command-option(index); }
+                                            command-tab(step) => { root.focus-command-option(Math.mod(root.command-focus + step + root.command-options.length, root.command-options.length)); }
+                                            command-file(index) => { root.command-file(index); }
+                                            command-closed(back) => { root.close-command(back); }
                                             suggestion-moved(step) => {
-                                                if root.mentions.length > 0 {
+                                                if root.command-picker-open && root.command-choices.length > 0 {
+                                                    root.command-choice-index = Math.mod(root.command-choice-index + step + root.command-choices.length, root.command-choices.length);
+                                                } else if root.mentions.length > 0 {
                                                     root.mention-index = Math.mod(root.mention-index + step + root.mentions.length, root.mentions.length);
                                                 } else {
                                                     root.emoji-suggestion-index = Math.mod(root.emoji-suggestion-index + step + root.emoji-suggestions.length, root.emoji-suggestions.length);
                                                 }
                                             }
                                             suggestion-chosen => {
-                                                if root.mentions.length > 0 { root.mention-chosen(root.mention-index); }
+                                                if root.command-picker-open && root.command-choices.length > 0 { root.pick-command(root.command-choice-index); }
+                                                else if root.mentions.length > 0 { root.mention-chosen(root.mention-index); }
                                                 else { root.emoji-suggestion-chosen(root.emoji-suggestion-index); }
                                             }
                                             suggestion-dismissed => {
-                                                if root.mentions.length > 0 { root.mention-dismissed(); } else { root.emoji-suggestion-dismissed(); }
+                                                if root.command-picker-open && root.command-choices.length > 0 { root.close-command(false); }
+                                                else if root.mentions.length > 0 { root.mention-dismissed(); } else { root.emoji-suggestion-dismissed(); }
                                             }
                                             up-from-empty => { root.edit-last(); }
                                             up-to-messages => { root.browse-messages(); }
@@ -3877,6 +4029,8 @@ export component YapfastWindow inherits Window {
                     if root.search-open: SearchPanel {
                         width: 420px;
                         results: root.search-results; heading: root.search-heading; note: root.search-note;
+                        total: root.search-total; first: root.search-first;
+                        start-at(position) => { root.search-start-at(position); }
                         more: root.search-more; loading: root.search-loading;
                         jump(room, item) => { root.jump-in-room(room, item); }
                         open-link(link) => { root.open-link(link); }
@@ -3920,7 +4074,7 @@ export component YapfastWindow inherits Window {
                         typing-tick: root.aside-typing-tick;
                         composer-focused => { root.aside-composer-last = true; }
                         escape-composing => { return root.escape-composing(); }
-                        busy: root.busy; composer-enabled: root.aside-composer-enabled; can-send: root.aside-can-send;
+                        busy: root.busy; bot-busy-item: root.bot-busy-item; bot-failed-item: root.bot-failed-item; bot-failed-text: root.bot-failed-text; composer-enabled: root.aside-composer-enabled; can-send: root.aside-can-send;
                         reactions-enabled: root.aside-reactions-enabled; new-reactions-enabled: root.aside-new-reactions-enabled;
                         sending: root.sending; compose-label: root.aside-compose-label; draft <=> root.aside-draft;
                         reply-ping: root.aside-reply-ping; toggle-reply-ping => { root.aside-toggle-reply-ping(); }
@@ -3981,8 +4135,12 @@ export component YapfastWindow inherits Window {
                         jump-to(item) => { root.jump-to(item); }
                         link-clicked(link, x, y) => { root.anchor(x, y, 0px, 0px, true); root.open-link(link); }
                         open-link(link) => { root.open-link(link); }
+                        use-button(item, id) => { root.use-button(item, id); }
+                        open-select(item, id) => { root.open-select(item, id); }
                         open-thread(room) => { root.open-aside(room); }
                         retry(item) => { root.retry(item); }
+                        cancel-send(item) => { root.cancel-send(item); }
+                        dismiss-ephemeral(item) => { root.dismiss-ephemeral(item); }
                         reveal-attachment(id, index) => { root.reveal-attachment(id, index); }
                         view-image(id, index) => { root.view-image(id, index); }
                         open-sticker(item, index, x, y, width, height) => {
@@ -4178,7 +4336,17 @@ export component YapfastWindow inherits Window {
     }
     // Mention suggestions, just above the composer and as wide as it, over a
     // reply's or an edit's bar; see MentionList.
-    if root.mentions.length > 0 && root.composer-enabled && !root.suggesting-aside: MentionList {
+    // The `/` picker, or what the focused option of an app's command may
+    // take, in the same place; see CommandList.
+    if root.command-picker-open && root.composer-enabled && !root.suggesting-aside: CommandList {
+        x: composer-box.absolute-position.x;
+        width: composer-box.width;
+        y: composer-box.absolute-position.y - (root.compose-label != "" ? 36px : 0px) - self.height - 8px;
+        choices: root.command-choices; heading: root.command-heading;
+        choice-index: root.command-choice-index; commands: root.command-rows-are-commands;
+        chosen(index) => { root.pick-command(index); }
+    }
+    if root.mentions.length > 0 && root.composer-enabled && !root.suggesting-aside && !root.command-picker-open: MentionList {
         x: composer-box.absolute-position.x;
         width: composer-box.width;
         y: composer-box.absolute-position.y - (root.compose-label != "" ? 36px : 0px) - self.height - 8px;
@@ -4186,7 +4354,7 @@ export component YapfastWindow inherits Window {
         mention-chosen(index) => { root.mention-chosen(index); }
     }
     // Emoji suggestions, in the same place; see EmojiSuggestions.
-    if root.emoji-suggestions.length > 0 && root.mentions.length == 0 && root.composer-enabled && !root.suggesting-aside: EmojiSuggestions {
+    if root.emoji-suggestions.length > 0 && root.mentions.length == 0 && root.composer-enabled && !root.suggesting-aside && !root.command-picker-open: EmojiSuggestions {
         x: composer-box.absolute-position.x;
         width: composer-box.width;
         y: composer-box.absolute-position.y - (root.compose-label != "" ? 36px : 0px) - self.height - 8px;
@@ -4246,7 +4414,7 @@ export component YapfastWindow inherits Window {
             unmute-on-join <=> root.unmute-on-join; level-voice <=> root.level-voice;
             noise-suppression <=> root.noise-suppression; noise-strength <=> root.noise-strength; dereverb <=> root.dereverb; discord: root.discord-linked;
             sensitivity <=> root.sensitivity; gate-level: root.gate-level; gate-sending: root.gate-sending; gate-meter-note: root.gate-meter-note;
-            input-mode <=> root.input-mode; talk-key: root.talk-key; talk-recording <=> root.talk-recording;
+            input-mode <=> root.input-mode; talk-key: root.talk-key; talk-recording <=> root.talk-recording; recorded-keys: root.recorded-keys;
             talk-delay <=> root.talk-delay; talk-note: root.talk-note;
             microphone-volume <=> root.microphone-volume; speaker-volume <=> root.speaker-volume;
             soundboard-volume <=> root.soundboard-volume; entrance-servers: root.entrance-servers;
@@ -4263,6 +4431,19 @@ export component YapfastWindow inherits Window {
             select-camera(index) => { root.select-camera(index); }
             refresh-devices => { root.refresh-devices(); }
             preferences-changed => { root.preferences-changed(); }
+        }
+        if root.settings-section == 10: KeybindSettings {
+            rows: root.keybind-rows; note: root.keybinds-note;
+            recording: root.keybind-recording; recorded-keys: root.recorded-keys;
+            add => { root.add-keybind(); }
+            remove(index) => { root.remove-keybind(index); }
+            action-chosen(index, action) => { root.keybind-action-chosen(index, action); }
+            record(index, on) => { root.record-keybind(index, on); }
+        }
+        if root.settings-section == 11: VerticalLayout {
+            spacing: 12px;
+            Text { text: "About"; color: Theme.text; font-size: 24px; font-weight: 700; }
+            Text { text: "Yapfast " + root.build-version; color: Theme.text; font-size: 16px; }
         }
         if root.settings-section == 2: MessageSettings {
             message-font-size: root.message-font-size;
@@ -4531,10 +4712,16 @@ export component YapfastWindow inherits Window {
     // A member's card, beside the member list. Escape or a click outside closes it.
     // A card closed from the keyboard goes from under the pointer, which then
     // never leaves its badge to hide the tooltip.
+    property <ProfileData> closed-profile;
+    function release-closed-profile() {
+        if !root.profile-open && !profile-motion.shown && !large-profile-motion.shown {
+            root.profile = root.closed-profile;
+        }
+    }
     profile-motion := PopupMotion {
         open: root.profile-open && !root.profile-large;
         entrance: Popup.popover-enter;
-        changed shown => { root.hide-badge-tips(); }
+        changed shown => { root.hide-badge-tips(); root.release-closed-profile(); }
     }
     if profile-motion.shown: Rectangle {
         TouchArea { clicked => { root.close-profile(); } }
@@ -4573,7 +4760,7 @@ export component YapfastWindow inherits Window {
     // A full profile over the window, as the viewer shows images.
     large-profile-motion := PopupMotion {
         open: root.profile-open && root.profile-large;
-        changed shown => { root.hide-badge-tips(); }
+        changed shown => { root.hide-badge-tips(); root.release-closed-profile(); }
     }
     if large-profile-motion.shown: Rectangle {
         background: rgba(0, 0, 0, 0.7 * large-profile-motion.amount);
@@ -4585,21 +4772,53 @@ export component YapfastWindow inherits Window {
                 return reject;
             }
         }
-        ProfileCard {
-            opacity: Popup.opacity(large-profile-motion.amount); transform-scale: Popup.scale(large-profile-motion.amount);
-            large: true;
-            width: min(600px, root.width - 64px); limit: root.height - 64px;
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + Popup.lift(large-profile-motion.amount);
-            data: root.profile;
-            close => { root.close-profile(); }
-            befriend => { root.befriend(root.profile.id); }
-            message-person(user) => { root.close-profile(); root.message-person(user); }
-            more(x, y) => { root.open-context-menu(root.profile.id, true, x, y); }
-            open-link(link) => { root.open-link(link); }
-            open-server(server, x, y, width, height) => { root.open-server-card(server, x, y, width, height); }
-            // In the full profile, a friend's opens full too.
-            open-friend(id, x, y, width, height) => { root.show-friend-profile(id, true); }
-            edit-profile => { root.close-profile(); root.edit-profile(); }
+        full-profile := Rectangle {
+            property <bool> split: root.width >= 800px && root.profile.frame.length == 0 && (root.profile.board-tab || root.profile.wishlist-tab);
+            width: self.split ? min(max(root.width * 0.7, 720px), root.width - 32px) : min(600px, root.width - 64px);
+            height: self.split ? min(max(root.height * 0.75, 520px), root.height - 32px) : profile-details.natural-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 + Popup.lift(large-profile-motion.amount);
+            opacity: Popup.opacity(large-profile-motion.amount);
+            transform-scale: Popup.scale(large-profile-motion.amount);
+            background: self.split ? Theme.sidebar : transparent;
+            border-radius: 12px;
+            border-width: self.split ? 1px : 0px; border-color: Theme.edge;
+            TouchArea { }
+            profile-details := ProfileCard {
+                large: true;
+                separate-tabs: full-profile.split;
+                width: full-profile.split ? max(340px, full-profile.width * 0.4 - 8px) : full-profile.width;
+                height: full-profile.split ? full-profile.height - 16px : self.natural-height;
+                limit: root.height - 64px;
+                x: full-profile.split ? 8px : 0px; y: self.x;
+                data: root.profile;
+                // As Discord's, a window too short to leave room above the card
+                // shows no frame.
+                show-frame: !full-profile.split && root.height > 785px;
+                tab-opened(page) => { root.profile-tab-opened(page); }
+                close => { root.close-profile(); }
+                befriend => { root.befriend(root.profile.id); }
+                message-person(user) => { root.close-profile(); root.message-person(user); }
+                more(x, y) => { root.open-context-menu(root.profile.id, true, x, y); }
+                open-link(link) => { root.open-link(link); }
+                open-server(server, x, y, width, height) => { root.open-server-card(server, x, y, width, height); }
+                // In the full profile, a friend's opens full too.
+                open-friend(id, x, y, width, height) => { root.show-friend-profile(id, true); }
+                edit-profile => { root.close-profile(); root.edit-profile(); }
+            }
+            if full-profile.split: ProfileTabs {
+                x: profile-details.width + 28px; y: 8px;
+                width: parent.width - self.x - 14px; height: parent.height - 16px;
+                data: root.profile;
+                profile-view: true;
+                open-link(url) => { root.open-link(url); }
+                page-opened(page) => { root.profile-tab-opened(page); }
+            }
+            if full-profile.split: IconButton {
+                x: parent.width - 52px; y: 15px; height: self.width;
+                icon: @image-url("icons/x.svg"); label: "Close profile"; size: 32px; glyph: 18px;
+                clicked => { root.close-profile(); }
+            }
         }
     }
     // A mutual server's card, over the profile that lists it. Clicking
@@ -5009,6 +5228,26 @@ export component YapfastWindow inherits Window {
         close-switcher => { root.close-switcher(); }
     }
     // Over everything, as the request it confirms may come from anywhere.
+    if root.bot-modal-open: BotModalDialog {
+        heading: root.bot-modal-heading; fields: root.bot-modal-fields; supported: root.bot-modal-supported;
+        saving: root.bot-modal-saving; error: root.bot-modal-error;
+        field-edited(index, value) => { root.bot-modal-field-edited(index, value); }
+        open-select(index) => { root.bot-modal-open-select(index); }
+        choose-files(index) => { root.bot-modal-choose-files(index); }
+        remove-file(index, file) => { root.bot-modal-remove-file(index, file); }
+        open-link(link) => { root.open-link(link); }
+        submit => { root.bot-modal-submit(); }
+        close => { root.bot-modal-close(); }
+    }
+    // Under the menu that opened it, in a message or a form.
+    if root.bot-select-open: BotSelectDropdown {
+        heading: root.bot-select-heading; choices: root.bot-select-choices;
+        query: root.bot-select-query; searchable: root.bot-select-searchable;
+        min-values: root.bot-select-min; max-values: root.bot-select-max;
+        toggle(index) => { root.bot-select-toggle(index); }
+        search(query) => { root.bot-select-search(query); }
+        close => { root.bot-select-close(); }
+    }
     mfa-motion := PopupMotion { open: root.mfa-open; }
     if mfa-motion.shown: MfaDialog {
         motion: mfa-motion.amount;
@@ -5078,8 +5317,7 @@ export component YapfastWindow inherits Window {
         property <bool> right: Tip.side == 1 || self.server-tip;
         property <bool> settings-tip: Tip.side == 4;
         property <bool> above: Tip.side == 0 || self.settings-tip;
-        property <string> anchor: self.server-tip || self.settings-tip
-            ? Tip.text + "|" + Tip.x / 1px + "|" + Tip.y / 1px + "|" + Tip.side : "";
+        property <string> anchor: Tip.text + "|" + Tip.x / 1px + "|" + Tip.y / 1px + "|" + Tip.side;
         property <bool> restarting;
         changed anchor => {
             if self.anchor != "" && Looks.better-animations {
@@ -5093,19 +5331,17 @@ export component YapfastWindow inherits Window {
             triggered => { tip-card.restarting = false; tip-card.enter = 1; }
         }
         animate enter {
-            duration: self.restarting ? 0ms
-                : (self.server-tip || self.settings-tip ? Popup.anchor-tooltip-enter : Popup.tooltip-enter);
+            duration: self.restarting ? 0ms : Popup.tooltip-enter;
             easing: ease-out;
         }
         property <length> base-x: self.right ? Tip.x + 10px : max(8px, min(root.width - self.w - 8px, Tip.x - self.w / 2));
         property <length> base-y: self.right ? Tip.y - self.h / 2 : self.above ? max(4px, Tip.y - self.h - 6px) : Tip.y + 6px;
-        x: self.base-x + (Looks.better-animations && self.right ? (self.enter - 1.0) * (self.server-tip ? 9px : 3px) : 0px);
-        y: self.base-y + (Looks.better-animations ? (self.above ? (1.0 - self.enter) * (self.settings-tip ? 9px : 3px) : Tip.side == 2 ? (self.enter - 1.0) * 3px : 0px) : 0px);
+        x: self.base-x - (Looks.better-animations && self.right ? (1.0 - self.enter) * 2px : 0px);
+        y: self.base-y + (Looks.better-animations ? (1.0 - self.enter) * 5px : 0px);
         width: self.w; height: self.h;
-        opacity: Looks.better-animations ? self.enter : 1.0;
-        transform-scale: Looks.better-animations && !self.server-tip && !self.settings-tip ? (0.97 + 0.03 * self.enter) : 1.0;
-        transform-rotation: Looks.better-animations ? (1 - self.enter) * -8deg : 0deg;
-        transform-origin: { x: self.w / 2, y: self.h };
+        opacity: Looks.better-animations ? min(1.0, self.enter * 1.2) : 1.0;
+        transform-rotation: Looks.better-animations ? (1 - self.enter) * 9deg : 0deg;
+        transform-origin: { x: self.right ? 0px : self.w / 2, y: self.right ? self.h / 2 : self.above ? self.h : 0px };
         border-radius: 6px; background: Theme.tooltip;
         drop-shadow-blur: 12px; drop-shadow-color: #00000080; drop-shadow-offset-y: 3px;
         tip-text := Text {

@@ -69,7 +69,9 @@ export component SettingsNavigation inherits Rectangle {
                     { text: "Plugins", icon: @image-url("../icons/puzzle.svg"), id: 9 },
                     { text: "Discord", icon: @image-url("../icons/discord.svg"), id: 4 },
                     { text: "Game Activity", icon: @image-url("../icons/play.svg"), id: 8 },
+                    { text: "Keybinds", icon: @image-url("../icons/keyboard.svg"), id: 10 },
                     { text: "Advanced", icon: @image-url("../icons/settings.svg"), id: 6 },
+                    { text: "About", icon: @image-url("../icons/help-circle.svg"), id: 11 },
                 ]: VerticalLayout {
                     if entry.heading && root.query == "": VerticalLayout {
                         padding-top: entry.text == "Account" ? 0px : 16px;

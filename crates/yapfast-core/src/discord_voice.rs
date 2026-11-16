@@ -36,6 +36,8 @@ struct Share {
     /// The stream's key once Discord was asked to start it, so stopping ends
     /// it even before Discord answers.
     key: Option<String>,
+    reconnect_attempts: u8,
+    last_reconnect: Option<std::time::Instant>,
     /// Uploading the stream's latest preview.
     preview: Option<tokio::task::JoinHandle<()>>,
 }
@@ -60,8 +62,23 @@ impl Share {
             worker,
             reports,
             key: None,
+            reconnect_attempts: 0,
+            last_reconnect: None,
             preview: None,
         })
+    }
+
+    fn allow_reconnect(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self.last_reconnect.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(60)) {
+            self.reconnect_attempts = 0;
+        }
+        if self.reconnect_attempts >= 2 {
+            return false;
+        }
+        self.reconnect_attempts += 1;
+        self.last_reconnect = Some(now);
+        true
     }
 
     /// Uploads a preview of the stream, in place of one still uploading.
@@ -603,7 +620,7 @@ pub(crate) async fn call(
                 command = commands.recv() => {
                     match command {
                         None | Some(Command::Leave) => break,
-                        Some(Command::Join(_)) => state.error = Some("Leave your current voice channel before joining another.".into()),
+                        Some(Command::Join(_)) => state.report_error(Some("Leave your current voice channel before joining another.".into())),
                         Some(Command::Mute(true)) => {
                             capture = None;
                             state.muted = true;
@@ -622,7 +639,7 @@ pub(crate) async fn call(
                                 }
                                 Err(error) => {
                                     state.muted = true;
-                                    state.error = Some(error.to_string());
+                                    state.report_error(Some(error.to_string()));
                                 }
                             }
                         }
@@ -643,7 +660,7 @@ pub(crate) async fn call(
                                     Ok(opened) => capture = Some(opened),
                                     Err(_) => {
                                         state.muted = true;
-                                        state.error = Some("Could not switch microphone. Refresh devices and choose another.".into());
+                                        state.report_error(Some("Could not switch microphone. Refresh devices and choose another.".into()));
                                     }
                                 }
                             }
@@ -654,7 +671,7 @@ pub(crate) async fn call(
                             speakers = None;
                             match open_discord_speakers(state, &played, &hearing) {
                                 Ok(opened) => speakers = Some(opened),
-                                Err(_) => state.error = Some("Could not switch speakers. Refresh devices and choose another.".into()),
+                                Err(_) => state.report_error(Some("Could not switch speakers. Refresh devices and choose another.".into())),
                             }
                         }
                         Some(Command::Camera(id)) => {
@@ -689,7 +706,7 @@ pub(crate) async fn call(
                                         share = Some(started);
                                         state.error = None;
                                     }
-                                    Err(error) => state.error = Some(format!("{error:#}")),
+                                    Err(error) => state.report_error(Some(format!("{error:#}"))),
                                 }
                             }
                         }
@@ -834,7 +851,7 @@ pub(crate) async fn call(
                                 stopped.stop(&mut call);
                             }
                             state.camera_phase = CameraPhase::Off;
-                            state.error = Some(error.to_string());
+                            state.report_error(Some(error.to_string()));
                         }
                     }
                     discord.set_self(guild, &channel, state.muted, state.deafened, state.camera_phase == CameraPhase::On);
@@ -864,6 +881,19 @@ pub(crate) async fn call(
                                 sharing.phase = SharePhase::Live;
                             }
                         }
+                        Some(Report::ReconnectShare { reason }) => {
+                            if starting.is_none() {
+                                if share.as_mut().is_some_and(Share::allow_reconnect) {
+                                    tracing::warn!(%reason, "reopening outgoing stream connection");
+                                    let (discord, guild, channel) =
+                                        (discord.clone(), guild.to_owned(), channel.to_owned());
+                                    starting = Some(Box::pin(async move { discord.go_live(&guild, &channel).await }));
+                                } else if let Some(stopped) = share.take() {
+                                    stopped.stop(discord, state);
+                                    state.report_error(Some(format!("Lost the stream connection: {reason}")));
+                                }
+                            }
+                        }
                         Some(Report::Preview { thumbnail }) => {
                             if let Some(going) = share.as_mut() {
                                 going.show_preview(discord, thumbnail);
@@ -877,13 +907,18 @@ pub(crate) async fn call(
                             continue;
                         }
                         // Only a video's worker reports these.
-                        Some(Report::Opened { .. } | Report::Finished | Report::Screen { .. }) => {}
+                        Some(
+                            Report::Opened { .. }
+                            | Report::Needs { .. }
+                            | Report::Finished
+                            | Report::Screen { .. },
+                        ) => {}
                         Some(Report::Ended { error }) => {
                             if let Some(stopped) = share.take() {
                                 stopped.stop(discord, state);
                             }
                             starting = None;
-                            state.error = error;
+                            state.report_error(error);
                         }
                         // The reports end with Ended, so this is a worker gone quietly.
                         None => {
@@ -905,15 +940,25 @@ pub(crate) async fn call(
                                 && let Some(stopped) = share.take()
                             {
                                 stopped.stop(discord, state);
-                                state.error = Some(error.to_string());
+                                state.report_error(Some(error.to_string()));
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(error = format!("{error:#}"), kind = kind(guild), "could not start the stream");
-                            if let Some(stopped) = share.take() {
-                                stopped.stop(discord, state);
+                            tracing::warn!(error = format!("{error:#}"), kind = kind(guild), "could not open the stream connection");
+                            let was_live = state.sharing.as_ref().is_some_and(|sharing| sharing.phase == SharePhase::Live);
+                            if was_live && share.as_mut().is_some_and(Share::allow_reconnect) {
+                                let (discord, guild, channel) =
+                                    (discord.clone(), guild.to_owned(), channel.to_owned());
+                                starting = Some(Box::pin(async move {
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    discord.go_live(&guild, &channel).await
+                                }));
+                            } else {
+                                if let Some(stopped) = share.take() {
+                                    stopped.stop(discord, state);
+                                }
+                                state.report_error(Some(error.to_string()));
                             }
-                            state.error = Some(error.to_string());
                         }
                     }
                     snapshots.send_replace(state.clone());
@@ -948,7 +993,7 @@ pub(crate) async fn call(
                             tracing::warn!(error = format!("{error:#}"), "could not read the favourite sounds");
                         }
                         SoundEvent::Refused(error) => {
-                            state.error = Some(error);
+                            state.report_error(Some(error));
                             snapshots.send_replace(state.clone());
                         }
                     }
@@ -997,8 +1042,10 @@ pub(crate) async fn call(
                         WatchEvent::Report(_, Some(
                             Report::Sharing { .. }
                             | Report::Sending(_)
+                            | Report::ReconnectShare { .. }
                             | Report::Preview { .. }
                             | Report::Opened { .. }
+                            | Report::Needs { .. }
                             | Report::Finished
                             | Report::Screen { .. },
                         )) => {}
@@ -1016,7 +1063,7 @@ pub(crate) async fn call(
                             focused_stream = watches.first().map(|w| w.user.clone());
                         }
                         if let Some(err) = error {
-                            state.error = Some(err);
+                            state.report_error(Some(err));
                         }
                     }
                     snapshots.send_replace(state.clone());
@@ -1084,7 +1131,7 @@ pub(crate) async fn call(
                         {
                             stopped.stop(discord, state);
                             if reason.as_deref() != Some("user_requested") {
-                                state.error = Some("Discord ended your stream.".into());
+                                state.report_error(Some("Discord ended your stream.".into()));
                             }
                             snapshots.send_replace(state.clone());
                         }
@@ -1122,7 +1169,7 @@ pub(crate) async fn call(
                             && let Some(stopped) = share.take()
                         {
                             stopped.stop(discord, state);
-                            state.error = Some(error.to_string());
+                            state.report_error(Some(error.to_string()));
                         }
                         for w in &mut watches {
                             if w.key == next.stream_key && w.opening.is_none() {
@@ -1194,7 +1241,7 @@ pub(crate) async fn call(
     for stopped in watches.drain(..) {
         stopped.stop(discord, state);
     }
-    state.phase = Phase::Leaving;
+    state.leaving();
     snapshots.send_replace(state.clone());
     drop(ringback);
     drop(capture);

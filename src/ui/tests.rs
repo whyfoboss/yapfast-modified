@@ -70,6 +70,47 @@ fn a_notice_is_a_group_of_its_own_with_an_icon() {
     assert_eq!(message_row_plain(&said).notice, "");
 }
 
+#[test]
+fn an_apps_answer_starts_a_group_under_who_used_which_command() {
+    use yapfast_core::chat::UsedCommand;
+    let thought = ChatMessage {
+        item: "d:4".into(),
+        author: "Status Bot".into(),
+        sender: "discord:9".into(),
+        body: "Pong!".into(),
+        timestamp: 100,
+        ..Default::default()
+    };
+    let answer = ChatMessage {
+        item: "d:5".into(),
+        timestamp: 110,
+        used: Some(UsedCommand {
+            user: "Alice".into(),
+            sender: "discord:1".into(),
+            avatar: None,
+            color: Some(0x3498db),
+            name: "/echo".into(),
+            slash: Some("echo".into()),
+            target: None,
+        }),
+        ..thought.clone()
+    };
+    assert!(!messages::continues(&thought, &answer));
+    let row = message_row_plain(&answer);
+    assert!(row.has_command && !row.has_reply);
+    assert_eq!(
+        (
+            row.command_user.as_str(),
+            row.command_sender.as_str(),
+            row.command_name.as_str(),
+            row.command_slash.as_str()
+        ),
+        ("Alice", "1", "/echo", "echo")
+    );
+    assert!(row.command_has_color);
+    assert!(!message_row_plain(&thought).has_command);
+}
+
 #[cfg(feature = "discord")]
 #[test]
 fn statuses_show_their_custom_emoji_as_pictures() {
@@ -924,6 +965,92 @@ fn preferences_set_the_clock_text_size_previews_and_unmuting() {
 }
 
 #[test]
+fn keybinds_are_watched_as_settings_say() {
+    let mut layout: Layout = serde_json::from_value(serde_json::json!({
+        "push_to_talk_key": { "scancode": 47, "name": "V", "trigger": "v" },
+        "keybinds": [
+            { "id": 1, "action": "toggle_mute", "keys": {
+                "scancode": 50, "name": "M", "with": [{ "scancode": 29, "name": "Left Ctrl" }]
+            } },
+            { "id": 2, "action": "push_to_talk", "keys": { "scancode": 48, "name": "B" } },
+            { "id": 3, "action": "toggle_deafen" },
+            { "id": 4, "action": "toggle_go_live", "keys": { "scancode": 32, "name": "D" } },
+        ],
+    }))
+    .unwrap();
+    let ids = |layout: &Layout| -> Vec<String> {
+        layout
+            .watched_keybinds()
+            .into_iter()
+            .map(|watched| watched.id)
+            .collect()
+    };
+    // In voice activity push to talk does nothing; a keybind without keys
+    // or an action from a later build isn't watched.
+    assert_eq!(ids(&layout), ["keybind-1"]);
+    assert_eq!(layout.watched_keybinds()[0].keys.name(), "Ctrl + M");
+    layout.input_mode = InputMode::PushToTalk;
+    assert_eq!(ids(&layout), ["push-to-talk", "keybind-1", "keybind-2"]);
+    // Saved again, the action from a later build stays Unassigned rather
+    // than failing the file.
+    let saved = serde_json::to_value(&layout).unwrap();
+    assert_eq!(saved["keybinds"][3]["action"], "unassigned");
+    assert_eq!(saved["keybinds"][0]["keys"]["with"][0]["scancode"], 29);
+    let read: Layout = serde_json::from_value(saved).unwrap();
+    assert_eq!(read.keybinds, layout.keybinds);
+}
+
+#[test]
+fn the_keybinds_page_adds_chooses_and_removes_keybinds() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    // Keybinds without keys watch nothing, so this test never asks the
+    // desktop for keys.
+    window.invoke_add_keybind();
+    window.invoke_add_keybind();
+    let rows = window.get_keybind_rows();
+    assert_eq!(rows.row_count(), 2);
+    let first = rows.row_data(0).unwrap();
+    assert_eq!(first.action, 0);
+    assert_eq!(first.keys, "");
+    assert!(
+        first
+            .description
+            .starts_with("This action doesn't do anything!")
+    );
+    window.invoke_keybind_action_chosen(0, 4);
+    window.invoke_keybind_action_chosen(1, 99);
+    let row = window.get_keybind_rows().row_data(0).unwrap();
+    assert_eq!(row.action, 4);
+    assert_eq!(
+        row.description,
+        "Toggle your speaker's playback on and off. Also disables your microphone while deafened."
+    );
+    window.invoke_record_keybind(1, true);
+    assert_eq!(window.get_keybind_recording(), 1);
+    window.invoke_record_talk_key(true);
+    assert_eq!(window.get_keybind_recording(), -1, "one recorder at a time");
+    assert!(window.get_talk_recording());
+    window.invoke_record_talk_key(false);
+    window.invoke_remove_keybind(0);
+    window.invoke_remove_keybind(5);
+    let saved = Layout::read(directory.path());
+    assert_eq!(saved.keybinds.len(), 1);
+    assert_eq!(saved.keybinds[0].id, 2, "ids stay with their keybinds");
+    window.invoke_add_keybind();
+    assert_eq!(Layout::read(directory.path()).keybinds[1].id, 3);
+    assert!(adapter.borrow().keybinds.is_none());
+}
+
+#[test]
 fn push_to_talk_keeps_its_mode_key_and_release_delay() {
     i_slint_backend_testing::init_no_event_loop();
     let defaults: Layout = serde_json::from_str("{}").unwrap();
@@ -1167,6 +1294,51 @@ fn call_volumes_play_while_dragged_and_are_remembered() {
 }
 
 #[test]
+fn the_share_menu_fits_a_short_window_and_keeps_its_button() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(800., 560.));
+    // More than the window is tall: a screen, twelve windows and four cameras.
+    let titles = |kind: &str, count: usize| {
+        let titles: Vec<SharedString> = (0..count)
+            .map(|index| format!("{kind} {index}").into())
+            .collect();
+        ModelRc::new(VecModel::from(titles))
+    };
+    window.set_share_lists(true);
+    window.set_share_screens(ModelRc::new(VecModel::from(vec![ShareScreen {
+        title: "Entire screen".into(),
+        picture: Default::default(),
+    }])));
+    window.set_share_windows(titles("Window", 12));
+    window.set_share_cameras(titles("Camera", 4));
+    let went = Rc::new(Cell::new(None));
+    let seen = went.clone();
+    window.on_go_live(move |source, _, _, _| seen.set(Some(source)));
+    window.invoke_show_share_menu();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(50));
+    // The menu ends 8px above the window's bottom, and Go Live is its last
+    // row, in view without scrolling.
+    let position = slint::LogicalPosition::new(176., 530.);
+    let button = PointerEventButton::Left;
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    assert_eq!(went.get(), Some(0), "Go Live is in the window");
+    window.hide().unwrap();
+}
+
+#[test]
 fn sound_settings_are_remembered() {
     i_slint_backend_testing::init_no_event_loop();
     let directory = tempfile::tempdir().unwrap();
@@ -1387,6 +1559,7 @@ fn a_selection_runs_across_messages_with_their_names_and_times() {
 fn pictures_on_their_way_hold_their_place_as_skeletons() {
     let attachment = |name: &str, preview_failed| yapfast_core::chat::Attachment {
         voice_ms: None,
+        voice_waveform: None,
         name: name.into(),
         size: Some(1000),
         image: true,
@@ -1398,6 +1571,7 @@ fn pictures_on_their_way_hold_their_place_as_skeletons() {
         spoiler: false,
         video: false,
         url: None,
+        description: None,
     };
     let row = message_row_plain(&ChatMessage {
         attachments: vec![attachment("wide.png", false)],
@@ -1664,6 +1838,7 @@ fn a_messages_sticker_is_160px_square() {
     let row = message_row_plain(&ChatMessage {
         attachments: vec![yapfast_core::chat::Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "Wave".into(),
             size: None,
             image: true,
@@ -1675,6 +1850,7 @@ fn a_messages_sticker_is_160px_square() {
             spoiler: false,
             video: false,
             url: None,
+            description: None,
         }],
         ..Default::default()
     });
@@ -1697,6 +1873,7 @@ fn a_selection_copies_the_pictures_it_runs_through() {
             body: "Look at this.".into(),
             attachments: vec![yapfast_core::chat::Attachment {
                 voice_ms: None,
+                voice_waveform: None,
                 name: "cat.png".into(),
                 size: None,
                 image: true,
@@ -1708,6 +1885,7 @@ fn a_selection_copies_the_pictures_it_runs_through() {
                 spoiler: false,
                 video: false,
                 url: None,
+                description: None,
             }],
             ..Default::default()
         },
@@ -5674,6 +5852,7 @@ fn closing_the_viewer_lets_go_of_its_picture() {
         item: "i0".into(),
         attachments: vec![yapfast_core::chat::Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "a.png".into(),
             size: None,
             image: true,
@@ -5690,6 +5869,7 @@ fn closing_the_viewer_lets_go_of_its_picture() {
             spoiler: false,
             video: false,
             url: None,
+            description: None,
         }],
         ..Default::default()
     })]);
@@ -5720,6 +5900,7 @@ fn a_pictures_menu_links_to_it_when_it_has_an_address() {
     bind_callbacks(&window, &adapter);
     let file = |url: Option<&str>| yapfast_core::chat::Attachment {
         voice_ms: None,
+        voice_waveform: None,
         name: "a.png".into(),
         size: None,
         image: true,
@@ -5731,6 +5912,7 @@ fn a_pictures_menu_links_to_it_when_it_has_an_address() {
         spoiler: false,
         video: false,
         url: url.map(Into::into),
+        description: None,
     };
     adapter.borrow_mut().app.state.messages = Arc::new(vec![Arc::new(ChatMessage {
         item: "i0".into(),
@@ -7848,6 +8030,76 @@ fn pronouns_can_be_typed_from_the_profile_card() {
 
 #[test]
 #[cfg(feature = "discord")]
+fn own_profile_bio_scrolls_inside_its_preview() {
+    use i_slint_core::{item_tree::ItemRc, items::Flickable, window::WindowInner};
+    use slint::platform::WindowEvent;
+    use std::ops::ControlFlow;
+
+    let (window, adapter, _directory) = discord_server_window_granting(0);
+    window.invoke_edit_profile();
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.apply(Event::OwnProfile {
+            server: None,
+            result: Ok(yapfast_core::chat::OwnProfile {
+                fallback: yapfast_core::chat::Profile {
+                    name: "Alice".into(),
+                    bio: format!("{}Last line", "Line of bio.\n\n".repeat(12)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        });
+        adapter.refresh(&window);
+    }
+    window.show().unwrap();
+    let native = window.window();
+    native.set_size(slint::LogicalSize::new(1120., 760.));
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+    settle(&window);
+
+    let component = WindowInner::from_pub(native).component();
+    let preview = ItemRc::new_root(component.clone())
+        .visit_descendants(|item| {
+            if item.is_visible()
+                && (96. ..=100.).contains(&item.geometry().height())
+                && item
+                    .clone()
+                    .downcast::<Flickable>()
+                    .is_some_and(|flickable| {
+                        Flickable::FIELD_OFFSETS
+                            .content_height()
+                            .apply_pin(flickable.as_pin_ref())
+                            .get()
+                            .0
+                            > 100.
+                    })
+            {
+                ControlFlow::Break(item.clone())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .expect("bounded scrollable bio preview");
+    let point = preview.map_to_item_tree(preview.geometry().center(), &component);
+    let position = slint::LogicalPosition::new(point.x, point.y);
+    native.dispatch_event(WindowEvent::PointerScrolled {
+        position,
+        delta_x: 0.,
+        delta_y: -68.,
+    });
+    settle(&window);
+    let preview = preview.downcast::<Flickable>().unwrap();
+    let offset = Flickable::FIELD_OFFSETS
+        .content_y()
+        .apply_pin(preview.as_pin_ref())
+        .get();
+    assert!(offset.0 < 0.);
+    window.hide().unwrap();
+}
+
+#[test]
+#[cfg(feature = "discord")]
 fn edit_profile_opens_the_main_profile_editor() {
     let (window, adapter, _directory) = discord_server_window_granting(0);
     window.invoke_edit_profile();
@@ -8883,12 +9135,15 @@ fn a_card_of_components_shows_headings_files_and_only_link_buttons_working() {
         label: "Go".into(),
         style,
         url: url.map(str::to_owned),
+        custom_id: None,
+        sku_id: None,
         disabled: false,
     };
     let message = ChatMessage {
         item: "d:1".into(),
         attachments: vec![Attachment {
             voice_ms: None,
+            voice_waveform: None,
             name: "notes.txt".into(),
             size: Some(10),
             image: false,
@@ -8900,6 +9155,7 @@ fn a_card_of_components_shows_headings_files_and_only_link_buttons_working() {
             video: false,
             gif: None,
             url: None,
+            description: None,
         }],
         cards: vec![Card {
             framed: true,
@@ -10125,6 +10381,31 @@ fn yapfast_account_panel_keeps_settings_and_audio_actions_reachable() {
 }
 
 #[test]
+fn closed_profile_releases_its_model_after_exit_motion() {
+    let window = one_message("Synthetic message");
+    window.set_profile(ProfileData {
+        id: "synthetic-profile".into(),
+        name: "Alice".into(),
+        ..Default::default()
+    });
+    window.set_profile_open(true);
+    settle(&window);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(400));
+    settle(&window);
+    assert_eq!(window.get_profile().id, "synthetic-profile");
+
+    window.set_profile_large(true);
+    settle(&window);
+    assert_eq!(window.get_profile().id, "synthetic-profile");
+    window.set_profile_open(false);
+    settle(&window);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(400));
+    settle(&window);
+    assert!(window.get_profile().id.is_empty());
+    window.hide().unwrap();
+}
+
+#[test]
 fn yapfast_docked_profile_opens_the_existing_full_profile() {
     use slint::platform::{PointerEventButton, WindowEvent};
     let window = one_message("Synthetic message");
@@ -10278,8 +10559,15 @@ fn yapfast_settings_navigation_and_header_keep_the_existing_actions() {
 }
 
 #[test]
-fn yapfast_account_popover_copies_its_id_and_opens_settings_without_changing_status() {
+fn yapfast_account_popover_opens_profile_and_anchors_badge_tips() {
+    use i_slint_core::{
+        accessibility::AccessibleStringProperty,
+        item_tree::ItemRc,
+        window::{PopupWindowLocation, WindowInner},
+    };
     use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
     let window = one_message("Synthetic message");
     window.global::<ClientStyle>().set_enabled(true);
     window.set_own_title_bar(true);
@@ -10288,30 +10576,97 @@ fn yapfast_account_popover_copies_its_id_and_opens_settings_without_changing_sta
     window.set_account_name("Alex".into());
     window.set_account_initial("A".into());
     window.set_account_user_id("123456789012345678".into());
+    window.set_account_profile(ProfileData {
+        badges: ModelRc::new(VecModel::from(vec![
+            ProfileBadgeRow {
+                description: "A subscriber".into(),
+                ..Default::default()
+            },
+            ProfileBadgeRow {
+                description: "A booster".into(),
+                title: "Boost level".into(),
+                progress: "Boosted since yesterday".into(),
+                ..Default::default()
+            },
+        ])),
+        ..Default::default()
+    });
+
     let status_changes = Rc::new(Cell::new(0));
     let seen = status_changes.clone();
     window.on_set_status(move |_| seen.set(seen.get() + 1));
-    for (x, y) in [(100., 722.), (160., 632.), (100., 722.), (160., 674.)] {
-        let position = slint::LogicalPosition::new(x, y);
-        window.window().dispatch_event(WindowEvent::PointerPressed {
+    let edits = Rc::new(Cell::new(0));
+    let seen = edits.clone();
+    window.on_edit_profile(move || seen.set(seen.get() + 1));
+
+    let native = window.window();
+    let click = |position| {
+        native.dispatch_event(WindowEvent::PointerPressed {
             position,
             button: PointerEventButton::Left,
         });
-        window
-            .window()
-            .dispatch_event(WindowEvent::PointerReleased {
-                position,
-                button: PointerEventButton::Left,
-            });
+        native.dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle(&window);
+    };
+    let open = || click(slint::LogicalPosition::new(100., 722.));
+    let inner = WindowInner::from_pub(native);
+    let find = |predicate: &dyn Fn(&ItemRc) -> bool| {
+        let popups = inner.active_popups();
+        let popup = popups.last().expect("account menu is open");
+        let PopupWindowLocation::ChildWindow(origin) = popup.location else {
+            panic!("expected the embedded account menu");
+        };
+        let item = ItemRc::new_root(popup.component.clone())
+            .visit_descendants(|item| {
+                if item.is_visible() && predicate(&item) {
+                    ControlFlow::Break(item.clone())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .expect("item in the account menu");
+        let point = item.map_to_item_tree(item.geometry().center(), &popup.component);
+        slint::LogicalPosition::new(origin.x + point.x, origin.y + point.y)
+    };
+    let label = |value| {
+        find(&|item| {
+            item.accessible_string_property(AccessibleStringProperty::Label)
+                .as_deref()
+                == Some(value)
+        })
+    };
+
+    open();
+    for (badge, tip, distance) in [
+        ("A subscriber", "A subscriber", 70.),
+        ("A booster", "BOOST LEVEL", 200.),
+    ] {
+        let position = label(badge);
+        native.dispatch_event(WindowEvent::PointerMoved { position });
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(550));
+        settle(&window);
+        let hint = find(&|item| item_text_is(item, tip));
+        assert!(hint.y < position.y && position.y - hint.y < distance);
     }
+    click(label("Edit profile from banner"));
+    open();
+    click(label("Edit profile from avatar"));
+    assert_eq!(edits.get(), 2);
+    open();
+    click(label("Copy User ID"));
     assert_eq!(
-        i_slint_core::window::WindowInner::from_pub(window.window())
+        inner
             .context()
             .platform()
             .clipboard_text(i_slint_core::platform::Clipboard::DefaultClipboard)
             .as_deref(),
         Some("123456789012345678")
     );
+    open();
+    click(label("User Settings"));
     assert!(window.get_settings_open());
     assert_eq!(window.get_settings_section(), 0);
     assert_eq!(status_changes.get(), 0);
@@ -10415,8 +10770,8 @@ fn yapfast_typography_is_compact_and_preserves_explicit_text_sizes() {
 }
 
 /// CPU-side snapshot throughput, not the display's presented frame rate.
-/// Run with --ignored --nocapture. It measures the testing backend's software
-/// renderer: the testing backend here has no option to choose Skia.
+/// Run with --ignored --nocapture. It measures the testing backend's Skia
+/// rasterizer without displaying a native window.
 #[test]
 #[ignore = "manual renderer benchmark with the Skia testing feature"]
 fn yapfast_server_rail_scroll_snapshot_benchmark() {
@@ -10426,6 +10781,7 @@ fn yapfast_server_rail_scroll_snapshot_benchmark() {
         i_slint_backend_testing::TestingBackendOptions {
             mock_time: true,
             threading: false,
+            renderer_name: Some("skia".into()),
         },
     )))
     .unwrap();
@@ -10658,7 +11014,7 @@ fn better_animations_phase_a_core_motion_and_overlays() {
 
     // Verify context menu, tooltip, popover, and hover durations and scale ranges.
     assert_eq!(popup.get_menu_enter(), 140);
-    assert_eq!(popup.get_tooltip_enter(), 100);
+    assert_eq!(popup.get_tooltip_enter(), 150);
     assert_eq!(popup.get_popover_enter(), 160);
     assert_eq!(popup.get_hover_enter(), 160);
     assert_eq!(popup.get_hover_exit(), 130);
@@ -11309,6 +11665,107 @@ fn better_animations_mini_profile_anchoring_independent_of_context_menu() {
 }
 
 #[test]
+fn participant_menu_opens_with_volume_and_actions_together() {
+    use i_slint_core::{accessibility::AccessibleStringProperty, item_tree::ItemRc};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
+    slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+        i_slint_backend_testing::TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("skia".into()),
+        },
+    )))
+    .unwrap();
+    let window = classic_window();
+    window.set_workspace(true);
+    window.set_room_selected(true);
+    window.set_room_ready(true);
+    window.set_voice_room(true);
+    window.set_voice_here(true);
+    window.set_voice_active(true);
+    window.set_voice_channel("voice".into());
+    window.set_trusted(true);
+    window.set_participants(ModelRc::new(VecModel::from(vec![PersonRow {
+        id: "person".into(),
+        person: "person".into(),
+        name: "Sample caller".into(),
+        initial: "SC".into(),
+        connected: true,
+        ..Default::default()
+    }])));
+    window.on_volume_of(|_, _| 100);
+    let weak = window.as_weak();
+    let prepared = Rc::new(RefCell::new(SharedString::default()));
+    let target = prepared.clone();
+    window.on_prepare_menu(move |id, _| {
+        *target.borrow_mut() = id;
+        if let Some(window) = weak.upgrade() {
+            window.set_menu_rows(ModelRc::new(VecModel::from(vec![MenuRow {
+                id: "profile".into(),
+                text: "Profile".into(),
+                ..Default::default()
+            }])));
+        }
+    });
+    window.show().unwrap();
+    let native = window.window();
+    native.set_size(slint::LogicalSize::new(1120., 760.));
+    let snapshot = |name| {
+        let frame = native.take_snapshot().unwrap();
+        if let Some(directory) = std::env::var_os("YAPFAST_TOOLTIP_CAPTURE") {
+            image::save_buffer(
+                std::path::Path::new(&directory).join(name),
+                frame.as_bytes(), frame.width(), frame.height(), image::ColorType::Rgba8,
+            ).unwrap();
+        }
+        frame
+    };
+    let _ = snapshot("participant-before.png");
+    let component = i_slint_core::window::WindowInner::from_pub(native).component();
+    let point = ItemRc::new_root(component.clone()).visit_descendants(|item| {
+        if item.is_visible() && item.accessible_string_property(AccessibleStringProperty::Label).as_deref() == Some("Sample caller") {
+            ControlFlow::Break(item.map_to_item_tree(item.geometry().center(), &component))
+        } else {
+            ControlFlow::Continue(())
+        }
+    }).expect("participant tile");
+    let position = slint::LogicalPosition::new(point.x, point.y);
+    let open = || {
+        native.dispatch_event(WindowEvent::PointerPressed { position, button: PointerEventButton::Right });
+        native.dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Right });
+    };
+    window.global::<Looks>().set_better_animations(true);
+    open();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+    let early = snapshot("participant-early.png");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(45));
+    let middle = snapshot("participant-middle.png");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(150));
+    let final_frame = snapshot("participant-settled.png");
+    assert_eq!(prepared.borrow().as_str(), "in-voice:voice/person");
+    assert_ne!(early.as_bytes(), middle.as_bytes());
+    assert_ne!(middle.as_bytes(), final_frame.as_bytes());
+
+    let outside = slint::LogicalPosition::new(10., 90.);
+    native.dispatch_event(WindowEvent::PointerPressed {
+        position: outside,
+        button: PointerEventButton::Left,
+    });
+    native.dispatch_event(WindowEvent::PointerReleased {
+        position: outside,
+        button: PointerEventButton::Left,
+    });
+    window.global::<Looks>().set_better_animations(false);
+    open();
+    let instant = snapshot("participant-animations-off.png");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    let unchanged = snapshot("participant-animations-off-settled.png");
+    assert_eq!(instant.as_bytes(), unchanged.as_bytes());
+}
+
+#[test]
 fn task3_profile_text_fields_and_copy_actions() {
     let window = one_message("Synthetic message");
     window.set_profile_available(true);
@@ -11619,7 +12076,8 @@ fn task5_search_dropdown_ui_interaction() {
     window.invoke_choose_search_suggestion(0);
     let updated_query = window.get_search_text();
     assert!(updated_query.starts_with("has:"));
-    assert!(window.get_search_dropdown_open());
+    assert!(!window.get_search_dropdown_open());
+    assert_eq!(window.get_search_suggestion_caret() as usize, updated_query.len());
 
     // Close dropdown
     window.invoke_close_search_dropdown();
@@ -12063,6 +12521,55 @@ fn clicking_the_stage_gutter_compacts_a_share_without_changing_focus() {
     )));
     assert_eq!(centered("VA", "Viewer, Listening"), 80.);
     assert_eq!(centered("LA", "Local, Listening"), 80.);
+}
+
+#[test]
+fn stream_view_button_toggles_focus_and_grid() {
+    use i_slint_core::{
+        accessibility::AccessibleStringProperty, item_tree::ItemRc, window::WindowInner,
+    };
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
+    let window = showing(vec![]);
+    window.set_voice_room(true);
+    window.set_voice_here(true);
+    window.set_voice_active(true);
+    window.set_has_active_streams(true);
+    window.set_call_focus(0);
+    window.set_watched_stream_count(2);
+    let layouts = Rc::new(RefCell::new(Vec::new()));
+    let seen = layouts.clone();
+    window.on_set_layout_mode(move |focus| seen.borrow_mut().push(focus));
+
+    let native = window.window();
+    for label in ["Вид: переключить на сетку", "Вид: переключить на фокус"] {
+        settle(&window);
+        let component = WindowInner::from_pub(native).component();
+        let point = ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                if item.is_visible()
+                    && item
+                        .accessible_string_property(AccessibleStringProperty::Label)
+                        .as_deref()
+                        == Some(label)
+                {
+                    ControlFlow::Break(item.map_to_item_tree(item.geometry().center(), &component))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .expect("one View button");
+        let position = slint::LogicalPosition::new(point.x, point.y);
+        let button = PointerEventButton::Left;
+        native.dispatch_event(WindowEvent::PointerMoved { position });
+        native.dispatch_event(WindowEvent::PointerPressed { position, button });
+        native.dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+    settle(&window);
+    assert_eq!(*layouts.borrow(), [false, true]);
+    assert!(!window.get_voice_grid_mode());
+    assert_eq!(window.get_call_focus(), 0);
 }
 
 #[test]
@@ -12764,7 +13271,7 @@ fn task7_add_stream_preserves_focus_across_multiple_additive_streams() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
-    assert_eq!(window.get_call_focus(), 1);
+    assert_eq!(window.get_call_focus(), 0);
 
     // 1. Add Carol using eye icon -> focus must remain Bob
     window.invoke_add_stream("carol".into());
@@ -12794,7 +13301,7 @@ fn task7_add_stream_preserves_focus_across_multiple_additive_streams() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
-    assert_eq!(window.get_call_focus(), 1);
+    assert_eq!(window.get_call_focus(), 0);
 
     // 2. Add Dave using eye icon -> focus must remain Bob
     window.invoke_add_stream("dave".into());
@@ -12824,7 +13331,7 @@ fn task7_add_stream_preserves_focus_across_multiple_additive_streams() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
-    assert_eq!(window.get_call_focus(), 1);
+    assert_eq!(window.get_call_focus(), 0);
 
     // 3. Add Eve using eye icon -> focus must remain Bob
     window.invoke_add_stream("eve".into());
@@ -12854,7 +13361,7 @@ fn task7_add_stream_preserves_focus_across_multiple_additive_streams() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
-    assert_eq!(window.get_call_focus(), 1);
+    assert_eq!(window.get_call_focus(), 0);
 }
 
 #[test]
@@ -13069,7 +13576,7 @@ fn task7_final_polish_vertical_selector_and_enlarged_strip_geometry() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
-    assert_eq!(window.get_call_focus(), 1);
+    assert_eq!(window.get_call_focus(), 0);
     assert_eq!(window.get_focused_active(), 0);
     assert!(window.get_has_active_streams());
     assert_eq!(window.get_watched_stream_count(), 4);
@@ -13080,8 +13587,8 @@ fn task7_final_polish_vertical_selector_and_enlarged_strip_geometry() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
-    // Bob is at participant index 1 (after Alice at index 0)
-    assert_eq!(window.get_call_focus(), 1);
+    // Bob’s separate stream tile precedes the participant tiles
+    assert_eq!(window.get_call_focus(), 0);
     assert_eq!(window.get_focused_active(), 0);
 
     // 4. Verify participant row count contains all 5 participants (Alice + 4 streamers)
@@ -13092,7 +13599,7 @@ fn task7_final_polish_vertical_selector_and_enlarged_strip_geometry() {
     assert_eq!(p_alice.name, "Alice");
     assert!(!p_alice.live);
     assert!(!p_alice.watched);
-    assert_eq!(p_alice.unwatched_index, 0);
+    assert_eq!(p_alice.unwatched_index, -1);
 
     let p_bob = participants.row_data(1).unwrap();
     assert_eq!(p_bob.name, "Bob");
@@ -13167,13 +13674,13 @@ fn task7_persistent_grid_focus_and_participant_strip_in_grid() {
         Some(crate::ui::tiles::Focus::Stream("bob".into()))
     );
 
-    // 2. Focus Carol (participant index 2 in stage)
-    window.invoke_focus_tile(2);
+    // 2. Focus Carol (stream tile 1)
+    window.invoke_focus_tile(1);
     assert_eq!(
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("carol".into()))
     );
-    assert_eq!(window.get_call_focus(), 2);
+    assert_eq!(window.get_call_focus(), 1);
     assert_eq!(window.get_focused_active(), 1);
 
     // 3. Switch to Grid Mode: Carol remains focused (effective-lead == 1 for 3-stream grid)
@@ -13182,16 +13689,16 @@ fn task7_persistent_grid_focus_and_participant_strip_in_grid() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("carol".into()))
     );
-    assert_eq!(window.get_call_focus(), 2);
+    assert_eq!(window.get_call_focus(), 1);
     assert_eq!(window.get_focused_active(), 1);
 
-    // 4. Focus Dave (participant index 3 in stage) while in Grid Mode
-    window.invoke_focus_tile(3);
+    // 4. Focus Dave (stream tile 2) while in Grid Mode
+    window.invoke_focus_tile(2);
     assert_eq!(
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("dave".into()))
     );
-    assert_eq!(window.get_call_focus(), 3);
+    assert_eq!(window.get_call_focus(), 2);
     assert_eq!(window.get_focused_active(), 2);
 
     // 5. Switch back to Focus Mode: Dave remains the focused primary video!
@@ -13200,7 +13707,7 @@ fn task7_persistent_grid_focus_and_participant_strip_in_grid() {
         adapter.borrow().call_focus,
         Some(crate::ui::tiles::Focus::Stream("dave".into()))
     );
-    assert_eq!(window.get_call_focus(), 3);
+    assert_eq!(window.get_call_focus(), 2);
     assert_eq!(window.get_focused_active(), 2);
 
     // 6. Verify participant strip models for Grid Mode
@@ -13208,7 +13715,7 @@ fn task7_persistent_grid_focus_and_participant_strip_in_grid() {
     assert_eq!(participants.row_count(), 4);
     let p_alice = participants.row_data(0).unwrap();
     assert!(!p_alice.watched);
-    assert_eq!(p_alice.unwatched_index, 0);
+    assert_eq!(p_alice.unwatched_index, -1);
 
     let p_bob = participants.row_data(1).unwrap();
     assert!(p_bob.watched);
@@ -13296,7 +13803,7 @@ fn task7_zero_watched_streams_voice_stage_visibility_and_lifecycle() {
             !p.watched,
             "Participant {i} should not be watched initially"
         );
-        assert_eq!(p.unwatched_index, i as i32);
+        assert_eq!(p.unwatched_index, i as i32 - 1);
     }
 
     // Alice is non-streamer, others are live broadcasters
@@ -13330,11 +13837,11 @@ fn task7_zero_watched_streams_voice_stage_visibility_and_lifecycle() {
     assert_eq!(p_bob.watched_index, 0);
     assert_eq!(p_bob.unwatched_index, -1);
 
-    // Other 4 participants remain in unwatched strip
-    assert_eq!(participants.row_data(0).unwrap().unwatched_index, 0); // Alice
-    assert_eq!(participants.row_data(2).unwrap().unwatched_index, 1); // Carol
-    assert_eq!(participants.row_data(3).unwrap().unwatched_index, 2); // Dave
-    assert_eq!(participants.row_data(4).unwrap().unwatched_index, 3); // Eve
+    // Only unwatched broadcasters get stream indexes
+    assert_eq!(participants.row_data(0).unwrap().unwatched_index, -1); // Alice
+    assert_eq!(participants.row_data(2).unwrap().unwatched_index, 0); // Carol
+    assert_eq!(participants.row_data(3).unwrap().unwatched_index, 1); // Dave
+    assert_eq!(participants.row_data(4).unwrap().unwatched_index, 2); // Eve
 
     // 3. Add Carol's stream via add_stream
     window.invoke_add_stream("carol".into());
@@ -13379,7 +13886,7 @@ fn task7_zero_watched_streams_voice_stage_visibility_and_lifecycle() {
     for i in 0..5 {
         let p = participants.row_data(i).unwrap();
         assert!(!p.watched);
-        assert_eq!(p.unwatched_index, i as i32);
+        assert_eq!(p.unwatched_index, i as i32 - 1);
     }
 }
 
@@ -13620,7 +14127,7 @@ fn task7_grid_layout_geometry_non_overlapping_and_focus_placement() {
     );
 
     // Switch focus to Carol while in Grid Mode
-    window.invoke_focus_tile(2); // Carol is slot 2
+    window.invoke_focus_tile(1); // Carol is the second stream tile
     assert_eq!(window.get_focused_active(), 1);
     assert_eq!(
         adapter.borrow().call_focus,
@@ -14567,8 +15074,8 @@ fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
     );
     assert!(!window.get_stage_full());
 
-    // 2. Click Bob's tile again (slot 1) -> Already focused, deduplication keeps state untouched
-    window.invoke_focus_tile(1);
+    // 2. Click Bob's tile again (slot 0) -> Already focused, deduplication keeps state untouched
+    window.invoke_focus_tile(0);
     assert_eq!(window.get_focused_active(), 0);
     assert_eq!(
         adapter.borrow().call_focus,
@@ -14578,12 +15085,12 @@ fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
 
     // 3. Repeated clicks on focused tile must NEVER trigger stage_full
     for _ in 0..5 {
-        window.invoke_focus_tile(1);
+        window.invoke_focus_tile(0);
     }
     assert!(!window.get_stage_full());
 
-    // 4. Click Carol's tile (slot 2) -> switches focus safely to Carol
-    window.invoke_focus_tile(2);
+    // 4. Click Carol's tile (slot 1) -> switches focus safely to Carol
+    window.invoke_focus_tile(1);
     assert_eq!(window.get_focused_active(), 1);
     assert_eq!(
         adapter.borrow().call_focus,
@@ -14594,7 +15101,7 @@ fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
 
     // 5. Repeated clicks on Carol do not change focus or enter stage_full
     for _ in 0..5 {
-        window.invoke_focus_tile(2);
+        window.invoke_focus_tile(1);
     }
     assert_eq!(window.get_focused_active(), 1);
     assert_eq!(
@@ -14603,8 +15110,8 @@ fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
     );
     assert!(!window.get_stage_full());
 
-    // 6. Click Dave (slot 3) and Eve (slot 4)
-    window.invoke_focus_tile(3);
+    // 6. Click Dave (slot 2) and Eve (slot 3)
+    window.invoke_focus_tile(2);
     assert_eq!(window.get_focused_active(), 2);
     assert_eq!(
         adapter.borrow().call_focus,
@@ -14612,7 +15119,7 @@ fn task7_grid_mode_four_streams_click_stability_and_no_black_fullscreen() {
     );
     assert!(!window.get_stage_full());
 
-    window.invoke_focus_tile(4);
+    window.invoke_focus_tile(3);
     assert_eq!(window.get_focused_active(), 3);
     assert_eq!(
         adapter.borrow().call_focus,
@@ -15515,4 +16022,442 @@ fn wallpaper_rule_filters_cached_activity_and_late_rpc_after_reload() {
     assert_eq!(rows(), ["Another Game"]);
     window.invoke_toggle_app_activity("Wallpaper Engine".into(), true);
     assert_eq!(window.get_game_activity_preview().name, "Wallpaper Engine");
+}
+
+#[test]
+fn the_mouse_side_buttons_go_back_and_forward() {
+    use slint::winit_030::winit::event::MouseButton;
+    assert!(matches!(
+        side_button_action(MouseButton::Back),
+        Some(Action::NavigateBack)
+    ));
+    assert!(matches!(
+        side_button_action(MouseButton::Forward),
+        Some(Action::NavigateForward)
+    ));
+    for other in [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::Other(7),
+    ] {
+        assert!(side_button_action(other).is_none(), "{other:?}");
+    }
+}
+
+#[test]
+fn a_voice_channels_chat_marks_its_server_only_by_mentions() {
+    use yapfast_core::chat::{ChatRoom, ChatServer, Reacts};
+    let room = |id: &str, voice: bool, unread: u64, mentions: u64| ChatRoom {
+        id: id.into(),
+        network: Network::Discord,
+        capabilities: Network::Discord.capabilities(),
+        name: id.into(),
+        direct: false,
+        voice,
+        encrypted: false,
+        members: 0,
+        unread,
+        mentions,
+        muted: false,
+        last_read: None,
+        locked: false,
+        join_locked: false,
+        read_only: false,
+        reacts: Reacts::Any,
+        slowed: false,
+        timed_out_until: None,
+        category: String::new(),
+        category_id: None,
+        request: false,
+        person: None,
+        people: Vec::new(),
+        ringing: Vec::new(),
+        incoming: false,
+        avatar: None,
+        decoration: None,
+        nameplate: None,
+        style: None,
+        upload_limit: 0,
+        presence: None,
+        activity: None,
+        activities: Default::default(),
+        parent: None,
+        forum: false,
+        mark: Default::default(),
+        unlisted: false,
+        tag: None,
+        official: false,
+        empty: false,
+        preview: None,
+    };
+    let unread_server = |rooms: Vec<ChatRoom>, discord: bool| {
+        let mut state = AppState::default();
+        state.rooms = rooms.into_iter().map(Arc::new).collect();
+        state.servers = vec![Arc::new(ChatServer {
+            id: "Alpha".into(),
+            name: "Alpha".into(),
+            channels: state.rooms.iter().map(|room| room.id.clone()).collect(),
+            discord,
+            ..Default::default()
+        })];
+        let rooms_by_id = state
+            .rooms
+            .iter()
+            .map(|room| (room.id.as_str(), &**room))
+            .collect();
+        let row = refresh::rail_rows(&state, &rooms_by_id, &Default::default(), &[]).remove(0);
+        (row.unread, row.badge.to_string())
+    };
+    assert_eq!(
+        unread_server(
+            vec![room("lounge", true, 3, 0), room("general", false, 0, 0)],
+            true
+        ),
+        (false, String::new()),
+        "Discord's client leaves a server read for its voice channels' chat"
+    );
+    assert_eq!(
+        unread_server(vec![room("lounge", true, 3, 1)], true),
+        (true, "1".into()),
+        "a mention there still counts"
+    );
+    assert_eq!(
+        unread_server(
+            vec![room("lounge", true, 3, 0), room("general", false, 1, 0)],
+            true
+        ),
+        (true, String::new())
+    );
+    assert_eq!(
+        unread_server(vec![room("lounge", true, 3, 0)], false),
+        (true, String::new()),
+        "a Matrix space's call room stays as it was"
+    );
+}
+
+#[test]
+fn transient_voice_notices_expire_without_dismissing_replacements() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    let show = |id, phase, text: &str| {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.state.voice.phase = phase;
+        adapter.app.state.voice.error_id = id;
+        adapter.app.state.voice.error = Some(text.into());
+        adapter.show_voice(&window);
+        assert_eq!(window.get_voice_error(), text);
+    };
+    let wait = |seconds| i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(seconds));
+    show(1, Phase::Connected, "Cannot open the camera");
+    wait(7);
+    show(2, Phase::Connected, "Cannot open the camera");
+    wait(1);
+    assert_eq!(window.get_voice_error(), "Cannot open the camera");
+    wait(7);
+    assert_eq!(window.get_voice_error(), "");
+
+    show(3, Phase::Connected, &"Long diagnostic. ".repeat(10));
+    wait(8);
+    assert_ne!(window.get_voice_error(), "");
+    wait(2);
+    assert_eq!(window.get_voice_error(), "");
+
+    show(4, Phase::Connected, "Cannot open the camera");
+    window.invoke_dismiss_voice_error();
+    assert_eq!(window.get_voice_error(), "");
+    show(5, Phase::Connected, "Cannot open the camera");
+    wait(7);
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.state.voice.phase = Phase::Disconnected;
+        adapter.app.state.voice.error = None;
+        adapter.show_voice(&window);
+        assert_eq!(window.get_voice_error(), "");
+        assert!(!window.get_voice_active());
+    }
+    show(6, Phase::Connected, "Cannot open the new camera");
+    wait(1);
+    assert_eq!(window.get_voice_error(), "Cannot open the new camera");
+    show(7, Phase::Disconnected, "Voice disconnected");
+    wait(11);
+    assert_eq!(window.get_voice_error(), "Voice disconnected");
+}
+
+#[test]
+fn server_tooltip_renders_intermediate_and_settled_frames() {
+    use slint::platform::WindowEvent;
+    slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+        i_slint_backend_testing::TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("skia".into()),
+        },
+    )))
+    .unwrap();
+    let window = YapfastWindow::new().unwrap();
+    window.set_workspace(true);
+    window.global::<Looks>().set_better_animations(true);
+    window.set_servers(ModelRc::new(VecModel::from(vec![
+        ServerRow {
+            divider: true,
+            ..Default::default()
+        },
+        ServerRow {
+            id: "tooltip-server".into(),
+            name: "A long server name for the tooltip".into(),
+            initial: "S".into(),
+            ..Default::default()
+        },
+    ])));
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1120., 760.));
+    let snapshot = |name| {
+        let frame = window.window().take_snapshot().unwrap();
+        if let Some(directory) = std::env::var_os("YAPFAST_TOOLTIP_CAPTURE") {
+            let path = std::path::Path::new(&directory).join(name);
+            image::save_buffer(
+                path,
+                frame.as_bytes(),
+                frame.width(),
+                frame.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+        frame
+    };
+    let before = snapshot("tooltip-before.png");
+    window.window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(36., 86.),
+    });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(2));
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+    let early = snapshot("tooltip-early.png");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+    let during = snapshot("tooltip-during.png");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    let settled = snapshot("tooltip-settled.png");
+    assert_ne!(during.as_bytes(), before.as_bytes());
+    assert_ne!(during.as_bytes(), settled.as_bytes());
+    assert_ne!(early.as_bytes(), during.as_bytes());
+    window.hide().unwrap();
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn bot_modal_summaries_show_default_entity_names_and_unknown_ids() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    let mut adapter = adapter.borrow_mut();
+    adapter.app.state.messages = Arc::new(vec![Arc::new(ChatMessage {
+        sender: "discord:11".into(),
+        author: "Alex".into(),
+        ..Default::default()
+    })]);
+    adapter.app.state.interactions.pretend_sent("click", None);
+    adapter.apply(Event::InteractionModal(serde_json::json!({
+        "id": "42", "channel_id": "7", "guild_id": "10", "custom_id": "assign",
+        "application": {"id": "3"}, "title": "Assign", "nonce": "click",
+        "components": [
+            {"type": 18, "label": "User", "component": {
+                "type": 5, "custom_id": "user", "default_values": [{"id": "11", "type": "user"}]
+            }},
+            {"type": 18, "label": "Mentionable", "component": {
+                "type": 7, "custom_id": "mention", "default_values": [{"id": "11", "type": "user"}]
+            }},
+            {"type": 18, "label": "Role", "component": {
+                "type": 6, "custom_id": "role", "default_values": [{"id": "12", "type": "role"}]
+            }},
+            {"type": 18, "label": "Channel", "component": {
+                "type": 8, "custom_id": "channel", "default_values": [{"id": "13", "type": "channel"}]
+            }}
+        ]
+    })));
+    adapter.refresh(&window);
+    let fields = window.get_bot_modal_fields();
+    assert_eq!(fields.row_data(0).unwrap().summary, "Alex");
+    assert_eq!(fields.row_data(1).unwrap().summary, "Alex");
+    assert_eq!(fields.row_data(2).unwrap().summary, "12");
+    assert_eq!(fields.row_data(3).unwrap().summary, "13");
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn bot_modal_keeps_input_model_while_typing() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.state.interactions.pretend_sent("click", None);
+        adapter.apply(Event::InteractionModal(serde_json::json!({
+            "id": "42", "channel_id": "7", "custom_id": "ticket",
+            "application": {"id": "3"}, "title": "Open ticket", "nonce": "click",
+            "components": [{"type": 1, "components": [{
+                "type": 4, "custom_id": "reason", "label": "Reason", "style": 1
+            }]}]
+        })));
+        adapter.refresh(&window);
+    }
+    let original = window.get_bot_modal_fields();
+    for value in ["t", "te", "tes", "test"] {
+        window.invoke_bot_modal_field_edited(0, value.into());
+        let current = window.get_bot_modal_fields();
+        assert!(std::ptr::eq(original.as_any(), current.as_any()));
+        assert_eq!(current.row_data(0).unwrap().value, value);
+    }
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn bot_select_keeps_its_model_and_filters_original_choice_indices() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.state.interactions.pretend_sent("click", None);
+        adapter.apply(Event::InteractionModal(serde_json::json!({
+            "id": "42", "channel_id": "7", "custom_id": "ticket",
+            "application": {"id": "3"}, "title": "Choose", "nonce": "click",
+            "components": [{"type": 18, "label": "Choice", "component": {
+                "type": 3, "custom_id": "choice", "required": false,
+                "options": [
+                    {"label": "Alpha", "value": "a"},
+                    {"label": "Beta", "value": "b"}
+                ]
+            }}]
+        })));
+        adapter.refresh(&window);
+    }
+    window.invoke_bot_modal_open_select(0);
+    let original = window.get_bot_select_choices();
+    assert_eq!(original.row_count(), 2);
+    adapter.borrow_mut().refresh(&window);
+    assert!(std::ptr::eq(
+        original.as_any(),
+        window.get_bot_select_choices().as_any()
+    ));
+    window.invoke_bot_select_search("BETA".into());
+    let filtered = window.get_bot_select_choices();
+    assert!(std::ptr::eq(original.as_any(), filtered.as_any()));
+    assert_eq!(filtered.row_count(), 1);
+    assert_eq!(filtered.row_data(0).unwrap().index, 1);
+    // A menu of one option takes the one clicked, and closes.
+    window.invoke_bot_select_toggle(1);
+    assert_eq!(
+        adapter
+            .borrow()
+            .app
+            .state
+            .interaction_modal
+            .as_ref()
+            .unwrap()
+            .fields[0]
+            .values,
+        ["b"]
+    );
+    assert!(!window.get_bot_select_open());
+    assert_eq!(window.get_bot_select_choices().row_count(), 0);
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn a_bot_forms_text_choices_and_files_show_as_they_are_filled() {
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = YapfastWindow::new().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+    {
+        let mut adapter = adapter.borrow_mut();
+        adapter.app.state.interactions.pretend_sent("click", None);
+        adapter.apply(Event::InteractionModal(serde_json::json!({
+            "id": "42", "channel_id": "7", "custom_id": "survey",
+            "application": {"id": "3"}, "title": "Survey", "nonce": "click",
+            "components": [
+                {"type": 10, "content": "## Heads up\nThis is **bold**."},
+                {"type": 18, "label": "Rating", "description": "How was it?", "component": {
+                    "type": 21, "custom_id": "rating",
+                    "options": [{"label": "Good", "value": "good"}, {"label": "Bad", "value": "bad"}]}},
+                {"type": 18, "label": "Agree", "component": {"type": 23, "custom_id": "agree"}},
+                {"type": 18, "label": "Proof", "component": {"type": 19, "custom_id": "proof", "max_values": 3}},
+            ]
+        })));
+        adapter.refresh(&window);
+    }
+    let fields = window.get_bot_modal_fields();
+    let text = fields.row_data(0).unwrap();
+    assert_eq!(text.kind, 10);
+    assert_eq!(text.blocks.row_count(), 2, "a heading and its text");
+    let rating = fields.row_data(1).unwrap();
+    assert_eq!(rating.description, "How was it?");
+    assert_eq!(rating.choices.row_count(), 2);
+    assert_eq!(fields.row_data(3).unwrap().max_files, 3);
+    window.invoke_bot_modal_field_edited(1, "bad".into());
+    window.invoke_bot_modal_field_edited(2, "".into());
+    adapter.borrow_mut().action(
+        &window,
+        Action::AddModalFiles {
+            index: 3,
+            files: vec!["/tmp/shot one.png".into()],
+        },
+    );
+    let current = window.get_bot_modal_fields();
+    assert!(std::ptr::eq(fields.as_any(), current.as_any()));
+    // The text laid out stays the same as the rest change.
+    assert!(current.row_data(0).unwrap().blocks == text.blocks);
+    let rating = current.row_data(1).unwrap();
+    assert!(!rating.choices.row_data(0).unwrap().selected);
+    assert!(rating.choices.row_data(1).unwrap().selected);
+    assert!(current.row_data(2).unwrap().checked);
+    let proof = current.row_data(3).unwrap();
+    assert_eq!(proof.files.row_data(0).unwrap(), "shot one.png");
+    window.invoke_bot_modal_remove_file(3, 0);
+    assert_eq!(
+        window
+            .get_bot_modal_fields()
+            .row_data(3)
+            .unwrap()
+            .files
+            .row_count(),
+        0
+    );
 }

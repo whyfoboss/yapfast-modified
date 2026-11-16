@@ -63,23 +63,25 @@ pub(super) async fn run(
 ) {
     let snapshots = shared.snapshots.clone();
     let mut reconnects = Reconnects::default();
+    let started = tokio::time::Instant::now();
     // With the build number kept from the last start, the web client's page
     // loads beside connecting, rather than before it.
     if let Ok(Some(kept)) = tokio::task::spawn_blocking(crate::cache::build_number).await {
         crate::client::recall_build_number(kept);
     }
-    if crate::client::has_build_number() {
-        let api = shared.api.clone();
-        tokio::spawn(async move { api.learn_build_number().await });
-    }
+    tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64,
+        cached = crate::client::has_build_number(), "Discord build cache read");
+    // The built-in number already covers a missing or unavailable page. Let
+    // the lookup run during the gateway handshake on a cold start too.
+    let api = shared.api.clone();
+    tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        api.learn_build_number().await;
+        tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord build page checked");
+    });
     loop {
         snapshots.send_modify(|snapshot| Arc::make_mut(snapshot).status = Status::Connecting);
         let connect = async {
-            // Without one kept, the page goes first, so the first identify
-            // says the current build.
-            if !crate::client::has_build_number() {
-                shared.api.learn_build_number().await;
-            }
             let playing = *shared.show_game.borrow();
             crate::own_activity::merge(
                 &mut shared.presence,
@@ -216,6 +218,7 @@ async fn connected_session(
     let Some(me) = ready::user_id(&ready).map(str::to_owned) else {
         return Ended::Failed(anyhow!("Discord's READY had no user"));
     };
+    let started = tokio::time::Instant::now();
     let mut tracker = Tracker::from_ready(me, &ready, shared.names.clone());
     shared
         .notes
@@ -239,6 +242,12 @@ async fn connected_session(
     }
     tracker.beside(shared.beside.as_ref().map(|(_, thread)| thread.as_str()));
     shared.snapshots.send_replace(Arc::new(tracker.snapshot()));
+    tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord online snapshot published");
+    // Discord's client counts every command index out of date in a new
+    // session.
+    let _ = shared
+        .live
+        .send(Live::CommandIndexStale(crate::commands::Stale::All));
     let quiet = tracker.next_quiet(now_ms());
     let mut session = Session {
         gateway,
@@ -557,8 +566,31 @@ impl Session<'_> {
         }
     }
 
+    /// Gives an answer only this account sees the server of its channel,
+    /// which Discord may leave off it, so it isn't taken for a DM's.
+    fn place_ephemeral(&self, dispatch: &mut Dispatch) {
+        let data = &mut dispatch.data;
+        if !matches!(dispatch.event, Event::MessageCreate | Event::MessageUpdate)
+            || !data["guild_id"].is_null()
+            || data["flags"].as_u64().unwrap_or_default() & message::EPHEMERAL == 0
+        {
+            return;
+        }
+        let channel = data["channel_id"].as_str().unwrap_or_default();
+        let guild = self
+            .tracker
+            .servers
+            .iter()
+            .find(|server| server.channel(channel).is_some())
+            .map(|server| Value::from(server.id.as_str()));
+        if let (Some(guild), Some(data)) = (guild, data.as_object_mut()) {
+            data.insert("guild_id".into(), guild);
+        }
+    }
+
     /// Takes in a dispatched event; an error ends the session.
-    async fn event(&mut self, dispatch: Dispatch) -> Result<()> {
+    async fn event(&mut self, mut dispatch: Dispatch) -> Result<()> {
+        self.place_ephemeral(&mut dispatch);
         let (event, data) = (&dispatch.event, &dispatch.data);
         // A server update that no join or stream waits for moves one
         // under way.

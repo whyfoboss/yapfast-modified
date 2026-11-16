@@ -249,6 +249,7 @@ impl Application {
                 room,
                 user,
                 effect: self.state.cosmetics.effects,
+                frame: self.state.cosmetics.frames,
             }))]
         } else {
             vec![]
@@ -306,6 +307,7 @@ impl Application {
             room,
             user,
             effect: false,
+            frame: false,
         }))]
     }
 
@@ -431,6 +433,26 @@ impl Application {
             .filter(|view| view.profile.id == user && !view.loading)
         {
             view.profile.badges.clone_from(&badges);
+        }
+    }
+
+    /// Puts the frame the shop described on the profiles of `user` on screen.
+    pub(super) fn show_profile_frame(
+        &mut self,
+        user: &str,
+        sku: &str,
+        frame: &Arc<[crate::chat::ProfileFrameLayer]>,
+    ) {
+        for view in [&mut self.state.profile, &mut self.state.panel_profile]
+            .into_iter()
+            .filter_map(Option::as_mut)
+            .filter(|view| {
+                view.profile.id == user
+                    && !view.loading
+                    && view.profile.frame_sku.as_deref() == Some(sku)
+            })
+        {
+            view.profile.frame = frame.clone();
         }
     }
 

@@ -114,6 +114,7 @@ impl Application {
                 room,
                 user: person,
                 effect: self.state.cosmetics.effects,
+                frame: false,
             }))]
         } else {
             vec![]
@@ -413,7 +414,11 @@ impl Application {
         &mut self,
         snapshot: Arc<yapfast_discord::service::Snapshot>,
     ) -> Vec<Effect> {
+        let was_online = self.state.discord_online;
         self.state.discord_online = snapshot.status == yapfast_discord::service::Status::Online;
+        if self.state.discord_online && !was_online {
+            tracing::debug!(target: "yapfast_startup", "online account reached application state");
+        }
         if let Some(account) = &snapshot.account {
             self.state.account_username =
                 Some(account.username.clone()).filter(|name| !name.is_empty());

@@ -12,7 +12,7 @@ pub(super) fn call_sounds(before: &voice::State, after: &voice::State) -> Vec<Ef
         state
             .sharing
             .as_ref()
-            .is_some_and(|share| share.phase != voice::SharePhase::Choosing)
+            .is_some_and(|share| share.phase == voice::SharePhase::Live)
     };
     match (sharing_started(before), sharing_started(after)) {
         (false, true) => return vec![Effect::OwnStreamSound(Sound::StreamStart)],

@@ -548,7 +548,9 @@ fn show_emoji(adapter: &Rc<RefCell<Adapter>>, window: &YapfastWindow, query: &st
 }
 
 pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
+    super::app_commands::bind(window, adapter);
     super::games::bind(window, adapter);
+    super::keybinds::bind(window, adapter);
     super::gifs::bind(window, adapter);
     super::stickers::bind(window, adapter);
     {
@@ -766,6 +768,126 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         }};
     }
     bind!(on_explore_preview, Action::Preview);
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_use_button(move |item, custom_id| {
+            if let Some(window) = weak.upgrade() {
+                state.borrow_mut().action(
+                    &window,
+                    Action::UseButton {
+                        item: item.to_string(),
+                        custom_id: custom_id.to_string(),
+                    },
+                );
+            }
+        });
+    }
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_open_select(move |item, custom_id| {
+            if let Some(window) = weak.upgrade() {
+                state.borrow_mut().action(
+                    &window,
+                    Action::OpenSelect {
+                        item: item.to_string(),
+                        custom_id: custom_id.to_string(),
+                    },
+                );
+            }
+        });
+    }
+    bind!(on_bot_select_close, Action::CloseSelect);
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_bot_select_search(move |query| {
+            if let Some(window) = weak.upgrade() {
+                state
+                    .borrow_mut()
+                    .action(&window, Action::SearchSelect(query.to_string()));
+            }
+        });
+    }
+    bind!(on_bot_modal_submit, Action::SubmitModal);
+    // A form's file upload takes files from the same dialog as the
+    // composer's.
+    {
+        let state = adapter.clone();
+        window.on_bot_modal_choose_files(move |index| {
+            let index = index.max(0) as usize;
+            let weak = Rc::downgrade(&state);
+            state.borrow_mut().dialog(async move {
+                let files = rfd::AsyncFileDialog::new()
+                    .set_title("Choose files")
+                    .pick_files()
+                    .await;
+                if let (Some(files), Some(adapter)) = (files, weak.upgrade()) {
+                    let window = adapter.borrow().window.upgrade();
+                    if let Some(window) = window {
+                        let files = files.iter().map(|file| file.path().to_owned()).collect();
+                        adapter
+                            .borrow_mut()
+                            .action(&window, Action::AddModalFiles { index, files });
+                    }
+                }
+            });
+        });
+    }
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_bot_modal_remove_file(move |index, file| {
+            if let Some(window) = weak.upgrade() {
+                state.borrow_mut().action(
+                    &window,
+                    Action::RemoveModalFile {
+                        index: index.max(0) as usize,
+                        file: file.max(0) as usize,
+                    },
+                );
+            }
+        });
+    }
+    bind!(on_bot_modal_close, Action::CloseModal);
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_bot_modal_open_select(move |index| {
+            if let Some(window) = weak.upgrade() {
+                state
+                    .borrow_mut()
+                    .action(&window, Action::OpenModalSelect(index as usize));
+            }
+        });
+    }
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_bot_select_toggle(move |index| {
+            if let Some(window) = weak.upgrade() {
+                state
+                    .borrow_mut()
+                    .action(&window, Action::ToggleSelect(index as usize));
+            }
+        });
+    }
+    {
+        let state = adapter.clone();
+        let weak = window.as_weak();
+        window.on_bot_modal_field_edited(move |index, value| {
+            if let Some(window) = weak.upgrade() {
+                state.borrow_mut().action(
+                    &window,
+                    Action::SetModalField {
+                        index: index as usize,
+                        value: value.to_string(),
+                    },
+                );
+            }
+        });
+    }
     bind!(on_restore, Action::Restore);
     bind!(on_logout, Action::Logout);
     bind!(on_refresh_trust, Action::RefreshTrust);
@@ -1207,6 +1329,26 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     bind!(on_edit_profile, Action::EditProfile);
     bind!(on_account_opened, Action::LoadOwnProfile);
     bind!(on_open_profile_wishlist, Action::OpenWishlist);
+    {
+        use yapfast_core::application::ProfileTab;
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_profile_tab_opened(move |page| {
+            let tab = match page {
+                0 => ProfileTab::Activity,
+                3 => ProfileTab::Board,
+                4 => ProfileTab::Wishlist,
+                _ => return,
+            };
+            let weak = weak.clone();
+            let adapter = adapter.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                if let Some(window) = weak.upgrade() {
+                    adapter.borrow_mut().action(&window, Action::OpenProfileTab(tab));
+                }
+            });
+        });
+    }
     bind!(on_undo_profile, Action::UndoProfileEdits);
     bind!(on_save_profile, Action::SaveProfile);
     bind!(on_close_profile_editor, Action::CloseProfileEditor);
@@ -1460,6 +1602,15 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     bind!(on_close_role, Action::CloseRole);
     bind!(on_close_new_dm, Action::CloseNewDm);
     bind!(on_more_results, Action::MoreResults);
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_search_start_at(move |position| {
+            if let (Some(window), Ok(position)) = (weak.upgrade(), position.trim().parse::<u32>()) {
+                adapter.borrow_mut().action(&window, Action::SearchStartAt(position));
+            }
+        });
+    }
     bind!(on_open_add_people, Action::OpenAddPeople);
     bind!(on_confirm_add_people, Action::AddPeople);
     bind!(on_close_add_people, Action::CloseAddPeople);
@@ -1509,6 +1660,8 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                         &item.label,
                     );
                     window.set_search_text(new_query.as_str().into());
+                    window.set_search_suggestion_caret(i32::try_from(new_query.len()).unwrap_or(i32::MAX));
+                    window.set_search_suggestion_edit(window.get_search_suggestion_edit().wrapping_add(1));
                     let role_colors = adapter.layout.role_colors_everywhere;
                     let next_suggestions = super::search::compute_search_suggestions(
                         &adapter.app.state,
@@ -1525,7 +1678,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                     } else {
                         window.set_search_suggestion_index(-1);
                     }
-                    window.set_search_dropdown_open(true);
+                    window.set_search_dropdown_open(!new_query.ends_with(' ') && adapter.models.search_filter_suggestions.row_count() > 0);
                 }
             }
         });
@@ -2144,12 +2297,6 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
             play_call_volumes(&window);
         }
     });
-    let weak = window.as_weak();
-    window.on_record_talk_key(move |on| {
-        if let Some(window) = weak.upgrade() {
-            window.set_talk_recording(on);
-        }
-    });
     let state = adapter.clone();
     let weak = window.as_weak();
     window.on_preferences_changed(move || {
@@ -2207,7 +2354,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         layout.multiple_windows = window.get_multiple_windows();
         layout.developer_mode = window.get_developer_mode();
         adapter.layout.write(&adapter.root);
-        adapter.watch_talk_key(&window);
+        adapter.watch_keybinds(&window);
         let start = window.get_start_on_sign_in();
         if AUTOSTART.get() && start != autostart::enabled() {
             match autostart::set(start) {
@@ -4011,7 +4158,11 @@ fn composer_caret(
             adapter.action(window, Action::LoadPictures(wanted));
         }
     }
-    let found = offset.and_then(|offset| mention::query(text, offset));
+    // An app command's option offers its own people, roles and channels.
+    let commanding = !aside && adapter.app.state.command_draft().is_some();
+    let found = offset
+        .filter(|_| !commanding)
+        .and_then(|offset| mention::query(text, offset));
     if found.is_none() {
         adapter.mention_dismissed = None;
     }

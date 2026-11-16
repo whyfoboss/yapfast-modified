@@ -309,6 +309,7 @@ impl Gateway {
         reconnects: &mut Reconnects,
         limiter: Limiter,
     ) -> Result<(Self, Value)> {
+        let started = Instant::now();
         let mut connection = Connection {
             socket: open(url).await?,
             inflater: Inflater::default(),
@@ -326,6 +327,7 @@ impl Gateway {
             resumes: 0,
         };
         connection.greeted().await?;
+        tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord gateway greeted");
         reconnects.identify(Instant::now())?;
         let identify = json!({
             "token": token,
@@ -349,6 +351,7 @@ impl Gateway {
         loop {
             let event = gateway.next().await?;
             if event.event == Event::Ready {
+                tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord gateway ready");
                 return Ok((gateway, event.data));
             }
         }
