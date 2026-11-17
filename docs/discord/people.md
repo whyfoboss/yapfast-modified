@@ -842,14 +842,25 @@ for that integration. Browser applications are excluded from own presence.
 
 On Windows, the Game Activity card and own profiles use the SMTC playback
 position when the current media session matches the RPC track. Paused
-positions stay fixed. While paused, published music RPC removes playback
-timestamps and puts the fixed position in the activity text. On resume it
-restores the original text and uses the Windows playback timeline. Video RPC,
+positions stay fixed. While paused, published SoundCloud activity keeps the
+matching track and available cover, shows Paused, and removes playback
+timestamps. This also covers the RPC client clearing or replacing its
+activity on pause. On resume it restores the artist and uses the Windows
+playback timeline. Video RPC,
 including YouTube reported as Playing, is filtered from own presence.
 Media and RPC artwork can arrive after the initial activity. SoundCloud
 cover and clock refreshes leave the last available presence update for
 playback changes. For local troubleshooting, `YAPFAST_MEDIA_LOG=1` enables
-the `yapfast_media` transition and timing diagnostics.
+the `yapfast_media` transition and timing diagnostics. Track identifiers
+are local to one run and let the playback, artwork and gateway events be
+matched without logging track names.
+
+Rich Presence Preview shows the last activity written to the Discord gateway,
+including the artwork reference and timestamps from that write. Update pending
+keeps that card visible until the next write. Sent to Discord describes the
+local write. During gateway resume, the preview waits for Discord to resume
+the session before showing its last sent card again. Own profile and local
+playback continue to show the live media session.
 
 A per-app Off rule filters the published presence, the own roster line and
 live and cached own activity cards. The rule remains in the detected list

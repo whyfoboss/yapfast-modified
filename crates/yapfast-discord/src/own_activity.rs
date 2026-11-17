@@ -9,6 +9,13 @@ use tokio::sync::watch;
 
 type Activity = Option<Arc<Value>>;
 
+/// Correlates activity diagnostics within one process without logging track names.
+pub fn trace_track(title: &str) -> u64 {
+    use std::{hash::{BuildHasher, RandomState}, sync::OnceLock};
+    static KEY: OnceLock<RandomState> = OnceLock::new();
+    KEY.get_or_init(RandomState::new).hash_one(title)
+}
+
 pub(crate) fn eligible(activity: &Value) -> bool {
     crate::activity::activity(activity).is_some_and(|parsed| {
         parsed.eligible_for_own_presence()
@@ -60,7 +67,7 @@ impl MusicPlayback {
             return false;
         }
         let normalize = |text: &str| {
-            text.split_whitespace()
+            text.trim_end_matches('\u{2800}').split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_lowercase()
@@ -213,6 +220,30 @@ async fn combine(
     }
 }
 
+/// Holds the track through SoundCloud's RPC clear or idle activity on pause.
+pub(crate) fn soundcloud_on_pause(
+    current: Activity,
+    previous: &mut Activity,
+    music: Option<&MusicPlayback>,
+) -> Activity {
+    if current.as_ref().is_some_and(|activity| {
+        activity["name"] == "SoundCloud" && activity["type"] == 2
+    }) {
+        *previous = current.clone();
+        return current;
+    }
+    if current.as_ref().is_none_or(|activity| activity["name"] == "SoundCloud")
+        && let Some(music) = music.filter(|music| music.soundcloud_source)
+        && let Some(track) = previous.as_ref()
+        && crate::activity::activity(track).is_some_and(|rpc| music.matches(&rpc))
+    {
+        // The RPC clear may arrive before the Windows playback event.
+        return if music.start_ms.is_none() { previous.clone() } else { current };
+    }
+    *previous = None;
+    current
+}
+
 pub(crate) fn merge(presence: &mut Value, activity: Option<&Value>, music: Option<&MusicPlayback>) {
     if let Some(activities) = presence["activities"].as_array_mut() {
         activities.retain(|value| value["type"] == 4);
@@ -221,10 +252,6 @@ pub(crate) fn merge(presence: &mut Value, activity: Option<&Value>, music: Optio
             if let Some(music) = music {
                 let matched =
                     crate::activity::activity(&activity).is_some_and(|rpc| music.matches(&rpc));
-                tracing::debug!(target: "yapfast_media", matched,
-                    paused = music.start_ms.is_none(),
-                    has_artwork = activity["assets"]["large_image"].is_string(),
-                    "gateway music candidate");
                 let replace_stale_track = !matched
                     && music.soundcloud_source
                     && !music.title.trim().is_empty()
@@ -254,24 +281,28 @@ pub(crate) fn merge(presence: &mut Value, activity: Option<&Value>, music: Optio
                     } else if let Some(activity) = activity.as_object_mut() {
                         // Discord timestamps run against the viewer's clock.
                         activity.remove("timestamps");
-                        let position = if music.duration_ms > 0 {
-                            music.position_ms.min(music.duration_ms)
+                        if activity.get("name").and_then(Value::as_str) == Some("SoundCloud") {
+                            activity.insert("state".into(), Value::String("Paused".into()));
                         } else {
-                            music.position_ms
-                        } / 1000;
-                        let artist = activity
-                            .get("state")
-                            .and_then(Value::as_str)
-                            .unwrap_or(&music.artist);
-                        activity.insert(
-                            "state".into(),
-                            Value::String(format!(
-                                "Paused at {}:{:02} · {}",
-                                position / 60,
-                                position % 60,
-                                artist
-                            )),
-                        );
+                            let position = if music.duration_ms > 0 {
+                                music.position_ms.min(music.duration_ms)
+                            } else {
+                                music.position_ms
+                            } / 1000;
+                            let artist = activity
+                                .get("state")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&music.artist);
+                            activity.insert(
+                                "state".into(),
+                                Value::String(format!(
+                                    "Paused at {}:{:02} · {}",
+                                    position / 60,
+                                    position % 60,
+                                    artist
+                                )),
+                            );
+                        }
                     }
                 }
             }
@@ -351,7 +382,7 @@ mod tests {
         let paused = &presence["activities"][0];
         assert!(paused.get("timestamps").is_none());
         assert_eq!(paused["details"], "Track");
-        assert_eq!(paused["state"], "Paused at 1:49 · Artist, Collaborator");
+        assert_eq!(paused["state"], "Paused");
 
         playback.start_ms = Some(2000);
         merge(&mut presence, Some(&activity), Some(&playback));

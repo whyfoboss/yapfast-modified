@@ -1356,45 +1356,87 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
     )
     .await;
     assert_eq!(receive(&mut music).await["evt"], "READY");
-    let track = json!({"type":2,"details":"Fixture track","state":"Fixture artist",
-        "timestamps":{"start":1800000000000_u64,"end":1800000072000_u64}});
-    send(
-        &mut music,
-        1,
-        json!({"cmd":"SET_ACTIVITY","nonce":"music","args":{"pid":46,"activity":track}}),
-    )
-    .await;
+    let track = |title: &str, cover: &str| json!({
+        "type": 2, "details": title, "state": "Fixture artist",
+        "timestamps": {"start": 1800000000000_u64, "end": 1800000072000_u64},
+        "assets": {"large_image": format!("https://example.com/{cover}.png")}
+    });
+    let send_track = |activity: Value| {
+        json!({"cmd":"SET_ACTIVITY","nonce":"music","args":{"pid":46,"activity":activity}})
+    };
+    let shows = |presence: &Value, title: &str, cover: Option<&str>| {
+        presence["activities"].as_array().is_some_and(|a| a.iter().any(|a| {
+            a["name"] == "SoundCloud" && a["application_id"] == "123456789012345681"
+                && a["details"] == title && a["assets"]["large_image"].as_str() == cover
+        }))
+    };
+    let cover = "mp:external/fixture/https/example.com/slow-artwork.png";
+    let first = std::time::Instant::now();
+    send(&mut music, 1, send_track(track("Fixture track", "slow-artwork"))).await;
     assert_eq!(receive(&mut music).await["nonce"], "music");
-    presence_where(server, |p| {
-        p["activities"].as_array().is_some_and(|a| {
-            a.iter()
-                .any(|a| a["name"] == "SoundCloud" && a["timestamps"]["start"] == 1800000000000_u64)
-        })
-    })
-    .await;
+    timeout(Duration::from_secs(1), presence_where(server, |p| {
+        shows(p, "Fixture track", None)
+    }))
+    .await
+    .expect("a new SoundCloud track must be sent while the cover is loading");
+    eprintln!("SoundCloud new RPC track to gateway fixture: {} ms", first.elapsed().as_millis());
+    presence_where(server, |p| shows(p, "Fixture track", Some(cover))).await;
+    eprintln!("SoundCloud uncached cover to gateway fixture: {} ms", first.elapsed().as_millis());
+    snapshot_where(discord, |snapshot| {
+        !snapshot.presence_preview.pending
+            && snapshot.presence_preview.sent.as_ref().is_some_and(|card| {
+                card.details.as_deref() == Some("Fixture track")
+                    && card.large_image.as_deref().is_some_and(|url| url.ends_with("/slow-artwork.png"))
+            })
+    }).await;
+
+    // Cancel a slow result and keep valid text even when the new lookup fails.
+    send(&mut music, 1, send_track(track("Interrupted", "other-slow-artwork"))).await;
+    receive(&mut music).await;
+    presence_where(server, |p| shows(p, "Interrupted", None)).await;
+    send(&mut music, 1, send_track(track("Missing", "missing-artwork"))).await;
+    receive(&mut music).await;
+    presence_where(server, |p| shows(p, "Missing", None)).await;
+    let cached = std::time::Instant::now();
+    send(&mut music, 1, send_track(track("Fixture track", "slow-artwork"))).await;
+    assert_eq!(receive(&mut music).await["data"]["assets"]["large_image"], cover);
+    presence_where(server, |p| shows(p, "Fixture track", Some(cover))).await;
+    eprintln!("SoundCloud cached RPC cover to gateway fixture: {} ms", cached.elapsed().as_millis());
+
     let mut playback = yapfast_discord::own_activity::MusicPlayback {
-        soundcloud_source: false,
+        soundcloud_source: true,
         title: "Fixture track".into(),
         artist: "Fixture artist".into(),
         duration_ms: 72_000,
         position_ms: 48_000,
-        start_ms: None,
+        start_ms: Some(1_800_000_000_000),
     };
     discord.set_music_playback(Some(playback.clone()));
-    presence_where(server, |p| {
-        p["activities"].as_array().is_some_and(|a| {
-            a.iter()
-                .any(|a| {
-                    a["name"] == "SoundCloud"
-                        && a.get("timestamps").is_none()
-                        && a["state"] == "Paused at 0:48 · Fixture artist"
-                        && a["details"] == "Fixture track"
-                })
-        })
-    })
-    .await;
+    // The installed SoundCloud client can clear the RPC activity on pause.
+    send(&mut music, 1, send_track(Value::Null)).await;
+    receive(&mut music).await;
+    let pause = std::time::Instant::now();
+    playback.start_ms = None;
+    discord.set_music_playback(Some(playback.clone()));
+    let paused = |p: &Value| p["activities"].as_array().is_some_and(|a| a.iter().any(|card| {
+        card["name"] == "SoundCloud" && card["details"] == "Fixture track"
+            && card["state"] == "Paused" && card.get("timestamps").is_none()
+            && card["assets"]["large_image"] == cover
+    }));
+    presence_where(server, paused).await;
+    eprintln!("SoundCloud pause to gateway fixture: {} ms", pause.elapsed().as_millis());
+
+    playback.position_ms = 60_000;
+    discord.set_music_playback(Some(playback.clone()));
+    // Wait past the interrupted cover's response before checking the current card.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    presence_where(server, paused).await;
+
+    let resume = std::time::Instant::now();
     playback.start_ms = Some(1_800_000_001_000);
     discord.set_music_playback(Some(playback));
+    send(&mut music, 1, send_track(track("Fixture track", "slow-artwork"))).await;
+    receive(&mut music).await;
     presence_where(server, |p| {
         p["activities"].as_array().is_some_and(|a| {
             a.iter().any(|a| {
@@ -1404,6 +1446,28 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
                     && a["state"] == "Fixture artist"
             })
         })
+    })
+    .await;
+    eprintln!("SoundCloud resume to gateway fixture: {} ms", resume.elapsed().as_millis());
+
+    // A different paused track must never inherit the previous track's cover.
+    discord.set_music_playback(Some(yapfast_discord::own_activity::MusicPlayback {
+        soundcloud_source: true,
+        title: "New paused track".into(),
+        artist: "Fixture artist".into(),
+        duration_ms: 72_000,
+        position_ms: 0,
+        start_ms: None,
+    }));
+    presence_where(server, |p| shows(p, "New paused track", None)).await;
+    send(&mut music, 1, send_track(track("New paused track", "new-artwork"))).await;
+    receive(&mut music).await;
+    presence_where(server, |p| {
+        shows(p, "New paused track", Some("mp:external/fixture/https/example.com/new-artwork.png"))
+            && p["activities"].as_array().is_some_and(|a| a.iter().any(|card| {
+                card["details"] == "New paused track" && card["state"] == "Paused"
+                    && card.get("timestamps").is_none()
+            }))
     })
     .await;
     drop(music);

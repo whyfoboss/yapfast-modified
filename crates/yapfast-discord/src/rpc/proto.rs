@@ -91,10 +91,9 @@ pub fn external_lookup(response: &Value) -> Result<Assets> {
         .context("invalid external assets")?
         .iter()
         .filter_map(|asset| {
-            Some((
-                asset["url"].as_str()?.to_owned(),
-                format!("mp:{}", asset["external_asset_path"].as_str()?),
-            ))
+            let url = asset["url"].as_str()?;
+            let key = format!("mp:{}", asset["external_asset_path"].as_str()?);
+            proxy_image(&key).then(|| (url.to_owned(), key))
         })
         .collect())
 }
@@ -157,6 +156,16 @@ fn normalize_activity(
         }
     }
     for key in ["state", "details"] {
+        if name.eq_ignore_ascii_case("SoundCloud")
+            && let Some(text) = output[key].as_str()
+            && let Some(prefix) = text.strip_suffix("...")
+            && prefix.chars().count() >= 126
+            && text.chars().count() > 128
+        {
+            // SoundCloud appends its ellipsis after truncating to 128 UTF-16 units.
+            let short = prefix.chars().take(127).chain(['…']).collect::<String>();
+            output[key] = json!(short);
+        }
         if let Some(value) = output.get(key) {
             ensure!(
                 value.as_str().is_some_and(|s| s.chars().count() <= 128),
@@ -368,6 +377,7 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     type Artwork = Pin<Box<dyn Future<Output = (Value, Option<Assets>, Option<Assets>)> + Send>>;
     let mut artwork: Option<Artwork> = None;
     let mut artwork_input = None::<Value>;
+    let mut previous_cover = None;
     loop {
         let (opcode, payload) = {
             let frame = read(&mut stream);
@@ -387,7 +397,9 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                             }
                             images.extend(external);
                         }
-                        if let Ok(value) = normalize_activity(artwork_input.take().as_ref().unwrap_or(&input), &client, &name, assets.as_ref(), &images, true) {
+                        if let Ok(value) = normalize_activity(artwork_input.take().as_ref().unwrap_or(&input), &client, &name, assets.as_ref(), &images, true)
+                            && (value["assets"]["large_image"].is_string() || value["assets"]["small_image"].is_string())
+                        {
                             updates.send((id, Some(Arc::new(value)), true)).await?;
                         }
                     }
@@ -453,7 +465,20 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                     artwork = None;
                     artwork_input = None;
                 }
-                if eligible && !same_artwork {
+                if !same_artwork && eligible {
+                    if name == "SoundCloud" {
+                        let image = input["assets"]["large_image"].as_str().unwrap_or_default();
+                        let cache = if web_address(image, 512) {
+                            if images.contains_key(image) { "hit" } else { "miss" }
+                        } else if image.is_empty() { "absent" } else { "asset key" };
+                        let track_id = input["details"].as_str().map(crate::own_activity::trace_track);
+                        let key = (track_id, crate::own_activity::trace_track(image), cache);
+                        if previous_cover != Some(key) {
+                            previous_cover = Some(key);
+                            tracing::debug!(target: "yapfast_media", cache, ?track_id,
+                                "RPC SoundCloud artwork input");
+                        }
+                    }
                     let pictures = &input["assets"];
                     let mut addresses = Vec::new();
                     let mut fetch_named = false;
@@ -490,55 +515,44 @@ pub async fn connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                                 }
                                 let addresses: Vec<_> =
                                     addresses.iter().map(String::as_str).collect();
+                                let started = Instant::now();
                                 let response = tokio::time::timeout(
                                     WAIT,
                                     api.rpc_external_assets(&client, &addresses),
                                 )
-                                .await
-                                .ok()?
-                                .ok()?;
-                                external_lookup(&response).ok()
+                                .await;
+                                let (outcome, resolved) = match response {
+                                    Ok(Ok(value)) => match external_lookup(&value) {
+                                        Ok(mut assets) => {
+                                            assets.retain(|url, _| addresses.contains(&url.as_str()));
+                                            ("response", Some(assets))
+                                        }
+                                        Err(_) => ("invalid response", None),
+                                    },
+                                    Ok(Err(_)) => ("request failed", None),
+                                    Err(_) => ("timeout", None),
+                                };
+                                tracing::debug!(target: "yapfast_media", application_id = %client,
+                                    track_id = input["details"].as_str().map(crate::own_activity::trace_track),
+                                    requested = addresses.len(), resolved = resolved.as_ref().map_or(0, Assets::len),
+                                    elapsed_ms = started.elapsed().as_millis() as u64, outcome, "RPC external artwork resolved");
+                                resolved
                             };
                             let (named, external) = tokio::join!(named, external);
                             (input, named, external)
                         }));
                     }
                 }
-                // Give a fast SoundCloud cover lookup a chance to travel with the
-                // track in one presence update. Keep slow lookups asynchronous.
-                let mut published = value.clone();
-                if name.eq_ignore_ascii_case("SoundCloud")
-                    && !same_artwork
-                    && let Some(pending) = artwork.as_mut()
-                    && let Ok((_, named, external)) =
-                        tokio::time::timeout(Duration::from_millis(150), pending).await
-                {
-                    artwork = None;
-                    artwork_input = None;
-                    if let Some(named) = named {
-                        assets = Some(named);
-                    }
-                    if let Some(external) = external {
-                        if images.len() + external.len() > KEPT_IMAGES {
-                            images.clear();
-                        }
-                        images.extend(external);
-                    }
-                    if let Ok(normalized) =
-                        normalize_activity(input, &client, &name, assets.as_ref(), &images, true)
-                    {
-                        published = Some(Arc::new(normalized));
-                    }
-                }
                 // Bound queued updates even when games publish very frequently.
                 updates
-                    .send((id, published.filter(|_| eligible), false))
+                    .send((id, value.clone().filter(|_| eligible), false))
                     .await?;
                 let published_at_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
                 tracing::debug!(target: "yapfast_media", source = "rpc", active = value.is_some(),
+                    has_cover = value.as_ref().is_some_and(|v| v["assets"]["large_image"].is_string()),
                     artwork_pending = artwork.is_some(), elapsed_ms = received.elapsed().as_millis() as u64,
                     published_at_ms, "RPC state published");
                 send(
@@ -607,6 +621,18 @@ mod tests {
             json!({"button_urls":["https://example.com"]})
         );
         assert!(shown.get("id").is_none());
+    }
+
+    #[test]
+    fn soundcloud_accepts_its_overlong_ellipsis_and_keeps_the_cover() {
+        let input = json!({
+            "type": 2, "details": format!("{}...", "a".repeat(128)),
+            "assets": {"large_image":"mp:external/abc/https/example.com/cover.png"}
+        });
+        let activity = normalize(&input, "42", "SoundCloud", None, &Assets::new()).unwrap();
+        assert_eq!(activity["details"], format!("{}…", "a".repeat(127)));
+        assert_eq!(activity["assets"], input["assets"]);
+        assert!(normalize(&input, "42", "Game", None, &Assets::new()).is_err());
     }
 
     #[test]

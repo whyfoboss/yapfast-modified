@@ -5517,10 +5517,10 @@ async function api(req: Request, path: string, origin: string): Promise<Response
     return json([{ id: "123456789012345679", name: "game_cover", type: 1 }]);
   }
   // Images given by address: the media proxy's path for each.
-  if (req.method === "POST" && path === "/applications/123456789012345678/external-assets") {
+  if (req.method === "POST" && /^\/applications\/(123456789012345678|123456789012345681)\/external-assets$/.test(path)) {
     const body: any = await req.json().catch(() => ({}));
     const urls: string[] = Array.isArray(body.urls) ? body.urls : [];
-    if (urls.some(url => url.endsWith("/slow-artwork.png"))) await Bun.sleep(1500);
+    if (urls.some(url => url.endsWith("slow-artwork.png"))) await Bun.sleep(1500);
     if (urls.some(url => url.endsWith("/missing-artwork.png"))) return json({ message: "Unavailable" }, 503);
     return json(urls.map(url => ({ url, external_asset_path: `external/fixture/${url.replace("://", "/")}` })));
   }

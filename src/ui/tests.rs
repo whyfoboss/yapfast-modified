@@ -15550,6 +15550,76 @@ fn task9_game_activity_visible_and_navigable_in_preview_mode() {
 }
 
 #[test]
+fn rich_presence_preview_waits_for_the_sent_card() {
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    let mut adapter = adapter.borrow_mut();
+    adapter.app.state.discord_linked = true;
+    adapter.app.state.discord_online = true;
+    adapter.app.state.discord_user = Some("account".into());
+    adapter.app.state.discord_show_game = true;
+    let card = |title: &str, assets: serde_json::Value, paused: bool| {
+        let mut value = serde_json::json!({
+            "type": 2, "name": "SoundCloud", "application_id": "42",
+            "details": title, "state": if paused { "Paused" } else { "Artist" },
+            "assets": assets
+        });
+        if !paused {
+            value["timestamps"] = serde_json::json!({"start":1800000000000_u64,"end":1800000072000_u64});
+        }
+        Arc::new(yapfast_discord::activity::activities(&serde_json::json!([value]))[0].clone())
+    };
+    adapter.app.state.discord_presence_preview.pending = true;
+    games::refresh_game_activity(&mut adapter, &window);
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_game_activity_preview_status(), "Update pending");
+
+    let old = card("Previous", serde_json::json!({}), false);
+    adapter.app.state.discord_presence_preview.sent = Some(old);
+    adapter.activity_manager.set_media_track(Some(yapfast_core::activity::MediaTrack {
+        title: "Next".into(),
+        artist: "Artist".into(),
+        source: Some("SoundCloud".into()),
+        requires_music_rpc: false,
+        album: String::new(),
+        duration_ms: 72_000,
+        position_ms: 0,
+        position_updated_ms: None,
+        is_playing: true,
+        thumbnail_url: None,
+        thumbnail: None,
+        url: None,
+    }));
+    games::refresh_game_activity(&mut adapter, &window);
+    let row = window.get_game_activity_preview();
+    assert_eq!(row.name, "Previous");
+    assert_eq!(row.large_url, "discord-app-icon:42");
+    assert_eq!(window.get_game_activity_preview_status(), "Update pending");
+
+    let new = card("Next", serde_json::json!({"large_image":"mp:external/hash/https/example.com/next.png"}), true);
+    adapter.app.state.discord_presence_preview.sent = Some(new);
+    adapter.app.state.discord_presence_preview.pending = false;
+    games::refresh_game_activity(&mut adapter, &window);
+    let row = window.get_game_activity_preview();
+    assert_eq!(row.name, "Next");
+    assert!(row.large_url.ends_with("/next.png"));
+    assert_eq!(row.details, "Paused");
+    assert_eq!((row.start, row.end), (0, 0));
+    assert_eq!(window.get_game_activity_preview_status(), "Sent to Discord");
+
+    adapter.app.state.discord_online = false;
+    games::refresh_game_activity(&mut adapter, &window);
+    assert!(!window.get_has_game_activity_preview());
+}
+
+#[test]
 fn task9_live_media_session_updates_game_activity_and_profile() {
     i_slint_backend_testing::init_no_event_loop();
     let window = classic_window();
@@ -15681,8 +15751,16 @@ fn task9_live_media_session_updates_game_activity_and_profile() {
         ("PAUSED", "Bass Cannon", 30)
     );
     assert_eq!(preview.artwork.size().width, 1);
+
+    paused.position_ms = 48_000;
+    adapter.borrow_mut().activity_manager.set_media_track(Some(paused.clone()));
+    games::refresh_game_activity(&mut adapter.borrow_mut(), &window);
+    let preview = window.get_game_activity_preview();
+    assert!(preview.paused);
+    assert_eq!(preview.paused_position, 48);
+
     paused.is_playing = true;
-    paused.position_ms = 33_000;
+    paused.position_ms = 48_000;
     adapter
         .borrow_mut()
         .activity_manager

@@ -506,6 +506,7 @@ impl Application {
                 })
                 .collect();
         }
+        self.state.discord_presence_preview = snapshot.presence_preview.clone();
         let playing = snapshot.playing.as_deref();
         // Snapshots come often; the game rarely changes.
         let shown = self.state.discord_playing.as_ref();
@@ -659,6 +660,7 @@ impl Application {
         self.state.custom_status = None;
         self.state.discord_show_game = false;
         self.state.discord_playing = None;
+        self.state.discord_presence_preview = Default::default();
         self.state.join_sounds.clear();
         self.state.sound_catalog = None;
         self.show_lists()

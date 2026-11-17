@@ -1554,7 +1554,7 @@ export component GameActivitySettings inherits VerticalLayout {
                 Middle {
                     Rectangle {
                         width: 8px; height: 8px; border-radius: 4px;
-                        background: root.active-scenario > 0 ? #f0b232 : #43b581;
+                        background: root.preview-status == "Sent to Discord" ? #43b581 : #f0b232;
                     }
                 }
                 Text { text: root.preview-status; color: Theme.muted; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
@@ -1571,7 +1571,7 @@ export component GameActivitySettings inherits VerticalLayout {
         border-radius: 8px;
         HorizontalLayout {
             padding: 12px; spacing: 8px;
-            Text { text: "No game or media activity currently active."; color: Theme.muted; font-size: 13px; }
+            Text { text: root.preview-status == "Update pending" ? root.preview-status : "No game or media activity currently active."; color: Theme.muted; font-size: 13px; }
         }
     }
 

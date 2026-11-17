@@ -1876,6 +1876,7 @@ impl Tracker {
             soundboard_volume: self.soundboard_volume,
             join_sounds: self.join_sounds.clone(),
             playing: self.playing.clone(),
+            presence_preview: Default::default(),
             friend_requests: people.friend_requests,
             voice,
             listed: None,

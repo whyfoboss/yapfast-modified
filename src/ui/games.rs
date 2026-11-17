@@ -353,30 +353,45 @@ pub(super) fn refresh_game_activity(adapter: &mut Adapter, window: &YapfastWindo
     }
     window.set_active_simulated_scenario(adapter.layout.active_simulated_scenario.unwrap_or(0));
 
-    // Resolve current activity
     #[cfg(feature = "discord")]
-    if let Some(row) = local_activity_row(
-        &adapter.activity_manager,
-        adapter.app.state.discord_playing.as_ref(),
-        now_ms(),
-    ) {
-        if !window.get_has_game_activity_preview() || window.get_game_activity_preview() != row {
-            window.set_game_activity_preview(row);
-            window.set_has_game_activity_preview(true);
-            tracing::debug!(target: "yapfast_media", ui_at_ms = now_ms(), "Game Activity card updated");
-        }
-        let status = if adapter.activity_manager.active_scenario.is_some() {
-            "SIMULATED SCENARIO (TEST/DEMO)".into()
-        } else if adapter.app.state.discord_show_game {
-            "ACTIVE (DISCORD SHARING ON)".into()
+    {
+        let state = &adapter.app.state;
+        let simulated = adapter.activity_manager.active_scenario.is_some();
+        let local = || local_activity_row(&adapter.activity_manager, state.discord_playing.as_ref(), now_ms());
+        let (row, status) = if state.discord_linked && !simulated && state.discord_show_game {
+            let preview = &state.discord_presence_preview;
+            let row = state.discord_online.then_some(preview.sent.as_deref()).flatten().map(profile::activity_row);
+            let status = if preview.pending || (!state.discord_online && local().is_some()) {
+                "Update pending"
+            } else if row.is_some() {
+                "Sent to Discord"
+            } else {
+                ""
+            };
+            (row, status)
         } else {
-            "LOCAL PREVIEW (SHARING DISABLED)".into()
+            let row = local();
+            let status = if row.is_none() {
+                ""
+            } else if simulated {
+                "SIMULATED SCENARIO (TEST/DEMO)"
+            } else if state.discord_linked {
+                "Local preview (sharing disabled)"
+            } else {
+                "Local preview"
+            };
+            (row, status)
         };
-        window.set_game_activity_preview_status(status);
-    } else if window.get_has_game_activity_preview() {
-        window.set_game_activity_preview(Default::default());
-        window.set_has_game_activity_preview(false);
-        tracing::debug!(target: "yapfast_media", ui_at_ms = now_ms(), "Game Activity card cleared");
+        if let Some(row) = row {
+            if !window.get_has_game_activity_preview() || window.get_game_activity_preview() != row {
+                window.set_game_activity_preview(row);
+                window.set_has_game_activity_preview(true);
+            }
+        } else if window.get_has_game_activity_preview() {
+            window.set_game_activity_preview(Default::default());
+            window.set_has_game_activity_preview(false);
+        }
+        window.set_game_activity_preview_status(status.into());
     }
 }
 
@@ -495,6 +510,11 @@ pub(super) fn publish_music_playback(adapter: &mut Adapter) {
                 ))
                 .is_ok()
         {
+            tracing::debug!(target: "yapfast_media",
+                soundcloud = playback.as_ref().is_some_and(|track| track.soundcloud_source),
+                track_id = playback.as_ref().map(|track| yapfast_discord::own_activity::trace_track(&track.title)),
+                paused = playback.as_ref().is_some_and(|track| track.start_ms.is_none()),
+                "media playback sent to Discord service");
             adapter.published_music = playback;
         }
     }

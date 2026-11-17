@@ -507,6 +507,8 @@ pub struct AppState {
     /// it shows.
     pub discord_show_game: bool,
     pub discord_playing: Option<chat::Playing>,
+    #[cfg(feature = "discord")]
+    pub discord_presence_preview: yapfast_discord::gateway::PresencePreview,
     /// How loud the Discord account's soundboard plays, as Discord keeps
     /// it: from 0 to 100, on its slider's curve.
     pub soundboard_volume: f32,

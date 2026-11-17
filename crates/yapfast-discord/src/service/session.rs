@@ -80,7 +80,11 @@ pub(super) async fn run(
         tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord build page checked");
     });
     loop {
-        snapshots.send_modify(|snapshot| Arc::make_mut(snapshot).status = Status::Connecting);
+        snapshots.send_modify(|snapshot| {
+            let snapshot = Arc::make_mut(snapshot);
+            snapshot.status = Status::Connecting;
+            snapshot.presence_preview = Default::default();
+        });
         let connect = async {
             let playing = *shared.show_game.borrow();
             crate::own_activity::merge(
@@ -241,7 +245,10 @@ async fn connected_session(
         tracker.view(guild, Some(channel));
     }
     tracker.beside(shared.beside.as_ref().map(|(_, thread)| thread.as_str()));
-    shared.snapshots.send_replace(Arc::new(tracker.snapshot()));
+    let mut presence_preview = gateway.presence_preview();
+    let mut snapshot = tracker.snapshot();
+    snapshot.presence_preview = presence_preview.borrow_and_update().clone();
+    shared.snapshots.send_replace(Arc::new(snapshot));
     tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord online snapshot published");
     // Discord's client counts every command index out of date in a new
     // session.
@@ -250,6 +257,7 @@ async fn connected_session(
         .send(Live::CommandIndexStale(crate::commands::Stale::All));
     let quiet = tracker.next_quiet(now_ms());
     let mut session = Session {
+        last_soundcloud: None,
         gateway,
         publisher: Publisher::new(shared.snapshots.clone()),
         acks: ReadAcks::new(shared.api.clone()),
@@ -270,7 +278,7 @@ async fn connected_session(
     if let Err(error) = session.connect().await {
         return Ended::Failed(error);
     }
-    session.run(requests).await
+    session.run(requests, &mut presence_preview).await
 }
 
 /// glibc otherwise holds freed READY allocations for the entire session.
@@ -290,6 +298,7 @@ fn trim_startup_heap() {
 struct Session<'a> {
     gateway: Gateway,
     tracker: Tracker,
+    last_soundcloud: Option<Arc<Value>>,
     shared: &'a mut Shared,
     publisher: Publisher,
     join: VoiceJoin,
@@ -327,7 +336,11 @@ impl Session<'_> {
             .await
     }
 
-    async fn run(mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Ended {
+    async fn run(
+        mut self,
+        requests: &mut mpsc::UnboundedReceiver<Request>,
+        presence_preview: &mut watch::Receiver<crate::gateway::PresencePreview>,
+    ) -> Ended {
         loop {
             let done = tokio::select! {
                 () = self.publisher.due(), if self.publisher.stale() => {
@@ -348,6 +361,17 @@ impl Session<'_> {
                     self.show_presence().await
                 }
                 () = activity_changed(&mut self.shared.activity) => self.show_presence().await,
+                () = activity_changed(presence_preview) => {
+                    let preview = presence_preview.borrow_and_update().clone();
+                    self.shared.snapshots.send_if_modified(|snapshot| {
+                        if snapshot.presence_preview == preview {
+                            return false;
+                        }
+                        Arc::make_mut(snapshot).presence_preview = preview;
+                        true
+                    });
+                    Ok(())
+                }
                 () = self.away_changes.as_mut(), if self.away_change.is_some() => {
                     self.show_presence().await
                 }
@@ -739,12 +763,29 @@ impl Session<'_> {
         let activity = self.shared.activity.borrow_and_update().clone();
         let activity = activity.filter(|_| self.tracker.show_game);
         self.show_playing(activity.as_deref());
+        let activity = if self.tracker.show_game {
+            crate::own_activity::soundcloud_on_pause(
+                activity,
+                &mut self.last_soundcloud,
+                self.shared.music_playback.as_ref(),
+            )
+        } else {
+            self.last_soundcloud = None;
+            None
+        };
         crate::own_activity::merge(
             &mut presence,
             activity.as_deref(),
             self.shared.music_playback.as_ref(),
         );
         if presence != self.shared.presence {
+            if let Some(track) = crate::gateway::soundcloud_track(&presence) {
+                tracing::debug!(target: "yapfast_media",
+                    input_track_id = self.shared.music_playback.as_ref().map(|music| crate::own_activity::trace_track(&music.title)),
+                    track_id = track["details"].as_str().map(crate::own_activity::trace_track),
+                    paused = track["state"] == "Paused", has_cover = crate::gateway::soundcloud_cover(track),
+                    "Discord activity selected");
+            }
             self.gateway.update_presence(presence.clone()).await?;
             self.shared
                 .lists
@@ -779,7 +820,7 @@ impl Session<'_> {
 }
 
 /// A stopped activity bridge must not spin the session loop.
-async fn activity_changed(activity: &mut watch::Receiver<Option<Arc<Value>>>) {
+async fn activity_changed<T>(activity: &mut watch::Receiver<T>) {
     if activity.changed().await.is_ok() {
         return;
     }

@@ -334,7 +334,10 @@ impl Adapter {
         };
         let preview_timed = window.get_settings_open()
             && window.get_settings_section() == 8
-            && window.get_has_game_activity_preview();
+            && {
+                let row = window.get_game_activity_preview();
+                window.get_has_game_activity_preview() && !row.paused && (row.start > 0 || row.end > 0)
+            };
         let shown = preview_timed
             || (window.get_profile_editor_open()
                 && window

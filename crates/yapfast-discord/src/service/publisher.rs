@@ -55,6 +55,7 @@ impl Publisher {
     pub(super) fn publish(&mut self, tracker: &mut Tracker, lists: &MemberLists) {
         let mut snapshot = tracker.snapshot();
         snapshot.listed = lists.listed();
+        snapshot.presence_preview = self.snapshots.borrow().presence_preview.clone();
         self.snapshots.send_replace(Arc::new(snapshot));
         self.published = Instant::now();
         self.stale = false;

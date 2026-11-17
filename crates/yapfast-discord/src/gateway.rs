@@ -13,6 +13,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    sync::Arc,
     time::Duration,
 };
 
@@ -21,7 +22,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
     net::TcpStream,
-    sync::mpsc,
+    sync::{mpsc, watch},
     task::JoinHandle,
     time::{Instant, timeout},
 };
@@ -243,6 +244,7 @@ enum Command {
 /// keeps up the heartbeats and resumes a lost connection, while commands
 /// wait their turn under Discord's send limit.
 pub struct Gateway {
+    presence_preview: watch::Receiver<PresencePreview>,
     commands: mpsc::UnboundedSender<Command>,
     /// Dispatched events, and last, the error that ended the session.
     events: mpsc::UnboundedReceiver<Result<Dispatch>>,
@@ -310,7 +312,9 @@ impl Gateway {
         limiter: Limiter,
     ) -> Result<(Self, Value)> {
         let started = Instant::now();
+        let (preview, presence_preview) = watch::channel(PresencePreview::default());
         let mut connection = Connection {
+            preview,
             socket: open(url).await?,
             inflater: Inflater::default(),
             sequence: None,
@@ -338,11 +342,13 @@ impl Gateway {
             "client_state": {"guild_versions": {}},
         });
         connection.write(IDENTIFY, &identify).await?;
+        connection.last_presence = identify.get("presence").cloned();
 
         let (commands, commands_received) = mpsc::unbounded_channel();
         let (events_sent, events) = mpsc::unbounded_channel();
         let task = tokio::spawn(connection.run(commands_received, events_sent));
         let mut gateway = Self {
+            presence_preview,
             commands,
             events,
             task,
@@ -374,6 +380,10 @@ impl Gateway {
             }
         }
         anyhow!("the Discord gateway connection stopped")
+    }
+
+    pub(crate) fn presence_preview(&self) -> watch::Receiver<PresencePreview> {
+        self.presence_preview.clone()
     }
 
     /// Tells Discord this session's status and activities.
@@ -593,12 +603,14 @@ impl Limiter {
     }
 }
 
-fn soundcloud_track_with_cover(presence: &Value) -> Option<&str> {
-    let activity = presence["activities"].as_array()?.iter().find(|activity| {
+pub(crate) fn soundcloud_track(presence: &Value) -> Option<&Value> {
+    presence["activities"].as_array()?.iter().find(|activity| {
         activity["type"] == 2 && activity["name"] == "SoundCloud"
-    })?;
-    activity["assets"]["large_image"].as_str().filter(|image| !image.is_empty())?;
-    activity["details"].as_str().filter(|track| !track.is_empty())
+    })
+}
+
+pub(crate) fn soundcloud_cover(track: &Value) -> bool {
+    track["assets"]["large_image"].as_str().is_some_and(|image| !image.is_empty())
 }
 
 // Artwork and clock corrections must leave room for a track change or pause.
@@ -623,8 +635,23 @@ fn soundcloud_refresh(previous: &Value, next: &Value) -> bool {
         && next.iter().any(|activity| activity["name"] == "SoundCloud")
 }
 
+/// The activity written on this session and whether its replacement is waiting.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PresencePreview {
+    pub sent: Option<Arc<crate::activity::Activity>>,
+    pub pending: bool,
+}
+
+fn preview_activity(presence: &Value) -> Option<crate::activity::Activity> {
+    presence["activities"]
+        .as_array()?
+        .iter()
+        .find_map(crate::activity::activity)
+}
+
 /// One connection to the gateway, and the session it carries on.
 struct Connection {
+    preview: watch::Sender<PresencePreview>,
     socket: Socket,
     inflater: Inflater,
     sequence: Option<u64>,
@@ -648,6 +675,26 @@ struct Connection {
 }
 
 impl Connection {
+    fn preview_pending(&self, next: &Value) {
+        let candidate = preview_activity(next);
+        self.preview.send_if_modified(|preview| {
+            let pending = preview.sent.as_deref() != candidate.as_ref();
+            std::mem::replace(&mut preview.pending, pending) != pending
+        });
+    }
+
+    fn preview_sent(&self) {
+        let sent = self.last_presence.as_ref().and_then(preview_activity);
+        let pending = self.presence.as_ref().is_some_and(|(_, next)| preview_activity(next) != sent);
+        self.preview.send_if_modified(|preview| {
+            if preview.sent.as_deref() == sent.as_ref() && preview.pending == pending {
+                return false;
+            }
+            *preview = PresencePreview { sent: sent.map(Arc::new), pending };
+            true
+        });
+    }
+
     /// Carries the session until the gateway closes it or it ends; then
     /// passes on why.
     async fn run(
@@ -663,6 +710,8 @@ impl Connection {
                 Ok(()) => return,
                 Err(error) => error,
             };
+            let pending = self.presence.is_some() || self.preview.borrow().sent.is_some();
+            self.preview.send_replace(PresencePreview { sent: None, pending });
             if let Err(error) = self.resume(lost).await {
                 let _ = events.send(Err(error));
                 return;
@@ -709,31 +758,51 @@ impl Connection {
                     }
                     *held = None;
                 }
-                () = tokio::time::sleep_until(presence_at), if self.presence.is_some() => {
+                () = tokio::time::sleep_until(presence_at), if self.presence.is_some() && self.resumes == 0 => {
                     if let Some((due, presence)) = self.presence.take() {
                         self.presences.sent.push_back(Instant::now());
-                        self.write(PRESENCE_UPDATE, &presence).await?;
+                        let started = Instant::now();
+                        if let Err(error) = self.write(PRESENCE_UPDATE, &presence).await {
+                            self.presence = Some((due, presence));
+                            return Err(error);
+                        }
+                        let soundcloud = soundcloud_track(&presence);
                         tracing::debug!(target: "yapfast_media",
                             overdue_ms = Instant::now().saturating_duration_since(due).as_millis() as u64,
+                            track_id = soundcloud.and_then(|track| track["details"].as_str()).map(crate::own_activity::trace_track),
+                            write_ms = started.elapsed().as_millis() as u64,
+                            paused = soundcloud.is_some_and(|track| track["state"] == "Paused"),
+                            has_cover = soundcloud.is_some_and(soundcloud_cover),
                             "gateway presence sent");
                         self.last_presence = Some(presence);
+                        self.preview_sent();
                     }
                 }
                 command = commands.recv(), if held.is_none() => match command {
                     Some(Command::Send(PRESENCE_UPDATE, data)) if self.last_presence.as_ref() == Some(&data) => {
                         self.presence = None;
+                        self.preview_pending(&data);
                     }
                     Some(Command::Send(PRESENCE_UPDATE, data)) => {
                         tracing::debug!(target: "yapfast_media",
-                            wait_ms = presence_at.saturating_duration_since(now).as_millis() as u64,
+                            rate_wait_ms = self.presences.free_at(now).saturating_duration_since(now).as_millis() as u64,
+                            gateway_wait_ms = free_at.saturating_duration_since(now).as_millis() as u64,
+                            replaces_pending = self.presence.is_some(),
+                            track_id = soundcloud_track(&data).and_then(|track| track["details"].as_str()).map(crate::own_activity::trace_track),
                             "gateway presence queued");
                         // Coalesce the track, timeline, and cover arriving in a short burst.
                         // Keep the first deadline so sustained traffic cannot postpone delivery.
-                        let track_ready = soundcloud_track_with_cover(&data).is_some_and(|track| {
-                            self.last_presence.as_ref().and_then(soundcloud_track_with_cover) != Some(track)
-                                && self.last_presence.as_ref().is_none_or(|last| !soundcloud_refresh(last, &data))
+                        let send_promptly = soundcloud_track(&data).is_some_and(|next| {
+                            let previous = self.last_presence.as_ref().and_then(soundcloud_track);
+                            let pause_changed = previous.is_some_and(|previous| {
+                                previous["details"] == next["details"]
+                                    && (previous["state"] == "Paused") != (next["state"] == "Paused")
+                            });
+                            let new_cover_ready = soundcloud_cover(next)
+                                && previous.is_none_or(|previous| previous["details"] != next["details"]);
+                            pause_changed || new_cover_ready
                         });
-                        let due = if track_ready {
+                        let due = if send_promptly {
                             now
                         } else {
                             self.presence.as_ref().map_or_else(
@@ -741,6 +810,7 @@ impl Connection {
                                 |(due, _)| *due,
                             )
                         };
+                        self.preview_pending(&data);
                         self.presence = Some((due, data));
                     }
                     Some(Command::Send(op, data)) => {
@@ -782,8 +852,14 @@ impl Connection {
                             .as_str()
                             .filter(|url| secure(url))
                             .map(str::to_owned);
+                        self.preview_sent();
                     }
                     Event::Resumed => {
+                        if let Some((due, _)) = &mut self.presence {
+                            // Give the updates accumulated during the interruption a turn.
+                            *due = (*due).max(Instant::now() + Duration::from_millis(150));
+                        }
+                        self.preview_sent();
                         tracing::info!("resumed the Discord gateway session");
                         self.resumes = 0;
                     }
@@ -1084,6 +1160,7 @@ mod tests {
         let discord = Discord::new().await;
         let (socket, _peer) = tokio::join!(open(&discord.url), discord.accept(SLOW_HEARTBEAT));
         let mut connection = Connection {
+            preview: watch::channel(PresencePreview::default()).0,
             socket: socket.unwrap(),
             inflater: Inflater::default(),
             sequence: None,
@@ -1185,10 +1262,18 @@ mod tests {
             Event::MessageCreate
         );
 
+        let mut preview = gateway.presence_preview();
+        gateway.update_presence(json!({"activities": [
+            {"name": "SoundCloud", "type": 2, "details": "Track"}
+        ]})).await.unwrap();
+        assert_eq!(peer.command().await["op"], PRESENCE_UPDATE);
+        let sent = preview.wait_for(|state| state.sent.is_some()).await.unwrap().sent.clone();
+
         // The connection drops without a close frame.
         drop(peer);
         let mut peer = discord.accept(SLOW_HEARTBEAT).await;
         let resume = peer.command().await;
+        assert!(preview.borrow().sent.is_none() && preview.borrow().pending);
         assert_eq!(resume["op"], RESUME);
         assert_eq!(resume["d"]["session_id"], "session");
         assert_eq!(resume["d"]["seq"], 2, "READY, then the message");
@@ -1198,6 +1283,9 @@ mod tests {
         let missed = next(&mut gateway).await.unwrap();
         assert_eq!(missed.data["id"], "2");
         assert_eq!(next(&mut gateway).await.unwrap().event, Event::Resumed);
+
+        assert_eq!(preview.borrow().sent, sent);
+        assert!(!preview.borrow().pending);
 
         // Commands go on the new connection.
         gateway.subscribe("guild", None).await.unwrap();
@@ -1561,6 +1649,26 @@ mod tests {
             .await
             .expect("the track change must go before the rate limit window expires");
         assert_eq!(command["d"], next);
+
+        let mut preview = gateway.presence_preview();
+        let sent = preview.wait_for(|state| {
+            state.sent.as_ref().is_some_and(|card| card.details.as_deref() == Some("New track"))
+        }).await.unwrap().sent.clone();
+        let queued_at = Instant::now();
+        let obsolete = activity("Another track", "another cover");
+        gateway.update_presence(obsolete).await.unwrap();
+        let mut paused = next;
+        paused["activities"][0]["state"] = json!("Paused");
+        paused["activities"][0].as_object_mut().unwrap().remove("timestamps");
+        gateway.update_presence(paused.clone()).await.unwrap();
+        assert_eq!(preview.wait_for(|state| state.pending).await.unwrap().sent, sent);
+        assert_eq!(peer.command().await["d"], paused);
+        let state = preview.wait_for(|state| !state.pending).await.unwrap();
+        let card = state.sent.as_ref().unwrap();
+        assert_eq!(card.details.as_deref(), Some("New track"));
+        assert_eq!(card.state.as_deref(), Some("Paused"));
+        assert!(card.start.is_none() && card.end.is_none());
+        eprintln!("Coalesced pause to gateway peer with full limiter: {} ms", queued_at.elapsed().as_millis());
     }
 
     /// Compresses payloads as Discord's gateway does, sharing one stream.
