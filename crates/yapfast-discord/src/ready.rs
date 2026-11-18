@@ -1356,6 +1356,7 @@ pub fn servers(ready: &Value) -> Vec<Server> {
         .as_array()
         .into_iter()
         .flatten()
+        .inspect(|guild| trace_guild_channels("READY", guild))
         .filter_map(server)
         .collect()
 }
@@ -1553,7 +1554,7 @@ pub fn parse_thread(value: &Value) -> Option<Channel> {
 }
 
 fn parse_channel(channel: &Value) -> Option<Channel> {
-    Some(Channel {
+    let parsed = Channel {
         channel_type: channel["type"]
             .as_u64()
             .and_then(|kind| u8::try_from(kind).ok()),
@@ -1580,7 +1581,68 @@ fn parse_channel(channel: &Value) -> Option<Channel> {
             .and_then(|seconds| u32::try_from(seconds).ok())
             .unwrap_or_default(),
         ..Default::default()
+    };
+    trace_channel_label("parsed", &parsed.id, Some(&parsed.name), None, None);
+    Some(parsed)
+}
+
+fn channel_trace_targets() -> &'static [String] {
+    static TARGETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    TARGETS.get_or_init(|| {
+        std::env::var("YAPFAST_CHANNEL_TRACE")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .take(2)
+            .map(str::to_owned)
+            .collect()
     })
+}
+
+pub(crate) fn channel_trace_enabled() -> bool {
+    !channel_trace_targets().is_empty()
+}
+
+/// A short trace for two selected channels, identified in logs only as A and B.
+pub fn trace_channel_label(
+    stage: &'static str,
+    id: &str,
+    name: Option<&str>,
+    obfuscated: Option<bool>,
+    listed: Option<bool>,
+) {
+    let Some(target) = channel_trace_targets().iter().position(|target| target == id) else {
+        return;
+    };
+    let label = match name {
+        None | Some("") => "absent",
+        Some("___hidden___") => "placeholder",
+        Some(_) => "real",
+    };
+    let channel = ["A", "B"][target];
+    tracing::debug!(target: "yapfast_channel", channel, stage, label, ?obfuscated, ?listed,
+        "channel label observed");
+}
+
+pub(crate) fn trace_channel_payload(stage: &'static str, channel: &Value) {
+    if channel_trace_enabled() && let Some(id) = channel["id"].as_str() {
+        trace_channel_label(
+            stage,
+            id,
+            channel["name"].as_str(),
+            channel["flags"].as_u64().map(|flags| flags & (1 << 17) != 0),
+            None,
+        );
+    }
+}
+
+pub(crate) fn trace_guild_channels(stage: &'static str, guild: &Value) {
+    if channel_trace_enabled() {
+        for channel in guild["channels"].as_array().into_iter().flatten() {
+            trace_channel_payload(stage, channel);
+        }
+    }
 }
 
 /// The name Discord shows for a user object: their display name, else their

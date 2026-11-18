@@ -145,7 +145,7 @@ export component RailItem inherits Rectangle {
     in property <bool> discord;
     in property <bool> reorderable;
     property <bool> dragging;
-    callback drag-start;
+    callback drag-start(length, length, image);
     callback drag-move(length, length);
     callback drag-end(length, length);
     callback clicked;
@@ -228,7 +228,7 @@ export component RailItem inherits Rectangle {
                 if self.pressed && root.reorderable && !root.dragging && (abs(self.mouse-y - self.pressed-y) > 4px || abs(self.mouse-x - self.pressed-x) > 4px) {
                     root.dragging = true;
                     Tip.text = "";
-                    root.drag-start();
+                    root.drag-start(self.pressed-x - root.tile-left, self.pressed-y, root.shown-picture);
                 }
                 if root.dragging {
                     root.drag-move(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
@@ -247,7 +247,7 @@ export component RailItem inherits Rectangle {
                 }
             }
             changed has-hover => {
-                if self.has-hover {
+                if self.has-hover && !root.dragging {
                     Tip.text = root.tip;
                     Tip.side = root.server-tip ? 3 : 1;
                     Tip.x = root.absolute-position.x + root.width;
@@ -929,6 +929,31 @@ export component ServerRail inherits Rectangle {
     property <length> target-middle;
     property <length> drag-x;
     property <length> drag-y;
+    in property <bool> window-focused: true;
+    changed window-focused => {
+        if !root.window-focused { root.clear-drag(); }
+    }
+    property <bool> preview-active;
+    out property <bool> preview-shown: root.preview-active && root.drag-id != "";
+    out property <length> preview-x: root.drag-x - root.grab-x;
+    out property <length> preview-y: root.drag-y - root.grab-y;
+    out property <image> preview-picture;
+    out property <string> preview-initial;
+    property <length> grab-x;
+    property <length> grab-y;
+    function clear-drag() {
+        root.drag-id = "";
+        root.target-id = "";
+        root.preview-active = false;
+        root.preview-picture = @image-url("");
+    }
+    function finish-drag(source: string, x: length, y: length) {
+        let target = root.target-id;
+        let before = y < root.target-middle;
+        let valid = root.drag-id == source && target != "" && target != source && root.within-rail(x, y);
+        root.clear-drag();
+        if valid { root.reorder-server(source, target, before); }
+    }
     pure function within-rail(x: length, y: length) -> bool {
         return x >= list.absolute-position.x && x < list.absolute-position.x + list.width
             && y >= list.absolute-position.y && y < list.absolute-position.y + list.height;
@@ -1000,6 +1025,8 @@ export component ServerRail inherits Rectangle {
                     if self.pointed {
                         root.target-id = server.id;
                         root.target-middle = self.middle;
+                    } else if root.target-id == server.id {
+                        root.target-id = "";
                     }
                 }
                 changed pointed => { self.report-target(); }
@@ -1030,12 +1057,7 @@ export component ServerRail inherits Rectangle {
                     clicked => { root.toggle-folder(server.id); }
                     drag-start => { root.target-id = ""; root.drag-id = server.id; }
                     drag-move(x, y) => { root.drag-x = x; root.drag-y = y; }
-                    drag-end(x, y) => {
-                        let target = root.target-id;
-                        let before = y < root.target-middle;
-                        root.drag-id = "";
-                        if target != "" && root.within-rail(x, y) { root.reorder-server(server.id, target, before); }
-                    }
+                    drag-end(x, y) => { root.finish-drag(server.id, x, y); }
                     context-menu(x, y) => { root.open-server-menu(server.id, x, y); }
                 }
                 if server.dm: RailItem {
@@ -1062,16 +1084,17 @@ export component ServerRail inherits Rectangle {
                     opacity: server.unavailable || root.drag-id == server.id ? 0.5 : 1;
                     clicked => { root.navigate-server(server.id); }
                     context-menu(x, y) => { root.open-server-menu(server.id, x, y); }
-                    drag-start => { root.target-id = ""; root.drag-id = server.id; }
-                    drag-move(x, y) => { root.drag-x = x; root.drag-y = y; }
-                    drag-end(x, y) => {
-                        let target = root.target-id;
-                        let before = y < root.target-middle;
-                        root.drag-id = "";
-                        if target != "" && root.within-rail(x, y) {
-                            root.reorder-server(server.id, target, before);
-                        }
+                    drag-start(x, y, picture) => {
+                        root.target-id = "";
+                        root.drag-id = server.id;
+                        root.grab-x = x;
+                        root.grab-y = y;
+                        root.preview-picture = picture;
+                        root.preview-initial = server.initial;
+                        root.preview-active = true;
                     }
+                    drag-move(x, y) => { root.drag-x = x; root.drag-y = y; }
+                    drag-end(x, y) => { root.finish-drag(server.id, x, y); }
                 }
                 if server-slot.pointed && root.drag-id != server.id: Rectangle {
                     x: 9px; y: root.drag-y < server-slot.middle ? 0px : parent.height - 2px;

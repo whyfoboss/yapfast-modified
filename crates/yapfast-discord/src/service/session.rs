@@ -129,6 +129,7 @@ pub(super) async fn run(
                 let snapshot = Arc::make_mut(snapshot);
                 snapshot.status = Status::Offline(reason.into());
                 snapshot.voice.clear();
+                snapshot.presence_preview = Default::default();
             });
             // Keep answering until Yapfast drops the handles.
             while let Some(request) = requests.recv().await {
@@ -140,6 +141,7 @@ pub(super) async fn run(
             let snapshot = Arc::make_mut(snapshot);
             snapshot.status = Status::Offline("Can't reach Discord. Reconnecting...".into());
             snapshot.voice.clear();
+            snapshot.presence_preview = Default::default();
         });
         let wait = tokio::time::sleep(reconnects.wait(&error, up));
         tokio::pin!(wait);
@@ -201,6 +203,9 @@ fn refuse(request: Request, shared: &mut Shared) {
                 let snapshot = Arc::make_mut(snapshot);
                 snapshot.show_game = shown;
                 snapshot.playing = None;
+                if !shown {
+                    snapshot.presence_preview = Default::default();
+                }
             });
         }
         _ => {}
@@ -246,8 +251,13 @@ async fn connected_session(
     }
     tracker.beside(shared.beside.as_ref().map(|(_, thread)| thread.as_str()));
     let mut presence_preview = gateway.presence_preview();
+    let initial_preview = presence_preview.borrow_and_update().clone();
+    if let Some(sent) = initial_preview.sent_presence.as_deref() {
+        shared.presence = sent.clone();
+        shared.lists.own_presence(&tracker, Presence::parse(sent));
+    }
     let mut snapshot = tracker.snapshot();
-    snapshot.presence_preview = presence_preview.borrow_and_update().clone();
+    snapshot.presence_preview = initial_preview;
     shared.snapshots.send_replace(Arc::new(snapshot));
     tracing::debug!(target: "yapfast_startup", ms = started.elapsed().as_millis() as u64, "Discord online snapshot published");
     // Discord's client counts every command index out of date in a new
@@ -256,8 +266,22 @@ async fn connected_session(
         .live
         .send(Live::CommandIndexStale(crate::commands::Stale::All));
     let quiet = tracker.next_quiet(now_ms());
+    let queued_presence = shared.presence.clone();
+    let soundcloud_rpc_clients = crate::own_activity::subscribe_soundcloud_rpc_clients();
+    let had_soundcloud_rpc_client = *soundcloud_rpc_clients.borrow() > 0;
     let mut session = Session {
         last_soundcloud: None,
+        last_rpc_identity: None,
+        late_soundcloud_artwork: crate::own_activity::subscribe_late_soundcloud_artwork(),
+        soundcloud_rpc_clients,
+        had_soundcloud_rpc_client,
+        disabled_games: crate::game_detection::custom_games::subscribe_disabled(),
+        queued_presence,
+        smtc_supersedes_rpc: shared.music_playback.is_some(),
+        waiting_for_rpc: false,
+        rpc_catchup: Box::pin(tokio::time::sleep(until(None))),
+        waiting_for_smtc_pause: false,
+        smtc_pause_catchup: Box::pin(tokio::time::sleep(until(None))),
         gateway,
         publisher: Publisher::new(shared.snapshots.clone()),
         acks: ReadAcks::new(shared.api.clone()),
@@ -299,6 +323,17 @@ struct Session<'a> {
     gateway: Gateway,
     tracker: Tracker,
     last_soundcloud: Option<Arc<Value>>,
+    last_rpc_identity: Option<(String, String)>,
+    late_soundcloud_artwork: watch::Receiver<Option<Arc<Value>>>,
+    soundcloud_rpc_clients: watch::Receiver<usize>,
+    had_soundcloud_rpc_client: bool,
+    disabled_games: watch::Receiver<Vec<String>>,
+    queued_presence: Value,
+    smtc_supersedes_rpc: bool,
+    waiting_for_rpc: bool,
+    rpc_catchup: Pin<Box<Sleep>>,
+    waiting_for_smtc_pause: bool,
+    smtc_pause_catchup: Pin<Box<Sleep>>,
     shared: &'a mut Shared,
     publisher: Publisher,
     join: VoiceJoin,
@@ -360,9 +395,139 @@ impl Session<'_> {
                     self.publisher.changed();
                     self.show_presence().await
                 }
-                () = activity_changed(&mut self.shared.activity) => self.show_presence().await,
+                () = activity_changed(&mut self.shared.activity) => {
+                    let next_identity = self.shared.activity.borrow().as_deref().and_then(|act| {
+                        (act["type"] == 2
+                            && act["name"]
+                                .as_str()
+                                .is_some_and(|n| n.eq_ignore_ascii_case("SoundCloud")))
+                        .then(|| {
+                            (
+                                act["details"].as_str().unwrap_or_default().to_owned(),
+                                act["state"].as_str().unwrap_or_default().to_owned(),
+                            )
+                        })
+                    });
+                    match next_identity {
+                        Some(identity) if self.last_rpc_identity.as_ref() != Some(&identity) => {
+                            self.last_rpc_identity = Some(identity);
+                            self.smtc_supersedes_rpc = false;
+                            self.waiting_for_rpc = false;
+                            self.waiting_for_smtc_pause = false;
+                            self.gateway.set_presence_pending(false);
+                            self.show_presence().await
+                        }
+                        Some(_) if self.waiting_for_rpc => Ok(()),
+                        Some(_) => {
+                            self.waiting_for_smtc_pause = false;
+                            self.show_presence().await
+                        }
+                        None => {
+                            self.last_rpc_identity = None;
+                            self.waiting_for_rpc = false;
+                            // `soundcloud-rs` clears RPC on pause, which can arrive tens of
+                            // milliseconds ahead of Windows SMTC's `Paused` event. Hold off
+                            // briefly so we publish `Paused on m:ss` directly instead of
+                            // flashing a false clear.
+                            let rpc_client_alive = !self.had_soundcloud_rpc_client
+                                || *self.soundcloud_rpc_clients.borrow() > 0;
+                            let await_smtc_pause = self.tracker.show_game
+                                && rpc_client_alive
+                                && self.shared.activity.borrow().as_deref().is_none_or(|act| {
+                                    act["name"]
+                                        .as_str()
+                                        .is_some_and(|n| n.eq_ignore_ascii_case("SoundCloud"))
+                                })
+                                && self.last_soundcloud.as_ref().is_some_and(|prev| {
+                                    self.shared.music_playback.as_ref().is_some_and(|music| {
+                                        music.start_ms.is_some()
+                                            && crate::activity::activity(prev)
+                                                .is_some_and(|rpc| music.matches(&rpc))
+                                    })
+                                });
+                            if await_smtc_pause {
+                                self.waiting_for_smtc_pause = true;
+                                self.smtc_pause_catchup
+                                    .as_mut()
+                                    .reset(Instant::now() + Duration::from_millis(250));
+                                self.gateway.set_presence_pending(true);
+                                Ok(())
+                            } else {
+                                self.waiting_for_smtc_pause = false;
+                                self.gateway.set_presence_pending(false);
+                                self.show_presence().await
+                            }
+                        }
+                    }
+                }
+                () = self.rpc_catchup.as_mut(), if self.waiting_for_rpc => {
+                    self.waiting_for_rpc = false;
+                    self.gateway.set_presence_pending(false);
+                    self.show_presence().await
+                }
+                () = self.smtc_pause_catchup.as_mut(), if self.waiting_for_smtc_pause => {
+                    self.waiting_for_smtc_pause = false;
+                    self.gateway.set_presence_pending(false);
+                    self.show_presence().await
+                }
+                () = activity_changed(&mut self.soundcloud_rpc_clients) => {
+                    let count = *self.soundcloud_rpc_clients.borrow_and_update();
+                    if count > 0 {
+                        self.had_soundcloud_rpc_client = true;
+                        Ok(())
+                    } else if self.had_soundcloud_rpc_client {
+                        self.waiting_for_smtc_pause = false;
+                        self.last_soundcloud = None;
+                        self.gateway.set_presence_pending(false);
+                        self.show_presence().await
+                    } else {
+                        Ok(())
+                    }
+                }
+                () = activity_changed(&mut self.disabled_games) => {
+                    let soundcloud_disabled = crate::game_detection::custom_games::is_disabled(
+                        &self.disabled_games.borrow_and_update(),
+                        "SoundCloud",
+                    );
+                    if soundcloud_disabled && (self.last_soundcloud.is_some() || self.waiting_for_smtc_pause) {
+                        self.waiting_for_smtc_pause = false;
+                        self.last_soundcloud = None;
+                        self.gateway.set_presence_pending(false);
+                        self.show_presence().await
+                    } else {
+                        Ok(())
+                    }
+                }
+                () = activity_changed(&mut self.late_soundcloud_artwork) => {
+                    let late = self.late_soundcloud_artwork.borrow_and_update().clone();
+                    if let (Some(late), Some(prev)) = (late, self.last_soundcloud.as_ref())
+                        && late["application_id"] == prev["application_id"]
+                        && late["details"] == prev["details"]
+                        && late["state"] == prev["state"]
+                    {
+                        self.last_soundcloud = Some(late);
+                        if self
+                            .shared
+                            .music_playback
+                            .as_ref()
+                            .is_some_and(|music| music.start_ms.is_none())
+                        {
+                            self.show_presence().await
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
                 () = activity_changed(presence_preview) => {
                     let preview = presence_preview.borrow_and_update().clone();
+                    if let Some(sent) = preview.sent_presence.as_deref() {
+                        self.shared.presence = sent.clone();
+                        self.shared
+                            .lists
+                            .own_presence(&self.tracker, Presence::parse(sent));
+                    }
                     self.shared.snapshots.send_if_modified(|snapshot| {
                         if snapshot.presence_preview == preview {
                             return false;
@@ -553,11 +718,48 @@ impl Session<'_> {
             }
             Request::MusicPlayback(playback) => {
                 self.shared.music_playback = playback;
-                self.show_presence().await
+                self.smtc_supersedes_rpc = self.shared.music_playback.is_some();
+                self.waiting_for_smtc_pause = false;
+                let await_rpc = self.tracker.show_game
+                    && self
+                        .shared
+                        .music_playback
+                        .as_ref()
+                        .is_some_and(|music| {
+                            music.soundcloud_source
+                                && music.start_ms.is_some()
+                                && !music.title.trim().is_empty()
+                                && self.shared.activity.borrow().as_deref().is_some_and(|act| {
+                                    act["name"]
+                                        .as_str()
+                                        .is_some_and(|n| n.eq_ignore_ascii_case("SoundCloud"))
+                                        && act["type"] == 2
+                                        && crate::activity::activity(act)
+                                            .is_some_and(|rpc| !music.matches(&rpc))
+                                })
+                        });
+                if await_rpc {
+                    self.waiting_for_rpc = true;
+                    self.rpc_catchup
+                        .as_mut()
+                        .reset(Instant::now() + Duration::from_millis(650));
+                    self.gateway.set_presence_pending(true);
+                    Ok(())
+                } else {
+                    self.waiting_for_rpc = false;
+                    self.gateway.set_presence_pending(false);
+                    self.show_presence().await
+                }
             }
             Request::ShowGame(shown) => {
                 // As with the status, the settings update that follows agrees.
                 self.tracker.show_game = shown;
+                if !shown {
+                    self.waiting_for_rpc = false;
+                    self.waiting_for_smtc_pause = false;
+                    self.last_soundcloud = None;
+                    self.gateway.set_presence_pending(false);
+                }
                 self.publisher.changed();
                 self.show_presence().await
             }
@@ -762,35 +964,54 @@ impl Session<'_> {
         let mut presence = self.tracker.own_presence(away);
         let activity = self.shared.activity.borrow_and_update().clone();
         let activity = activity.filter(|_| self.tracker.show_game);
-        self.show_playing(activity.as_deref());
-        let activity = if self.tracker.show_game {
+        let rpc_client_alive = activity.is_some()
+            || !self.had_soundcloud_rpc_client
+            || *self.soundcloud_rpc_clients.borrow() > 0;
+        let soundcloud_enabled = self.tracker.show_game
+            && rpc_client_alive
+            && !crate::game_detection::custom_games::is_disabled(
+                &self.disabled_games.borrow(),
+                "SoundCloud",
+            );
+        let activity = if soundcloud_enabled {
             crate::own_activity::soundcloud_on_pause(
                 activity,
                 &mut self.last_soundcloud,
                 self.shared.music_playback.as_ref(),
             )
         } else {
+            if self.waiting_for_smtc_pause {
+                self.waiting_for_smtc_pause = false;
+                self.gateway.set_presence_pending(false);
+            }
             self.last_soundcloud = None;
-            None
+            activity
         };
-        crate::own_activity::merge(
+        crate::own_activity::merge_with_fallback(
             &mut presence,
             activity.as_deref(),
             self.shared.music_playback.as_ref(),
+            self.smtc_supersedes_rpc && !self.waiting_for_rpc,
         );
-        if presence != self.shared.presence {
-            if let Some(track) = crate::gateway::soundcloud_track(&presence) {
+        let shown_activity = presence["activities"]
+            .as_array()
+            .and_then(|list| list.iter().find(|item| item["type"] != 4));
+        self.show_playing(shown_activity);
+        let mut clean = presence.clone();
+        let artwork_pending = crate::gateway::take_artwork_pending(&mut clean);
+        if !crate::own_activity::same_effective_presence(&self.queued_presence, &clean)
+            || (artwork_pending && self.queued_presence != clean)
+        {
+            if let Some(track) = crate::gateway::soundcloud_track(&clean) {
                 tracing::debug!(target: "yapfast_media",
-                    input_track_id = self.shared.music_playback.as_ref().map(|music| crate::own_activity::trace_track(&music.title)),
-                    track_id = track["details"].as_str().map(crate::own_activity::trace_track),
-                    paused = track["state"] == "Paused", has_cover = crate::gateway::soundcloud_cover(track),
+                    input_corr_id = self.shared.music_playback.as_ref().map(|music| crate::own_activity::trace_track(&music.title)),
+                    corr_id = track["details"].as_str().map(crate::own_activity::trace_track),
+                    paused = crate::own_activity::is_paused_state(track["state"].as_str()),
+                    has_cover = crate::gateway::soundcloud_cover(track),
                     "Discord activity selected");
             }
-            self.gateway.update_presence(presence.clone()).await?;
-            self.shared
-                .lists
-                .own_presence(&self.tracker, Presence::parse(&presence));
-            self.shared.presence = presence;
+            self.gateway.update_presence(presence).await?;
+            self.queued_presence = clean;
         }
         Ok(())
     }

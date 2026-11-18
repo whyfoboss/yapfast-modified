@@ -606,8 +606,8 @@ next time the profile is fetched.
 
 ## Editing one's main profile
 
-Edit Profile, the avatar and the banner in the account's menu at bottom left,
-and Edit profile in My account open Yapfast's version of the "Main Profile" tab of Discord's
+Edit Profile in the bottom-left account menu and Edit profile in My account
+open Yapfast's version of the "Main Profile" tab of Discord's
 Profiles settings (`application/profile_editor.rs`, the dialog in
 `ui/server.slint`, which it shares with the [server
 profile's](#editing-ones-server-profile)). It reads the profile with `GET
@@ -621,6 +621,10 @@ profile's](#editing-ones-server-profile)). It reads the profile with `GET
   `#rrggbb` or one of nine swatches, "Default" for none. With Nitro,
   Profile Banner, with Change Banner and Remove Banner, in its place.
 - Bio, Markdown up to 190 characters, with what's left counted under it.
+
+The avatar and banner in the bottom-left account menu show a pencil on hover
+or keyboard focus. Either opens the profile editor. Choose an image action
+inside the editor to open the file picker. Save applies the draft.
 
 With Nitro, it also edits the profile's theme and the display name's style,
 and anyone may choose the server tag to wear.
@@ -812,13 +816,16 @@ sandboxed game that can't see the runtime directory; Yapfast doesn't change
 sandbox permissions or set up Wine's bridge.
 
 Yapfast answers the handshake with READY, PING with PONG, and CLOSE and
-SET_ACTIVITY, where `activity: null` clears the activity; other commands get
+SET_ACTIVITY, where `activity: null` or an omitted `activity` field clears the
+activity; other commands get
 an error. As Discord's desktop client does when a game connects, it asks
 `GET /oauth2/applications/{id}/rpc` for the application's name, and the
 first time the game names an image, `GET /oauth2/applications/{id}/assets`
 for its images' ids. Images given by https address go to
 `POST /applications/{id}/external-assets` and show through the media proxy
-as `mp:` assets; each client's last 32 addresses are kept. Text and timing
+as `mp:` assets; each client's last 128 addresses are kept across RPC
+reconnections. Rewritten SoundCloud `500x500` artwork URLs whose proxied image
+is missing fall back to the producer's `50x50` address. Text and timing
 are published while images are resolving. An image update only enriches
 its client's current activity and preserves the order of active clients. Timestamps in
 seconds become the gateway's milliseconds, and buttons become labels with
@@ -841,26 +848,35 @@ application id. A matched session supplies playback position and pause state
 for that integration. Browser applications are excluded from own presence.
 
 On Windows, the Game Activity card and own profiles use the SMTC playback
-position when the current media session matches the RPC track. Paused
+position when the current media session matches the RPC track (including
+multi-artist or collaborator credits where SMTC names one of the credited
+artists), keeping embedded WebView2 music sessions selected across pauses when
+an opaque browser tab is active. Paused
 positions stay fixed. While paused, published SoundCloud activity keeps the
-matching track and available cover, shows Paused, and removes playback
+matching track and available cover (including delayed cover resolution), shows
+`Paused on m:ss` (`Paused on h:mm:ss` for long sets, or `Paused` when no
+position is reported), and removes playback
 timestamps. This also covers the RPC client clearing or replacing its
-activity on pause. On resume it restores the artist and uses the Windows
+activity on pause, including when the confirmed SMTC pause arrives after the
+initial reconciliation window; genuine stops, track replacements and RPC client
+exits clear the retained track so stale events never revive it. On resume it restores the artist and uses the Windows
 playback timeline. Video RPC,
 including YouTube reported as Playing, is filtered from own presence.
 Media and RPC artwork can arrive after the initial activity. SoundCloud
 cover and clock refreshes leave the last available presence update for
-playback changes. For local troubleshooting, `YAPFAST_MEDIA_LOG=1` enables
+playback changes, while a settled track's initial cover delivers after a brief
+skip guard rather than waiting out the full rate-limit window. For local troubleshooting, `YAPFAST_MEDIA_LOG=1` enables
 the `yapfast_media` transition and timing diagnostics. Track identifiers
 are local to one run and let the playback, artwork and gateway events be
 matched without logging track names.
 
-Rich Presence Preview shows the last activity written to the Discord gateway,
+Rich Presence Preview and linked own-account cards show the last activity
+written to the Discord gateway,
 including the artwork reference and timestamps from that write. Update pending
 keeps that card visible until the next write. Sent to Discord describes the
 local write. During gateway resume, the preview waits for Discord to resume
-the session before showing its last sent card again. Own profile and local
-playback continue to show the live media session.
+the session before showing its last sent card again. Unlinked preview mode
+continues to show the live media session.
 
 A per-app Off rule filters the published presence, the own roster line and
 live and cached own activity cards. The rule remains in the detected list

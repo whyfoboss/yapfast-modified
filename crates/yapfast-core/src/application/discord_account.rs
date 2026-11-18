@@ -440,6 +440,9 @@ impl Application {
                 Status::Offline(reason) => reason.clone(),
             });
         }
+        if self.state.discord_user != snapshot.user_id {
+            self.state.discord_presence_preview = Default::default();
+        }
         self.state.discord_linked = true;
         self.state.discord_user = snapshot.user_id.clone();
         self.state.discord_presence =
@@ -506,7 +509,15 @@ impl Application {
                 })
                 .collect();
         }
-        self.state.discord_presence_preview = snapshot.presence_preview.clone();
+        self.state.discord_presence_preview = if self.state.discord_online && snapshot.show_game {
+            snapshot.presence_preview.clone()
+        } else {
+            yapfast_discord::gateway::PresencePreview {
+                sent: None,
+                pending: snapshot.show_game && snapshot.presence_preview.pending,
+                ..Default::default()
+            }
+        };
         let playing = snapshot.playing.as_deref();
         // Snapshots come often; the game rarely changes.
         let shown = self.state.discord_playing.as_ref();

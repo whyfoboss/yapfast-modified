@@ -232,7 +232,7 @@ pub(super) fn bind(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
         }
     });
 
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     {
         let (tx, mut rx) = tokio::sync::watch::channel(None);
         match yapfast_core::activity::windows_smtc::winrt::WindowsSmtcListener::start(tx) {
@@ -267,13 +267,29 @@ pub(super) fn apply_media_update(
     window: &YapfastWindow,
     mut track: Option<yapfast_core::activity::MediaTrack>,
 ) {
+    let now = now_ms();
     if let Some(track) = track.as_mut() {
-        track.position_updated_ms.get_or_insert_with(now_ms);
+        let resumed_with_stale_stamp = adapter
+            .activity_manager
+            .active_media
+            .as_ref()
+            .is_some_and(|old| {
+                !old.is_playing
+                    && track.is_playing
+                    && old.title == track.title
+                    && track.position_updated_ms.is_some()
+                    && track.position_updated_ms == old.position_updated_ms
+            });
+        if resumed_with_stale_stamp {
+            track.position_updated_ms = Some(now);
+        } else {
+            track.position_updated_ms.get_or_insert_with(|| now);
+        }
     }
     adapter.activity_manager.set_media_track(track);
     refresh_game_activity(adapter, window);
     adapter.refresh_own_activity(window);
-    tracing::debug!(target: "yapfast_media", source = "smtc", ui_at_ms = now_ms(), "activity UI updated");
+    tracing::debug!(target: "yapfast_media", source = "smtc", ui_at_ms = now, "activity UI updated");
 }
 
 pub(super) fn refresh_game_activity(adapter: &mut Adapter, window: &YapfastWindow) {
@@ -361,7 +377,12 @@ pub(super) fn refresh_game_activity(adapter: &mut Adapter, window: &YapfastWindo
         let (row, status) = if state.discord_linked && !simulated && state.discord_show_game {
             let preview = &state.discord_presence_preview;
             let row = state.discord_online.then_some(preview.sent.as_deref()).flatten().map(profile::activity_row);
-            let status = if preview.pending || (!state.discord_online && local().is_some()) {
+            let clear_pending = state.discord_online
+                && preview
+                    .sent
+                    .as_deref()
+                    .is_some_and(|sent| !adapter.activity_manager.activity_enabled(&sent.name));
+            let status = if preview.pending || clear_pending || (!state.discord_online && local().is_some()) {
                 "Update pending"
             } else if row.is_some() {
                 "Sent to Discord"
@@ -522,8 +543,8 @@ pub(super) fn publish_music_playback(adapter: &mut Adapter) {
 
 #[cfg(feature = "discord")]
 pub(super) fn own_activity_rows(
+    state: &yapfast_core::application::AppState,
     manager: &yapfast_core::activity::ActivityManager,
-    playing: Option<&yapfast_core::chat::Playing>,
     fallback: &yapfast_core::chat::Activities,
 ) -> ModelRc<ActivityRow> {
     use yapfast_core::activity::activity_key;
@@ -531,6 +552,30 @@ pub(super) fn own_activity_rows(
     if !manager.global_sharing_enabled {
         return ModelRc::default();
     }
+    if state.discord_linked && manager.active_scenario.is_none() {
+        if !state.discord_online || !state.discord_show_game {
+            return ModelRc::default();
+        }
+        let preview = &state.discord_presence_preview;
+        let rows: Vec<ActivityRow> = if let Some(sent) = preview.sent.as_deref() {
+            let mut row = profile::activity_row(sent);
+            if preview.pending || !manager.activity_enabled(&sent.name) {
+                row.heading = format!("{} · UPDATE PENDING", row.heading).into();
+            }
+            vec![row]
+        } else if preview.pending {
+            vec![ActivityRow {
+                heading: "UPDATE PENDING".into(),
+                name: "Updating Discord activity…".into(),
+                media: true,
+                ..Default::default()
+            }]
+        } else {
+            Vec::new()
+        };
+        return ModelRc::new(VecModel::from(rows));
+    }
+    let playing = state.discord_playing.as_ref();
     let now = now_ms();
     let mut rows: Vec<_> = local_activity_row(manager, playing, now)
         .into_iter()

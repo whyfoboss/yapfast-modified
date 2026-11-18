@@ -358,12 +358,17 @@ impl SoundTimeline {
         if let Some((previous, expected)) = self.previous {
             let distance = sequence.wrapping_sub(previous) as i16;
             if distance <= 0 {
-                return None;
-            }
-            let samples = timestamp.wrapping_sub(expected) as usize;
-            // Conceal short packet losses. A long gap may be intentional silence.
-            if distance > 1 && samples <= 2880 && samples.is_multiple_of(120) {
-                missing = samples;
+                if distance >= -50 {
+                    return None;
+                }
+                // A fallback reconnect keeps the streamer's audio SSRC while
+                // starting a fresh RTP sequence number.
+            } else {
+                let samples = timestamp.wrapping_sub(expected) as usize;
+                // Conceal short packet losses. A long gap may be intentional silence.
+                if distance > 1 && samples <= 2880 && samples.is_multiple_of(120) {
+                    missing = samples;
+                }
             }
         }
         Some(std::iter::from_fn(move || {

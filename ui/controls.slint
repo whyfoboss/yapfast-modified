@@ -348,6 +348,7 @@ export component ServerTagChip inherits Rectangle {
 // A person's picture, or a round initial in their own tint until it arrives;
 // optionally ringed while they speak.
 export component Avatar inherits Rectangle {
+    in property <bool> dimmed;
     in property <string> initial;
     in property <color> tint: Theme.avatar;
     in property <image> picture;
@@ -410,6 +411,11 @@ export component Avatar inherits Rectangle {
         border-bottom-right-radius: root.corner-br >= 0px ? root.corner-br : root.shape;
         clip: true;
         Image { source: root.shown-picture; width: root.size; height: root.size; image-fit: cover; }
+    }
+    if root.dimmed: Rectangle {
+        width: root.size; height: root.size;
+        border-radius: root.shape;
+        background: #00000055;
     }
     if root.decoration.width > 0: Picture {
         x: -root.size / 10; y: -root.size / 10; width: root.size * 1.2; height: root.size * 1.2;

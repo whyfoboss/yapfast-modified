@@ -2943,6 +2943,7 @@ fn discord_channels_join_unless_locked_and_hidden_ones_show_on_request() {
     }));
     assert!(app.state.servers.iter().any(|server| server.discord));
     assert!(app.state.can_join_voice("discord:10:11"));
+    assert!(app.state.rooms.iter().any(|room| room.id == "discord:10:11" && room.name == "Lounge"));
     assert!(
         !app.state
             .rooms
@@ -2955,8 +2956,10 @@ fn discord_channels_join_unless_locked_and_hidden_ones_show_on_request() {
         app.state
             .rooms
             .iter()
-            .any(|room| room.id == "discord:10:12" && room.locked)
+            .any(|room| room.id == "discord:10:12" && room.locked && room.name == "Staff")
     );
+    app.dispatch(Action::ShowHiddenChannels(false));
+    assert!(!app.state.rooms.iter().any(|room| room.id == "discord:10:12"));
     assert!(!app.state.can_join_voice("discord:10:12"));
     assert!(
         app.dispatch(Action::RequestJoinVoice("discord:10:12".into()))

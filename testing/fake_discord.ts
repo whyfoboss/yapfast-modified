@@ -5520,7 +5520,7 @@ async function api(req: Request, path: string, origin: string): Promise<Response
   if (req.method === "POST" && /^\/applications\/(123456789012345678|123456789012345681)\/external-assets$/.test(path)) {
     const body: any = await req.json().catch(() => ({}));
     const urls: string[] = Array.isArray(body.urls) ? body.urls : [];
-    if (urls.some(url => url.endsWith("slow-artwork.png"))) await Bun.sleep(1500);
+    if (urls.some(url => url.endsWith("slow-artwork.png") || url.endsWith("slow-pause-artwork.png"))) await Bun.sleep(1500);
     if (urls.some(url => url.endsWith("/missing-artwork.png"))) return json({ message: "Unavailable" }, 503);
     return json(urls.map(url => ({ url, external_asset_path: `external/fixture/${url.replace("://", "/")}` })));
   }
@@ -7842,6 +7842,16 @@ function serveExternal(path: string, url: URL, range: string | null): Response |
   if (/^\/external\/[\w-]+\/video\.mp4$/.test(path)) {
     const data = path === "/external/post/video.mp4" ? clip : gifVideo;
     return servePart(data, "video/mp4", range);
+  }
+  if (path.startsWith("/external/fixture/")) {
+    if (path.includes("no500") && path.includes("500x500.")) return notFound();
+    const key = `fixture-cover@64x64`;
+    let data = scaled.get(key);
+    if (!data) {
+      data = png(64, 64, () => [255, 110, 40, 255]);
+      scaled.set(key, data);
+    }
+    return new Response(data, { headers: { "content-type": "image/png" } });
   }
   const m = path.match(/^\/external\/([\w-]+)\/(\d+)x(\d+)\.png$/);
   if (!m) return undefined;

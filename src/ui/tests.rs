@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn layout_recovers_valid_fields_and_replaces_the_previous_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join(LAYOUT);
+    std::fs::write(
+        &path,
+        br#"{"zoom":"invalid","sidebar_width":254,"members_hidden":true,"gif_picker_width":320}"#,
+    )
+    .unwrap();
+    let mut layout = Layout::read(folder.path());
+    assert_eq!(layout.zoom, None);
+    assert_eq!(layout.sidebar_width, Some(254.0));
+    assert!(layout.members_hidden);
+    assert_eq!(layout.picker_width, Some(320.0));
+
+    layout.zoom = Some(1.25);
+    layout.write(folder.path());
+    let saved = Layout::read(folder.path());
+    assert_eq!(saved.zoom, Some(1.25));
+    assert!(saved.members_hidden);
+    assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 1);
+}
+
 // Keep the coordinate and appearance regressions in the classic mode.
 // The Yapfast tests below exercise the new defaults separately.
 fn classic_window() -> YapfastWindow {
@@ -10597,7 +10620,20 @@ fn yapfast_account_popover_opens_profile_and_anchors_badge_tips() {
     window.on_set_status(move |_| seen.set(seen.get() + 1));
     let edits = Rc::new(Cell::new(0));
     let seen = edits.clone();
-    window.on_edit_profile(move || seen.set(seen.get() + 1));
+    let weak = window.as_weak();
+    window.on_edit_profile(move || {
+        seen.set(seen.get() + 1);
+        let window = weak.unwrap();
+        window.set_profile_editor_prompt(ProfileEditorPrompt {
+            main: true,
+            loading: true,
+            ..Default::default()
+        });
+        window.set_profile_editor_open(true);
+    });
+    let pictures = Rc::new(RefCell::new(Vec::new()));
+    let seen = pictures.clone();
+    window.on_pick_profile_picture(move |kind| seen.borrow_mut().push(kind));
 
     let native = window.window();
     let click = |position| {
@@ -10651,9 +10687,34 @@ fn yapfast_account_popover_opens_profile_and_anchors_badge_tips() {
         let hint = find(&|item| item_text_is(item, tip));
         assert!(hint.y < position.y && position.y - hint.y < distance);
     }
-    click(label("Edit profile from banner"));
+    click(label("Edit profile banner"));
+    assert!(window.get_profile_editor_open());
+    let ready = || {
+        window.set_profile_editor_prompt(ProfileEditorPrompt {
+            main: true,
+            avatar_enabled: true,
+            banner_enabled: true,
+            ..Default::default()
+        });
+        settle(&window);
+    };
+    ready();
+    assert!(
+        pictures.borrow().is_empty(),
+        "opening from the banner only edits the profile"
+    );
+    window.set_profile_editor_open(false);
+    settle(&window);
     open();
-    click(label("Edit profile from avatar"));
+    click(label("Edit profile avatar"));
+    assert!(window.get_profile_editor_open());
+    ready();
+    assert!(
+        pictures.borrow().is_empty(),
+        "opening from the avatar only edits the profile"
+    );
+    window.set_profile_editor_open(false);
+    settle(&window);
     assert_eq!(edits.get(), 2);
     open();
     click(label("Copy User ID"));
@@ -10747,6 +10808,90 @@ fn yapfast_server_rail_keeps_home_pinned_without_a_duplicate_separator() {
     assert!(navigated.borrow().is_empty(), "keep the unread-DM boundary");
     click(132.);
     assert_eq!(*navigated.borrow(), ["0"]);
+    window.hide().unwrap();
+}
+
+#[test]
+fn server_rail_drag_can_reenter_and_cancels_drops_outside_the_rail() {
+    use i_slint_core::{item_tree::ItemRc, window::WindowInner};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+
+    i_slint_backend_testing::init_no_event_loop();
+    let window = YapfastWindow::new().unwrap();
+    window.set_workspace(true);
+    window.set_window_focused(true);
+    window.set_servers(ModelRc::new(VecModel::from(vec![
+        ServerRow {
+            id: "first".into(),
+            initial: "F".into(),
+            ..Default::default()
+        },
+        ServerRow {
+            id: "second".into(),
+            initial: "S".into(),
+            ..Default::default()
+        },
+    ])));
+    let reorders = Rc::new(RefCell::new(Vec::new()));
+    let observed = reorders.clone();
+    window.on_reorder_server(move |source, target, before| {
+        observed.borrow_mut().push((source, target, before));
+    });
+    window.on_navigate_server(|_| panic!("drag must not navigate"));
+    window.show().unwrap();
+    let native = window.window();
+    native.set_size(slint::LogicalSize::new(1120., 760.));
+    let press = || {
+        native.dispatch_event(WindowEvent::PointerPressed {
+            position: slint::LogicalPosition::new(36., 74.),
+            button: PointerEventButton::Left,
+        });
+    };
+    let move_to = |x, y| {
+        native.dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        });
+    };
+    let release = |x, y| {
+        native.dispatch_event(WindowEvent::PointerReleased {
+            position: slint::LogicalPosition::new(x, y),
+            button: PointerEventButton::Left,
+        });
+    };
+    let preview_outside_rail = || {
+        settle(&window);
+        let component = WindowInner::from_pub(native).component();
+        ItemRc::new_root(component.clone())
+            .visit_descendants(|item| {
+                let center = item.map_to_item_tree(item.geometry().center(), &component);
+                if item.is_visible() && center.x > 72. && item_text_is(item, "F") {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_some()
+    };
+
+    press();
+    move_to(36., 82.);
+    move_to(160., 128.);
+    assert!(preview_outside_rail());
+    release(160., 128.);
+    assert!(!preview_outside_rail());
+    assert!(reorders.borrow().is_empty());
+
+    press();
+    move_to(36., 82.);
+    move_to(160., 128.);
+    move_to(36., 128.);
+    settle(&window);
+    release(36., 128.);
+    let calls = reorders.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0.as_str(), "first");
+    assert_eq!(calls[0].1.as_str(), "second");
     window.hide().unwrap();
 }
 
@@ -15619,6 +15764,233 @@ fn rich_presence_preview_waits_for_the_sent_card() {
     assert!(!window.get_has_game_activity_preview());
 }
 
+#[cfg(feature = "discord")]
+#[test]
+fn linked_presence_cards_mirror_outgoing_discord_state_across_all_surfaces() {
+    use yapfast_core::yapfast_discord::{
+        gateway::PresencePreview,
+        service::{Snapshot, Status},
+    };
+
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    let mut ad = adapter.borrow_mut();
+
+    let card = |title: &str, assets: serde_json::Value, paused: bool| {
+        let mut value = serde_json::json!({
+            "type": 2,
+            "name": "SoundCloud",
+            "application_id": "1090770350251458592",
+            "details": title,
+            "state": if paused { "Paused on 0:48" } else { "Burial" },
+            "assets": assets
+        });
+        if !paused {
+            value["timestamps"] =
+                serde_json::json!({"start": 1_800_000_000_000_u64, "end": 1_800_000_238_000_u64});
+        }
+        Arc::new(yapfast_discord::activity::activities(&serde_json::json!([value]))[0].clone())
+    };
+
+    ad.app.apply(Event::Discord(Arc::new(Snapshot {
+        status: Status::Online,
+        user_id: Some("account-1".into()),
+        show_game: true,
+        presence_preview: PresencePreview {
+            sent: None,
+            sent_presence: None,
+            pending: true,
+        },
+        ..Default::default()
+    })));
+    ad.app.state.account_profile = Some(Arc::new(yapfast_core::chat::Profile {
+        id: "account-1".into(),
+        name: "Alice".into(),
+        ..Default::default()
+    }));
+    ad.app.state.profile = Some(ProfileView {
+        profile: yapfast_core::chat::Profile {
+            id: "account-1".into(),
+            name: "Alice".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    ad.app.dispatch(Action::EditProfile);
+    ad.app.apply(Event::OwnProfile {
+        server: None,
+        result: Ok(yapfast_core::chat::OwnProfile {
+            fallback: yapfast_core::chat::Profile {
+                id: "account-1".into(),
+                name: "Alice".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    });
+
+    // Local SMTC already has "New Track" AND a local bitmap thumbnail, while Discord has no sent card yet.
+    ad.activity_manager.set_media_track(Some(yapfast_core::activity::MediaTrack {
+        requires_music_rpc: false,
+        title: "New Track".into(),
+        artist: "Burial".into(),
+        album: String::new(),
+        duration_ms: 238_000,
+        position_ms: 12_000,
+        position_updated_ms: Some(1_800_000_012_000),
+        is_playing: true,
+        thumbnail_url: None,
+        thumbnail: Some(Arc::new(Picture {
+            width: 1,
+            height: 1,
+            rgba: yapfast_core::chat::Pixels::new(1, 1, vec![200, 100, 50, 255]),
+            animation: None,
+        })),
+        url: None,
+        source: Some("SoundCloud".into()),
+    }));
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    ad.show_profile(&window);
+
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_game_activity_preview_status(), "Update pending");
+    assert_eq!(window.get_account_status(), "Online");
+    assert_eq!(window.get_account_activity_icon(), 0);
+    for row in [
+        window.get_account_profile().activities.row_data(0).unwrap(),
+        window.get_profile().activities.row_data(0).unwrap(),
+        window.get_profile_editor_activity().row_data(0).unwrap(),
+    ] {
+        assert_eq!(row.heading, "UPDATE PENDING");
+        assert_eq!(row.artwork.size().width, 0);
+    }
+
+    // Previous sent card with fallback icon while New Track is still queued:
+    let previous = card("Previous Track", serde_json::json!({}), false);
+    ad.app.state.discord_presence_preview.sent = Some(previous);
+    ad.app.state.discord_presence_preview.pending = true;
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    ad.show_profile(&window);
+
+    let preview_row = window.get_game_activity_preview();
+    assert_eq!(preview_row.name, "Previous Track");
+    assert_eq!(preview_row.large_url, "discord-app-icon:1090770350251458592");
+    assert_eq!(preview_row.artwork.size().width, 0);
+    assert_eq!(window.get_game_activity_preview_status(), "Update pending");
+    assert_eq!(window.get_account_status(), "SoundCloud");
+    assert_eq!(window.get_account_activity_icon(), 2);
+    for row in [
+        window.get_account_profile().activities.row_data(0).unwrap(),
+        window.get_profile().activities.row_data(0).unwrap(),
+        window.get_profile_editor_activity().row_data(0).unwrap(),
+    ] {
+        assert_eq!(row.name, "Previous Track");
+        assert_eq!(row.large_url, "discord-app-icon:1090770350251458592");
+        assert_eq!(row.artwork.size().width, 0, "must never leak SMTC local bitmap");
+        assert!(row.heading.ends_with("· UPDATE PENDING"));
+    }
+
+    // Confirmed send with resolved mp:external cover and Paused state:
+    let confirmed = card(
+        "New Track",
+        serde_json::json!({"large_image": "mp:external/sig/https/i1.sndcdn.com/new.jpg"}),
+        true,
+    );
+    ad.app.state.discord_presence_preview.sent = Some(confirmed.clone());
+    ad.app.state.discord_presence_preview.pending = false;
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    ad.show_profile(&window);
+
+    let sent_preview = window.get_game_activity_preview();
+    assert_eq!(sent_preview.name, "New Track");
+    assert!(sent_preview.large_url.ends_with("/new.jpg"));
+    assert_eq!(sent_preview.details, "Paused on 0:48");
+    assert_eq!((sent_preview.start, sent_preview.end), (0, 0));
+    assert_eq!(window.get_game_activity_preview_status(), "Sent to Discord");
+    for row in [
+        window.get_account_profile().activities.row_data(0).unwrap(),
+        window.get_profile().activities.row_data(0).unwrap(),
+        window.get_profile_editor_activity().row_data(0).unwrap(),
+    ] {
+        assert_eq!(row.name, "New Track");
+        assert!(row.large_url.ends_with("/new.jpg"));
+        assert_eq!(row.details, "Paused on 0:48");
+        assert_eq!((row.start, row.end), (0, 0));
+        assert!(!row.heading.contains("UPDATE PENDING"));
+    }
+
+    // Per-app Off marks clear as pending until the outgoing clear succeeds:
+    ad.activity_manager.set_rule("SoundCloud", false, 0, None);
+    games::refresh_game_activity(&mut ad, &window);
+    ad.refresh_own_activity(&window);
+    assert_eq!(window.get_game_activity_preview_status(), "Update pending");
+    assert!(
+        window
+            .get_account_profile()
+            .activities
+            .row_data(0)
+            .unwrap()
+            .heading
+            .ends_with("· UPDATE PENDING")
+    );
+    ad.activity_manager.set_rule("SoundCloud", true, 0, None);
+
+    // Sharing disabled, offline reconnect, account switch, and logout clear stale presence:
+    ad.app.dispatch(Action::ShowGame(false));
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    assert!(ad.app.state.discord_presence_preview.sent.is_none());
+    assert_eq!(window.get_account_profile().activities.row_count(), 0);
+    assert_eq!(window.get_account_status(), "Online");
+    assert_eq!(window.get_account_activity_icon(), 0);
+
+    ad.app.apply(Event::Discord(Arc::new(Snapshot {
+        status: Status::Online,
+        user_id: Some("account-1".into()),
+        show_game: true,
+        presence_preview: PresencePreview {
+            sent: Some(confirmed.clone()),
+            sent_presence: None,
+            pending: false,
+        },
+        ..Default::default()
+    })));
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    assert_eq!(window.get_account_profile().activities.row_count(), 1);
+
+    // Account switch resets stale presence immediately:
+    ad.app.apply(Event::Discord(Arc::new(Snapshot {
+        status: Status::Offline("Switching account".into()),
+        user_id: Some("account-2".into()),
+        show_game: true,
+        ..Default::default()
+    })));
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    assert!(ad.app.state.discord_presence_preview.sent.is_none());
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_account_profile().activities.row_count(), 0);
+
+    // Logout / unlink resets stale presence immediately:
+    ad.app.state.discord_presence_preview.sent = Some(confirmed);
+    ad.app.apply(Event::DiscordUnlinked);
+    ad.show_account(&window);
+    ad.refresh_own_activity(&window);
+    assert!(ad.app.state.discord_presence_preview.sent.is_none());
+    assert_eq!(window.get_account_activity_icon(), 0);
+}
+
 #[test]
 fn task9_live_media_session_updates_game_activity_and_profile() {
     i_slint_backend_testing::init_no_event_loop();
@@ -16538,4 +16910,157 @@ fn a_bot_forms_text_choices_and_files_show_as_they_are_filled() {
             .row_count(),
         0
     );
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn soundcloud_plus_title_pause_at_008_keeps_preview_and_clears_on_stop() {
+    use yapfast_core::activity::windows_smtc::{MediaSessionState, PlaybackType};
+    use yapfast_discord::gateway::PresencePreview;
+    use yapfast_discord::service::{Snapshot, Status};
+
+    i_slint_backend_testing::init_no_event_loop();
+    let window = classic_window();
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = Adapter::new(
+        Arc::new(BackgroundRuntime::new().unwrap()),
+        directory.path().into(),
+        &window,
+    )
+    .unwrap();
+    bind_callbacks(&window, &adapter);
+
+    let parse_sent = |value: serde_json::Value| {
+        Arc::new(yapfast_discord::activity::activities(&serde_json::json!([value]))[0].clone())
+    };
+    let apply_preview = |adapter: &Rc<RefCell<Adapter>>, sent: Option<Arc<yapfast_core::chat::Activity>>| {
+        let mut ad = adapter.borrow_mut();
+        ad.app.apply(Event::Discord(Arc::new(Snapshot {
+            status: Status::Online,
+            user_id: Some("account-1".into()),
+            show_game: true,
+            presence_preview: PresencePreview {
+                sent,
+                sent_presence: None,
+                pending: false,
+            },
+            ..Default::default()
+        })));
+        ad.show_account(&window);
+        games::refresh_game_activity(&mut ad, &window);
+        ad.refresh_own_activity(&window);
+        ad.show_profile(&window);
+    };
+
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.apply(Event::Discord(Arc::new(Snapshot {
+            status: Status::Online,
+            user_id: Some("account-1".into()),
+            show_game: true,
+            ..Default::default()
+        })));
+        ad.app.state.account_profile = Some(Arc::new(yapfast_core::chat::Profile {
+            id: "account-1".into(),
+            name: "Alice".into(),
+            ..Default::default()
+        }));
+        ad.app.state.profile = Some(ProfileView {
+            profile: yapfast_core::chat::Profile {
+                id: "account-1".into(),
+                name: "Alice".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        ad.app.dispatch(Action::EditProfile);
+        ad.app.apply(Event::OwnProfile {
+            server: None,
+            result: Ok(yapfast_core::chat::OwnProfile {
+                fallback: yapfast_core::chat::Profile {
+                    id: "account-1".into(),
+                    name: "Alice".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        });
+    }
+
+    // 1. WebView2 SMTC session playing `"We feel tired  + jinatsu"` -> paused at 0:08:
+    let mut smtc = MediaSessionState::new();
+    smtc.on_session_changed("msedgewebview2.exe".into());
+    smtc.playback_type = PlaybackType::Music;
+    smtc.on_media_properties_changed(
+        "We feel tired  + jinatsu".into(),
+        "повреждённый".into(),
+        String::new(),
+    );
+    smtc.on_timeline_changed(134_000, 8_000);
+    smtc.position_updated_ms = Some(1_800_000_008_000);
+    smtc.on_playback_info_changed(false);
+    games::apply_media_update(&mut adapter.borrow_mut(), &window, smtc.to_media_track());
+
+    let paused_sent = parse_sent(serde_json::json!({
+        "type": 2,
+        "name": "SoundCloud",
+        "application_id": "1090770350251458592",
+        "details": "We feel tired  + jinatsu",
+        "state": "Paused on 0:08",
+        "assets": {"large_image": "mp:external/sig/https/i1.sndcdn.com/we-feel-tired.jpg"}
+    }));
+    apply_preview(&adapter, Some(paused_sent));
+
+    let settings_preview = window.get_game_activity_preview();
+    assert!(window.get_has_game_activity_preview());
+    assert_eq!(window.get_game_activity_preview_status(), "Sent to Discord");
+    assert_eq!(settings_preview.name, "We feel tired  + jinatsu");
+    assert_eq!(settings_preview.details, "Paused on 0:08");
+    assert_eq!((settings_preview.start, settings_preview.end), (0, 0));
+    assert!(settings_preview.large_url.ends_with("/we-feel-tired.jpg"));
+
+    for row in [
+        window.get_account_profile().activities.row_data(0).unwrap(),
+        window.get_profile().activities.row_data(0).unwrap(),
+        window.get_profile_editor_activity().row_data(0).unwrap(),
+    ] {
+        assert_eq!(row.name, "We feel tired  + jinatsu");
+        assert_eq!(row.details, "Paused on 0:08");
+        assert_eq!((row.start, row.end), (0, 0));
+        assert!(row.large_url.ends_with("/we-feel-tired.jpg"));
+    }
+
+    // 2. Resume at 0:08 updates `position_updated_ms` and restores running bar:
+    smtc.on_playback_info_changed(true);
+    games::apply_media_update(&mut adapter.borrow_mut(), &window, smtc.to_media_track());
+    assert!(
+        adapter
+            .borrow()
+            .activity_manager
+            .active_media
+            .as_ref()
+            .unwrap()
+            .position_updated_ms
+            .unwrap()
+            > 1_700_000_000_000
+    );
+    let resumed_sent = parse_sent(serde_json::json!({
+        "type": 2,
+        "name": "SoundCloud",
+        "application_id": "1090770350251458592",
+        "details": "We feel tired  + jinatsu",
+        "state": "повреждённый, jinatsu",
+        "timestamps": {"start": 1_800_000_000_000_u64, "end": 1_800_000_134_000_u64},
+        "assets": {"large_image": "mp:external/sig/https/i1.sndcdn.com/we-feel-tired.jpg"}
+    }));
+    apply_preview(&adapter, Some(resumed_sent));
+    let running_preview = window.get_game_activity_preview();
+    assert_eq!(running_preview.details, "повреждённый, jinatsu");
+    assert!(running_preview.start > 0 && running_preview.end > running_preview.start);
+
+    // 3. Genuine stop clears SMTC and outgoing preview:
+    games::apply_media_update(&mut adapter.borrow_mut(), &window, None);
+    apply_preview(&adapter, None);
+    assert!(!window.get_has_game_activity_preview());
+    assert_eq!(window.get_account_profile().activities.row_count(), 0);
 }

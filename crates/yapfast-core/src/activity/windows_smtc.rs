@@ -15,6 +15,8 @@ pub fn clean_source_name(raw_id: &str) -> String {
         "SoundCloud".into()
     } else if lower.contains("apple") && lower.contains("music") {
         "Apple Music".into()
+    } else if lower.contains("msedgewebview2") || lower.contains("webview2") {
+        "WebView2".into()
     } else if lower.contains("msedge") || lower.contains("edge") {
         "Edge".into()
     } else if lower.contains("chrome") {
@@ -120,17 +122,13 @@ impl MediaSessionState {
     ///
     /// Returns `None` if no session is active, no title is reported, or
     /// playback is completely stopped.
-    pub fn to_media_track(&self) -> Option<MediaTrack> {
+        pub fn to_media_track(&self) -> Option<MediaTrack> {
         if !self.has_session || self.title.is_empty() || self.playback_type == PlaybackType::Video {
             return None;
         }
 
         let source = clean_source_name(&self.source_id);
-        #[cfg(feature = "discord")]
-        let trusted_music_source = yapfast_discord::activity::music_integration(&source)
-            && !yapfast_discord::activity::browser_media_source(&self.source_id);
-        #[cfg(not(feature = "discord"))]
-        let trusted_music_source = false;
+        let trusted_music_source = is_trusted_music_source(&self.source_id, &source);
         Some(MediaTrack {
             requires_music_rpc: !trusted_music_source || self.playback_type != PlaybackType::Music,
             title: self.title.clone(),
@@ -146,6 +144,64 @@ impl MediaSessionState {
             source: Some(source),
         })
     }
+}
+
+fn is_trusted_music_source(raw_id: &str, clean_source: &str) -> bool {
+    #[cfg(feature = "discord")]
+    {
+        yapfast_discord::activity::music_integration(clean_source)
+            && !yapfast_discord::activity::browser_media_source(raw_id)
+    }
+    #[cfg(not(feature = "discord"))]
+    {
+        let _ = (raw_id, clean_source);
+        false
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionCandidate {
+    pub raw_id: String,
+    pub active: bool,
+    pub playback_type: PlaybackType,
+    pub reported: bool,
+}
+
+/// Picks the preferred SMTC session index from `GetSessions()`.
+/// Keeps SoundCloud and embedded WebView2 music players (such as Tauri `soundcloud-rs`)
+/// selected across pauses even when Windows promotes a background browser tab to `CurrentSession`.
+pub(crate) fn pick_preferred_session(candidates: &[SessionCandidate]) -> Option<usize> {
+    let unique = |pred: &dyn Fn(&SessionCandidate) -> bool| -> Option<usize> {
+        let mut iter = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, c)| pred(c).then_some(idx));
+        let first = iter.next()?;
+        iter.next().is_none().then_some(first)
+    };
+    if let Some(idx) = unique(&|c| c.active && clean_source_name(&c.raw_id) == "SoundCloud") {
+        return Some(idx);
+    }
+    if let Some(idx) = unique(&|c| {
+        c.active
+            && c.playback_type != PlaybackType::Video
+            && clean_source_name(&c.raw_id) == "WebView2"
+    }) {
+        return Some(idx);
+    }
+    let reported_trusted = candidates.iter().any(|c| {
+        c.reported
+            && c.active
+            && is_trusted_music_source(&c.raw_id, &clean_source_name(&c.raw_id))
+    });
+    if !reported_trusted
+        && let Some(idx) = unique(&|c| {
+            c.active && is_trusted_music_source(&c.raw_id, &clean_source_name(&c.raw_id))
+        })
+    {
+        return Some(idx);
+    }
+    candidates.iter().position(|c| c.reported)
 }
 
 #[cfg(windows)]
@@ -235,8 +291,21 @@ pub mod winrt {
         timeline: Option<i64>,
     }
 
-    impl Subscription {
+        impl Subscription {
         fn new(session: Session, wake: &Wake) -> windows::core::Result<Self> {
+            Self::with_events(session, wake, METADATA, PLAYBACK)
+        }
+
+        fn session_watcher(session: Session, wake: &Wake) -> windows::core::Result<Self> {
+            Self::with_events(session, wake, SESSION, SESSION)
+        }
+
+        fn with_events(
+            session: Session,
+            wake: &Wake,
+            media_event: u8,
+            playback_event: u8,
+        ) -> windows::core::Result<Self> {
             let mut sub = Self {
                 session,
                 media: None,
@@ -245,12 +314,15 @@ pub mod winrt {
             };
             sub.media = Some(
                 sub.session
-                    .MediaPropertiesChanged(&wake.handler(METADATA))?,
+                    .MediaPropertiesChanged(&wake.handler(media_event))?,
             );
-            sub.playback = Some(sub.session.PlaybackInfoChanged(&wake.handler(PLAYBACK))?);
+            sub.playback = Some(
+                sub.session
+                    .PlaybackInfoChanged(&wake.handler(playback_event))?,
+            );
             sub.timeline = Some(
                 sub.session
-                    .TimelinePropertiesChanged(&wake.handler(PLAYBACK))?,
+                    .TimelinePropertiesChanged(&wake.handler(playback_event))?,
             );
             Ok(sub)
         }
@@ -318,6 +390,7 @@ pub mod winrt {
         let result = sessions_token.as_ref().map(|_| ()).map_err(Clone::clone);
         if result.is_ok() {
             let mut subscription: Option<Subscription> = None;
+            let mut peer_watchers: Vec<Subscription> = Vec::new();
             let mut state = MediaSessionState::new();
             let mut metadata_dirty = true;
             let mut timeline_revision = None;
@@ -348,19 +421,49 @@ pub mod winrt {
                 let received = Instant::now();
                 if events & SESSION != 0 {
                     let reported = manager.GetCurrentSession().ok();
-                    let current = manager.GetSessions().ok().and_then(|sessions| {
-                        let mut soundcloud = sessions.into_iter().filter(|session| {
-                            session.SourceAppUserModelId().is_ok_and(|id| {
-                                clean_source_name(&id.to_string_lossy()) == "SoundCloud"
-                            }) && matches!(
-                                session.GetPlaybackInfo().and_then(|info| info.PlaybackStatus()),
-                                Ok(Status::Playing | Status::Paused)
-                            )
-                        });
-                        let session = soundcloud.next()?;
-                        soundcloud.next().is_none().then_some(session)
-                    }).or(reported);
-                    if current.is_none() && clean_source_name(&state.source_id) == "SoundCloud" {
+                    let all_sessions: Vec<Session> = manager
+                        .GetSessions()
+                        .ok()
+                        .map(|list| list.into_iter().collect())
+                        .unwrap_or_default();
+                    let candidates: Vec<SessionCandidate> = all_sessions
+                        .iter()
+                        .map(|session| {
+                            let raw_id = session
+                                .SourceAppUserModelId()
+                                .map(|id| id.to_string_lossy())
+                                .unwrap_or_default();
+                            let info = session.GetPlaybackInfo();
+                            let active = matches!(
+                                info.as_ref().ok().and_then(|i| i.PlaybackStatus().ok()),
+                                Some(Status::Playing | Status::Paused)
+                            );
+                            let playback_type = classify(
+                                info.as_ref()
+                                    .ok()
+                                    .and_then(|i| i.PlaybackType().ok()?.Value().ok()),
+                            );
+                            let is_reported = reported.as_ref() == Some(session);
+                            SessionCandidate {
+                                raw_id,
+                                active,
+                                playback_type,
+                                reported: is_reported,
+                            }
+                        })
+                        .collect();
+                    let chosen_idx = pick_preferred_session(&candidates);
+                    let current = chosen_idx
+                        .and_then(|idx| all_sessions.get(idx).cloned())
+                        .or(reported);
+                    peer_watchers = all_sessions
+                        .into_iter()
+                        .filter(|session| current.as_ref() != Some(session))
+                        .take(8)
+                        .filter_map(|session| Subscription::session_watcher(session, &wake).ok())
+                        .collect();
+                    let prior_source = clean_source_name(&state.source_id);
+                    if current.is_none() && matches!(prior_source.as_str(), "SoundCloud" | "WebView2") {
                         // A track switch can briefly remove the session from Windows.
                         let deadline = soundcloud_gap.get_or_insert_with(|| {
                             received + std::time::Duration::from_millis(500)
@@ -372,9 +475,9 @@ pub mod winrt {
                     soundcloud_gap = None;
                     if current.as_ref() != subscription.as_ref().map(|sub| &sub.session) {
                         let retain_soundcloud = current.as_ref().is_some_and(|session| {
-                            clean_source_name(&state.source_id) == "SoundCloud"
+                            matches!(prior_source.as_str(), "SoundCloud" | "WebView2")
                                 && session.SourceAppUserModelId().is_ok_and(|id| {
-                                    clean_source_name(&id.to_string_lossy()) == "SoundCloud"
+                                    clean_source_name(&id.to_string_lossy()) == prior_source
                                 })
                         });
                         subscription = None;
@@ -534,7 +637,10 @@ pub mod winrt {
                     state.position_updated_ms = Some(now.as_millis() as u64);
                 }
                 was_paused = !state.is_playing;
-                if metadata.is_some() && state.title.is_empty() && clean_source_name(&state.source_id) == "SoundCloud" {
+                if metadata.is_some()
+                    && state.title.is_empty()
+                    && matches!(clean_source_name(&state.source_id).as_str(), "SoundCloud" | "WebView2")
+                {
                     continue;
                 }
                 let next = state.to_media_track();
@@ -566,6 +672,7 @@ pub mod winrt {
                     wake.notify(ASYNC);
                 }
             }
+            drop(peer_watchers);
         }
         let _ = manager.RemoveCurrentSessionChanged(current_token);
         if let Ok(token) = sessions_token {
@@ -709,5 +816,40 @@ mod tests {
         let track = state.to_media_track().unwrap();
         assert_eq!(track.duration_ms, 100_000);
         assert_eq!(track.position_ms, 100_000);
+    }
+
+    #[test]
+    fn webview2_session_stays_selected_when_paused_beside_opaque_browser_session() {
+        assert_eq!(clean_source_name("msedgewebview2.exe"), "WebView2");
+        assert_eq!(clean_source_name("msedge.exe"), "Edge");
+
+        // Reproduces live Windows 11 state: Firefox (`308046B0AF4A39CB`) is `reported` (`CurrentSession`)
+        // while `soundcloud-rs.exe` (`msedgewebview2.exe`) is paused at 0:31.
+        let candidates = vec![
+            SessionCandidate {
+                raw_id: "308046B0AF4A39CB".into(),
+                active: true,
+                playback_type: PlaybackType::Music,
+                reported: true,
+            },
+            SessionCandidate {
+                raw_id: "msedgewebview2.exe".into(),
+                active: true,
+                playback_type: PlaybackType::Music,
+                reported: false,
+            },
+        ];
+        assert_eq!(pick_preferred_session(&candidates), Some(1));
+
+        // WebView2 requires matching music RPC so unrelated WebView2 audio cannot publish alone.
+        let mut state = MediaSessionState::new();
+        state.on_session_changed("msedgewebview2.exe".into());
+        state.playback_type = PlaybackType::Music;
+        state.on_media_properties_changed("Track".into(), "Artist".into(), "".into());
+        state.on_playback_info_changed(false);
+        state.on_timeline_changed(72_897, 31_680);
+        let track = state.to_media_track().unwrap();
+        assert_eq!(track.source.as_deref(), Some("WebView2"));
+        assert!(track.requires_music_rpc);
     }
 }

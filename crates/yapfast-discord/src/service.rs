@@ -834,6 +834,13 @@ impl Discord {
             names,
             lists,
         } = cache::load(&token, key);
+        if crate::ready::channel_trace_enabled() {
+            for server in &cached.servers {
+                for entry in server.text_channels().chain(server.voice_channels()) {
+                    crate::ready::trace_channel_label("cache", &entry.id, Some(&entry.name), None, None);
+                }
+            }
+        }
         let presence = settings::presence(
             if cached.presence.is_empty() {
                 "online"

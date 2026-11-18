@@ -14,6 +14,7 @@ pub use yapfast_discord;
 pub mod activity;
 pub mod application;
 mod audio_io;
+pub use audio_io::silence_audio;
 pub mod backend;
 pub mod blocks;
 #[cfg(feature = "matrix")]
@@ -107,6 +108,13 @@ pub fn default_directory() -> anyhow::Result<std::path::PathBuf> {
 /// across restarts.
 #[cfg(feature = "discord")]
 pub fn keep_discord_files(root: &std::path::Path) {
+    let mut folder = std::fs::DirBuilder::new();
+    folder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
+    if let Err(error) = folder.create(root) {
+        tracing::warn!(%error, "could not create the data folder");
+    }
     yapfast_discord::cookies::keep_in(root.join("discord-cookies.json"));
     yapfast_discord::cache::keep_in(root.join("discord-account.json"));
 }

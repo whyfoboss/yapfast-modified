@@ -514,6 +514,49 @@ impl Api {
         self.json(self.request(Method::GET, &path)).await
     }
 
+    /// Checks whether a resolved `mp:external/...` cover actually loads through
+    /// Discord's media proxy, distinguishing missing origin renditions (404/415)
+    /// from transient proxy errors.
+    #[cfg(any(target_os = "linux", windows))]
+    pub(crate) async fn probe_proxy_image(&self, mp_key: &str) -> crate::rpc::proto::ProxyProbe {
+        let Some(url) = crate::activity::asset(None, mp_key) else {
+            return crate::rpc::proto::ProxyProbe::Missing;
+        };
+        let small = crate::activity::small_picture(&url);
+        if crate::cache::kept_picture(&url).is_some() || crate::cache::kept_picture(&small).is_some() {
+            return crate::rpc::proto::ProxyProbe::Available;
+        }
+        if allowed(&small).is_err() {
+            return crate::rpc::proto::ProxyProbe::Missing;
+        }
+        let Ok(_turn) = self.downloads.acquire().await else {
+            return crate::rpc::proto::ProxyProbe::Transient;
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.http.get(small.as_ref()).send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) if response.status().is_success() => {
+                crate::rpc::proto::ProxyProbe::Available
+            }
+            Ok(Ok(response))
+                if matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND
+                        | StatusCode::GONE
+                        | StatusCode::BAD_REQUEST
+                        | StatusCode::UNSUPPORTED_MEDIA_TYPE
+                        | StatusCode::FORBIDDEN
+                ) =>
+            {
+                crate::rpc::proto::ProxyProbe::Missing
+            }
+            _ => crate::rpc::proto::ProxyProbe::Transient,
+        }
+    }
+
     /// Up to [`PAGE`] messages of a channel, newest first, as [`Span`] says.
     pub async fn messages(&self, channel: &str, span: Span<'_>) -> Result<Vec<Value>> {
         let mut path = format!("/channels/{channel}/messages?limit={PAGE}");

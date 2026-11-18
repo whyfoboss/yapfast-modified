@@ -399,6 +399,7 @@ impl Tracker {
                 true
             }
             Event::GuildCreate => {
+                ready::trace_guild_channels("GUILD_CREATE", data);
                 let Some(server) = ready::server(data) else {
                     return false;
                 };
@@ -665,6 +666,12 @@ impl Tracker {
                 if *event == Event::ChannelDelete {
                     server.remove_channel(id);
                 } else {
+                    let stage = if *event == Event::ChannelUpdate {
+                        "CHANNEL_UPDATE"
+                    } else {
+                        "CHANNEL_CREATE"
+                    };
+                    ready::trace_channel_payload(stage, data);
                     server.put_channel(data);
                 }
                 true
@@ -1891,6 +1898,51 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn channel_labels_follow_gateway_updates_and_the_saved_snapshot() {
+        let visible = json!({"id": "11", "guild_id": "10", "type": 0, "name": "General"});
+        let mut locked = json!({
+            "id": "12", "guild_id": "10", "type": 0, "name": "Staff",
+            "permission_overwrites": [{"id": "10", "type": 0, "allow": "0", "deny": "1024"}]
+        });
+        let ready = |locked: &Value| json!({
+            "user": {"id": "1"},
+            "guilds": [{"id": "10", "name": "Test", "owner_id": "9",
+                "roles": [{"id": "10", "permissions": "3072"}],
+                "channels": [visible, locked]}]
+        });
+        let mut tracker = Tracker::from_ready("1".into(), &ready(&locked), Default::default());
+        let check = |snapshot: &Snapshot, expected: &str, access| {
+            let server = &snapshot.servers[0];
+            let mut channels = server.text_channels();
+            let control = channels.find(|entry| entry.id == "11").unwrap();
+            assert_eq!(control.name, "General");
+            assert_eq!(control.marks.access, ready::Access::Join);
+            let entry = server.text_channels().find(|entry| entry.id == "12").unwrap();
+            assert_eq!(entry.name, expected);
+            assert_eq!(entry.marks.access, access);
+        };
+
+        check(&tracker.snapshot(), "Staff", ready::Access::Hidden);
+        locked["name"] = json!("___hidden___");
+        locked["flags"] = json!(1 << 17);
+        assert!(tracker.apply(&Event::ChannelUpdate, &locked));
+        check(&tracker.snapshot(), "___hidden___", ready::Access::Hidden);
+
+        let restarted = Tracker::from_ready("1".into(), &ready(&locked), Default::default())
+            .snapshot();
+        check(&restarted, "___hidden___", ready::Access::Hidden);
+        let cached: Snapshot =
+            serde_json::from_value(serde_json::to_value(&restarted).unwrap()).unwrap();
+        check(&cached, "___hidden___", ready::Access::Hidden);
+
+        locked["name"] = json!("Staff restored");
+        locked["flags"] = json!(0);
+        locked["permission_overwrites"] = json!([]);
+        assert!(tracker.apply(&Event::ChannelUpdate, &locked));
+        check(&tracker.snapshot(), "Staff restored", ready::Access::Join);
+    }
 
     #[test]
     fn tracks_voice_channels_and_names() {

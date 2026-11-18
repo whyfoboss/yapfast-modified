@@ -1530,7 +1530,7 @@ impl Layout {
     fn read(root: &std::path::Path) -> Self {
         let mut layout: Self = std::fs::read(root.join(LAYOUT))
             .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .map(|bytes| Self::read_fields(&bytes))
             .unwrap_or_default();
         if layout.notification_sound.take() == Some(false) {
             layout.adjust_each_sound = true;
@@ -1557,6 +1557,25 @@ impl Layout {
         }
         theme::tidy(&mut layout.custom_themes);
         layout
+    }
+
+    fn read_fields(bytes: &[u8]) -> Self {
+        if let Ok(layout) = serde_json::from_slice(bytes) {
+            return layout;
+        }
+        let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_slice(bytes) else {
+            tracing::warn!("layout.json does not contain a settings object");
+            return Self::default();
+        };
+        fields.retain(|key, value| {
+            let single = serde_json::Map::from_iter([(key.clone(), value.clone())]);
+            serde_json::from_value::<Self>(serde_json::Value::Object(single)).is_ok()
+        });
+        if fields.contains_key("picker_width") {
+            fields.remove("gif_picker_width");
+        }
+        tracing::warn!("recovered readable settings from layout.json");
+        serde_json::from_value(serde_json::Value::Object(fields)).unwrap_or_default()
     }
 
     /// The profile switches, as saved.
@@ -1817,11 +1836,13 @@ impl Layout {
 
     /// A lost layout only costs the person their arrangement; it never stops Yapfast.
     fn write(&self, root: &std::path::Path) {
+        use std::io::Write as _;
+
         let result = std::fs::create_dir_all(root).and_then(|()| {
-            std::fs::write(
-                root.join(LAYOUT),
-                serde_json::to_vec(self).expect("layout serializes"),
-            )
+            let mut beside = tempfile::NamedTempFile::new_in(root)?;
+            beside.write_all(&serde_json::to_vec(self).expect("layout serializes"))?;
+            beside.persist(root.join(LAYOUT))?;
+            Ok::<(), std::io::Error>(())
         });
         if let Err(error) = result {
             tracing::warn!(%error, "could not store the window layout");
@@ -2361,6 +2382,8 @@ impl Adapter {
         root: PathBuf,
         window: &YapfastWindow,
     ) -> Result<Rc<RefCell<Self>>> {
+        #[cfg(test)]
+        yapfast_core::silence_audio();
         let icons = Icons {
             dm: slint::Image::load_from_svg_data(include_bytes!("../ui/icons/message-circle.svg"))?,
             chat: slint::Image::load_from_svg_data(include_bytes!(

@@ -1226,6 +1226,12 @@ impl Adapter {
                     .as_deref()
                     .filter(|_| room.network == Network::Discord)
                     .and_then(|person| in_voice.get(person));
+                #[cfg(feature = "discord")]
+                if room.network == Network::Discord && !room.direct
+                    && let Some((_, id)) = room.id.rsplit_once(':')
+                {
+                    yapfast_core::yapfast_discord::ready::trace_channel_label("sidebar", id, Some(&room.name), None, Some(true));
+                }
                 RoomRow {
                     id: room.id.clone().into(),
                     name: room.name.clone().into(),
@@ -1441,7 +1447,7 @@ impl Adapter {
     }
 
     /// The account at the bottom of the sidebar, and the notice.
-    fn show_account(&mut self, window: &YapfastWindow) {
+    pub(super) fn show_account(&mut self, window: &YapfastWindow) {
         if self.app.state.discord_user.is_some() {
             self.activity_manager
                 .set_global_sharing(self.app.state.discord_show_game);
@@ -1515,8 +1521,8 @@ impl Adapter {
                 .map_or(&empty, |profile| &profile.activities);
             let mut data = window.get_account_profile();
             let rows = games::own_activity_rows(
+                state,
                 &self.activity_manager,
-                state.discord_playing.as_ref(),
                 fallback,
             );
             if !data.activities.iter().eq(rows.iter()) {
@@ -1556,31 +1562,53 @@ impl Adapter {
         window.set_account_status_emoji(status_emoji.flatten().unwrap_or_default().into());
         // The game Yapfast shows as playing, as the activity icon Discord puts
         // before the status: alone it names the game, before a status it adds a bullet.
-        let playing = state.discord_playing.as_ref().filter(|playing| {
-            state.online
-                && !state.preview
-                && state.discord_show_game
-                && self.activity_manager.activity_enabled(&playing.name)
-        });
         #[cfg(feature = "discord")]
-        let music = playing.is_some_and(|playing| {
-            yapfast_core::yapfast_discord::activity::music_integration(&playing.name)
-        });
+        let sent_name = state
+            .discord_linked
+            .then(|| {
+                state
+                    .discord_online
+                    .then_some(state.discord_presence_preview.sent.as_deref())
+                    .flatten()
+                    .filter(|sent| {
+                        !state.preview
+                            && state.discord_show_game
+                            && self.activity_manager.activity_enabled(&sent.name)
+                    })
+                    .map(|sent| sent.name.as_ref())
+            });
+        #[cfg(not(feature = "discord"))]
+        let sent_name: Option<Option<&str>> = None;
+        let playing_name: Option<&str> = match sent_name {
+            Some(sent) => sent,
+            None => state
+                .discord_playing
+                .as_ref()
+                .filter(|playing| {
+                    state.online
+                        && !state.preview
+                        && state.discord_show_game
+                        && self.activity_manager.activity_enabled(&playing.name)
+                })
+                .map(|playing| playing.name.as_str()),
+        };
+        #[cfg(feature = "discord")]
+        let music = playing_name.is_some_and(yapfast_core::yapfast_discord::activity::music_integration);
         #[cfg(not(feature = "discord"))]
         let music = false;
         window.set_account_activity_icon(if music {
             2
         } else {
-            i32::from(playing.is_some())
+            i32::from(playing_name.is_some())
         });
-        window.set_account_activity_bullet(playing.is_some() && custom_status.is_some());
+        window.set_account_activity_bullet(playing_name.is_some() && custom_status.is_some());
         window.set_account_status(
             if state.preview {
                 "Local only"
             } else if let Some(status) = &custom_status {
                 status
-            } else if let Some(playing) = playing {
-                &playing.name
+            } else if let Some(name) = playing_name {
+                name
             } else if let Some(status) = &state.account_status {
                 status
             } else if state.online {
@@ -1597,9 +1625,9 @@ impl Adapter {
             window.set_show_game(self.activity_manager.global_sharing_enabled);
         }
         window.set_game_activity_name(
-            playing
+            playing_name
                 .filter(|_| !music)
-                .map_or("", |playing| &playing.name)
+                .unwrap_or("")
                 .into(),
         );
         window.set_discord_status(state.discord_presence.as_deref().unwrap_or("online").into());
@@ -1610,11 +1638,7 @@ impl Adapter {
             tracing::debug!(target: "yapfast_startup", visible = connecting, "desktop Discord connection notice");
         }
         window.set_notice(notice.into());
-        if (window.get_settings_open() && window.get_settings_section() == 8)
-            || state.profile_editor.is_some()
-        {
-            games::refresh_game_activity(self, window);
-        }
+        games::refresh_game_activity(self, window);
     }
 
     pub(super) fn refresh_own_activity(&mut self, window: &YapfastWindow) {
@@ -3319,8 +3343,8 @@ impl Adapter {
             .map_or(&empty, |profile| &profile.fallback.activities);
         #[cfg(feature = "discord")]
         let rows = games::own_activity_rows(
+            &self.app.state,
             &self.activity_manager,
-            self.app.state.discord_playing.as_ref(),
             fallback,
         );
         #[cfg(not(feature = "discord"))]
@@ -5099,8 +5123,8 @@ impl Adapter {
                 data.activity_emoji = emoji.unwrap_or_default().into();
             }
             data.activities = games::own_activity_rows(
+                state,
                 &self.activity_manager,
-                state.discord_playing.as_ref(),
                 &view.profile.activities,
             );
         }

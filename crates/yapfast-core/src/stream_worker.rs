@@ -852,6 +852,7 @@ fn watch(
     report: &mut dyn FnMut(Report),
 ) -> Result<()> {
     let mut receiver = StreamReceiver::start(server, crate::decode::DECODES.to_vec())?;
+    receiver.track_decoded();
     let _player = receiver.take_sounds().and_then(|sounds| {
         stream_audio::Player::start(
             sounds,
@@ -869,6 +870,7 @@ fn watch(
     let mut scratch = vec![];
     let mut shown = false;
     let mut failures = 0u64;
+    let mut consecutive_failures = 0u32;
     let started = Instant::now();
     let mut measured = started;
     let mut last_picture = Instant::now();
@@ -911,10 +913,15 @@ fn watch(
         waiting = false;
         input += 1;
         let picture = match decoder.as_mut().unwrap().decode(&frame.data) {
-            Ok(Some(picture)) => picture,
+            Ok(Some(picture)) => {
+                consecutive_failures = 0;
+                receiver.note_decoded();
+                picture
+            }
             Ok(None) => continue,
             Err(error) => {
                 failures += 1;
+                consecutive_failures += 1;
                 // The first of a run, and then now and again.
                 if failures == 1 || failures.is_multiple_of(100) {
                     tracing::warn!(
@@ -925,9 +932,16 @@ fn watch(
                         "a stream frame didn't decode"
                     );
                 }
-                // Keep codec headers already learned by the decoder. H264
-                // can conceal a lost frame and decode following pictures.
-                waiting = frame.codec != Codec::H264;
+                if crate::decode::is_unsupported_format(&error) {
+                    decoder = None;
+                    waiting = true;
+                    receiver.reject_codec();
+                    continue;
+                }
+                if frame.codec != Codec::H264 || consecutive_failures >= 3 {
+                    decoder = None;
+                    waiting = true;
+                }
                 receiver.request_keyframe();
                 continue;
             }

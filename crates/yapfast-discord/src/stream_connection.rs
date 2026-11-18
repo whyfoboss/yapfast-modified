@@ -34,6 +34,9 @@ const KEYFRAME_REQUESTS: Duration = Duration::from_millis(500);
 const VIDEO_RECOVERY_GRACE: Duration = Duration::from_secs(4);
 /// A pause in video traffic restarts the recovery grace period.
 const VIDEO_PACKET_GAP: Duration = Duration::from_secs(1);
+/// How long the selected simulcast layer must go quiet before switching to
+/// another active layer advertised by the streamer in op 12.
+const SIMULCAST_SWITCH_GAP: Duration = Duration::from_millis(250);
 /// How often a streamer sends an RTCP sender report.
 const SENDER_REPORTS: Duration = Duration::from_secs(1);
 /// How often a viewer logs what it received while no picture comes through.
@@ -153,6 +156,12 @@ struct Shared {
     video_bytes: AtomicU64,
     keyframe_requests: AtomicU64,
     resent: AtomicU64,
+    /// Receiving: whether the caller reports decoded pictures (`track_decoded`),
+    /// how many frames produced a picture (`decoded`), and whether a frame used
+    /// an unsupported pixel format such as 10-bit HDR (`unsupported_codec`).
+    watch_decoded: AtomicBool,
+    decoded: AtomicU64,
+    unsupported_codec: AtomicBool,
 }
 
 impl Shared {
@@ -168,6 +177,9 @@ impl Shared {
             video_bytes: AtomicU64::new(0),
             keyframe_requests: AtomicU64::new(0),
             resent: AtomicU64::new(0),
+            watch_decoded: AtomicBool::new(false),
+            decoded: AtomicU64::new(0),
+            unsupported_codec: AtomicBool::new(false),
         })
     }
 }
@@ -389,6 +401,22 @@ impl StreamReceiver {
     /// Asks the streamer for a keyframe, as after a frame that wouldn't decode.
     pub fn request_keyframe(&self) {
         self.shared.keyframe.store(true, Ordering::Relaxed);
+    }
+
+    /// Measures video stalls against decoded pictures rather than queued frames.
+    pub fn track_decoded(&self) {
+        self.shared.watch_decoded.store(true, Ordering::Relaxed);
+    }
+
+    /// Marks that a received frame decoded into a displayable picture.
+    pub fn note_decoded(&self) {
+        self.shared.decoded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Withdraws AV1/H265 immediately when the stream sends a profile or bit
+    /// depth (such as 10-bit Main 10 HDR) that this viewer cannot render.
+    pub fn reject_codec(&self) {
+        self.shared.unsupported_codec.store(true, Ordering::Relaxed);
     }
 
     pub fn link(&self) -> Link {
@@ -847,28 +875,75 @@ struct Sent {
 /// What the server said about the streamer's video.
 #[derive(Default)]
 struct Streamer {
+    user: Option<u64>,
     video: Option<u32>,
     rtx: Option<u32>,
+    /// Active `(media_ssrc, rtx_ssrc)` layers announced for this streamer in op 12.
+    layers: Vec<(u32, Option<u32>)>,
     codec: Option<Codec>,
 }
 
 impl Streamer {
+    fn rtx_media(&self, packet: &rtp::Packet<'_>) -> Option<u32> {
+        if Some(packet.ssrc) == self.rtx {
+            return self.video;
+        }
+        if let Some(&(media, _)) = self
+            .layers
+            .iter()
+            .find(|&&(_, rtx)| rtx == Some(packet.ssrc))
+        {
+            return Some(media);
+        }
+        if self.rtx.is_none()
+            && self.video.is_some()
+            && [Codec::Vp8, Codec::H264, Codec::H265, Codec::Av1]
+                .into_iter()
+                .any(|codec| codec.payload_types().1 == packet.payload_type)
+        {
+            return self.video;
+        }
+        None
+    }
+
+    #[cfg(test)]
     fn retransmission(&self, packet: &rtp::Packet<'_>) -> bool {
-        self.rtx.map_or_else(
-            || {
-                self.video.is_some()
-                    && [Codec::Vp8, Codec::H264, Codec::H265, Codec::Av1]
-                        .into_iter()
-                        .any(|codec| codec.payload_types().1 == packet.payload_type)
-            },
-            |rtx| packet.ssrc == rtx,
-        )
+        self.rtx_media(packet).is_some()
+    }
+
+    fn is_layer(&self, ssrc: u32) -> bool {
+        self.layers.iter().any(|&(media, _)| media == ssrc)
+    }
+
+    fn select_layer(&mut self, ssrc: u32) {
+        self.video = Some(ssrc);
+        self.rtx = self
+            .layers
+            .iter()
+            .find(|&&(media, _)| media == ssrc)
+            .and_then(|&(_, rtx)| rtx);
+    }
+
+    fn media_sink_wants(&self) -> Value {
+        let mut wants = serde_json::Map::new();
+        wants.insert("any".into(), json!(100));
+        if let Some(video) = self.video {
+            wants.insert(video.to_string(), json!(100));
+        }
+        Value::Object(wants)
     }
 
     fn learn(&mut self, op: u64, data: &Value) {
         match op {
             // Video: the streamer's SSRCs.
             12 => {
+                if let Some(expected) = self.user
+                    && let Some(announced) =
+                        data["user_id"].as_str().and_then(|id| id.parse::<u64>().ok())
+                    && announced != expected
+                {
+                    return;
+                }
                 let ssrc = |value: &Value| {
                     value
                         .as_u64()
@@ -878,28 +953,44 @@ impl Streamer {
                 let mut video = ssrc(&data["video_ssrc"]);
                 let mut rtx = ssrc(&data["rtx_ssrc"]);
                 if let Some(streams) = data["streams"].as_array() {
-                    let offered = streams
+                    let active_layers: Vec<(u32, Option<u32>, &Value)> = streams
                         .iter()
                         .filter_map(|stream| {
                             let media = ssrc(&stream["ssrc"])?;
                             let kind = stream["type"].as_str()?;
                             (matches!(kind, "video" | "screen") && stream["active"] != false)
-                                .then_some((media, stream))
+                                .then_some((media, ssrc(&stream["rtx_ssrc"]), stream))
                         })
-                        .max_by_key(|(media, stream)| {
-                            (
-                                stream["active"] == true,
-                                stream["quality"].as_u64().unwrap_or(0),
-                                Some(*media) == video,
-                                Some(*media) == self.video,
-                            )
-                        });
-                    if let Some((media, stream)) = offered {
+                        .collect();
+                    let offered =
+                        active_layers
+                            .iter()
+                            .copied()
+                            .max_by_key(|(media, _, stream)| {
+                                (
+                                    stream["active"] == true,
+                                    stream["quality"].as_u64().unwrap_or(0),
+                                    Some(*media) == video,
+                                    Some(*media) == self.video,
+                                )
+                            });
+                    if let Some((media, layer_rtx, _)) = offered {
+                        let top_video = video;
+                        let top_rtx = rtx;
+                        self.layers = active_layers
+                            .iter()
+                            .map(|&(layer_media, announced_rtx, _)| {
+                                let resolved_rtx = announced_rtx.or_else(|| {
+                                    (Some(layer_media) == top_video).then_some(top_rtx).flatten()
+                                });
+                                (layer_media, resolved_rtx)
+                            })
+                            .collect();
                         if Some(media) != video {
                             rtx = None;
                         }
                         video = Some(media);
-                        rtx = ssrc(&stream["rtx_ssrc"]).or(rtx);
+                        rtx = layer_rtx.or(rtx);
                     } else if streams
                         .iter()
                         .any(|stream| stream["active"] == false && ssrc(&stream["ssrc"]) == video)
@@ -907,6 +998,8 @@ impl Streamer {
                         // The top-level SSRC can name a paused layer.
                         return;
                     }
+                } else if let Some(media) = video {
+                    self.layers = vec![(media, rtx)];
                 }
                 if video.is_some() && video != self.video {
                     self.rtx = None;
@@ -927,11 +1020,13 @@ impl Streamer {
     /// The codec of a packet, by its payload type or, from the streamer's
     /// video SSRC, by what Discord chose.
     fn codec(&self, packet: &rtp::Packet) -> Option<Codec> {
-        if Some(packet.ssrc) == self.rtx {
+        if Some(packet.ssrc) == self.rtx
+            || self.layers.iter().any(|&(_, rtx)| rtx == Some(packet.ssrc))
+        {
             return None;
         }
         Codec::from_payload_type(packet.payload_type).or_else(|| {
-            (Some(packet.ssrc) == self.video)
+            (Some(packet.ssrc) == self.video || self.is_layer(packet.ssrc))
                 .then_some(self.codec)
                 .flatten()
         })
@@ -1040,6 +1135,7 @@ async fn receive_stream_once(
         connection = open(server, user, channel, Role::Receive, shared) => connection?,
     };
     let mut streamer = Streamer {
+        user: Some(streamer_id),
         codec: connection.codec,
         ..Streamer::default()
     };
@@ -1047,12 +1143,15 @@ async fn receive_stream_once(
         streamer.learn(op, &data);
     }
     // Media sink wants: the server forwards video at the quality a client
-    // asks for, here everything at full quality.
-    send_json(&mut connection.ws, 15, json!({"any": 100})).await?;
+    // asks for, here everything and the streamer's selected SSRC at full quality.
+    send_json(&mut connection.ws, 15, streamer.media_sink_wants()).await?;
     *lock(&shared.link) = Link::Connected;
 
     let mut incoming: HashMap<u32, Video> = HashMap::new();
     let mut asked = Instant::now() - KEYFRAME_REQUESTS;
+    let mut selected_since = Instant::now();
+    let mut last_selected_packet: Option<Instant> = None;
+    let mut last_decoded = shared.decoded.load(Ordering::Relaxed);
     let interval = connection.interval;
     let mut heartbeat = tokio::time::interval_at(Instant::now() + interval, interval);
     let mut recovering = false;
@@ -1097,7 +1196,11 @@ async fn receive_stream_once(
                         incoming.clear();
                         last_report = None;
                         recovering = true;
+                        asked = Instant::now() - KEYFRAME_REQUESTS;
+                        selected_since = Instant::now();
+                        last_selected_packet = None;
                         stalled_video = None;
+                        send_json(&mut connection.ws, 15, streamer.media_sink_wants()).await?;
                     }
                 }
             }
@@ -1193,10 +1296,11 @@ async fn receive_stream_once(
                     }
                     continue;
                 }
-                let resent = streamer.retransmission(&packet);
-                let mut held = if resent {
+                let rtx_media = streamer.rtx_media(&packet);
+                let resent = rtx_media.is_some();
+                let mut held = if let Some(media) = rtx_media {
                     received.resent += 1;
-                    match streamer.video.and_then(|video| rtp::Held::unwrap_rtx(&packet, video)) {
+                    match rtp::Held::unwrap_rtx(&packet, media) {
                         Some(held) => held,
                         None => {
                             received.padding += 1;
@@ -1210,18 +1314,50 @@ async fn receive_stream_once(
                     received.other += 1;
                     continue;
                 };
-                if streamer.video.is_some_and(|media| media != held.ssrc) {
-                    received.other += 1;
-                    continue;
+                let arrived = Instant::now();
+                if let Some(media) = streamer.video
+                    && media != held.ssrc
+                {
+                    let quiet_for = last_selected_packet.unwrap_or(selected_since).elapsed();
+                    let known_alt = streamer.is_layer(held.ssrc);
+                    let primary_video =
+                        !resent && Codec::from_payload_type(held.payload_type).is_some();
+                    if (known_alt && quiet_for >= SIMULCAST_SWITCH_GAP)
+                        || (primary_video && quiet_for >= VIDEO_PACKET_GAP)
+                    {
+                        streamer.select_layer(held.ssrc);
+                        selected_since = arrived;
+                        last_selected_packet = Some(arrived);
+                        last_report = None;
+                        recovering = true;
+                        asked = arrived - KEYFRAME_REQUESTS;
+                        tracing::info!(
+                            target: "yapfast_stream",
+                            from = media,
+                            to = held.ssrc,
+                            known_alt,
+                            codec = ?codec,
+                            "switched stream video SSRC after active layer went silent"
+                        );
+                        send_json(&mut connection.ws, 15, streamer.media_sink_wants()).await?;
+                    } else {
+                        received.other += 1;
+                        continue;
+                    }
+                } else {
+                    if streamer.video.is_none() {
+                        streamer.select_layer(held.ssrc);
+                        selected_since = arrived;
+                    }
+                    last_selected_packet = Some(arrived);
                 }
                 if can_fallback && !resent {
                     match codec {
                         Codec::Av1 | Codec::H265 => {
-                            let now = Instant::now();
                             let started = stalled_video
-                                .filter(|&(_, latest)| now - latest < VIDEO_PACKET_GAP)
-                                .map_or(now, |(started, _)| started);
-                            stalled_video = Some((started, now));
+                                .filter(|&(_, latest)| arrived - latest < VIDEO_PACKET_GAP)
+                                .map_or(arrived, |(started, _)| started);
+                            stalled_video = Some((started, arrived));
                         }
                         _ => stalled_video = None,
                     }
@@ -1229,7 +1365,6 @@ async fn receive_stream_once(
                 // Keep the codec inferred at arrival across session updates and reordering.
                 held.payload_type = codec.payload_types().0;
                 received.video += 1;
-                streamer.video.get_or_insert(held.ssrc);
                 // Packets can name any SSRC: past a few, a new one isn't
                 // given buffers of its own.
                 if incoming.len() >= MAX_SSRCS && !incoming.contains_key(&held.ssrc) {
@@ -1299,7 +1434,9 @@ async fn receive_stream_once(
                     Ok(()) => {
                         received.decoded += 1;
                         recovering &= !keyframe;
-                        stalled_video = None;
+                        if !shared.watch_decoded.load(Ordering::Relaxed) {
+                            stalled_video = None;
+                        }
                     }
                     Err(channel::TrySendError::Full(_)) => {
                         received.behind += 1;
@@ -1316,6 +1453,20 @@ async fn receive_stream_once(
                 connection.transport.seal(&mut request, rtp::RTCP_CLEAR)?;
                 connection.udp.send(&request).await?;
             }
+        }
+        let decoded_now = shared.decoded.load(Ordering::Relaxed);
+        if decoded_now != last_decoded {
+            last_decoded = decoded_now;
+            stalled_video = None;
+        }
+        if can_fallback && shared.unsupported_codec.swap(false, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "yapfast_stream",
+                codec = ?streamer.codec,
+                "stream frame uses an unsupported pixel format; retrying the stream with H264"
+            );
+            let _ = connection.ws.close(None).await;
+            return Ok(true);
         }
         // Ask for a keyframe after a loss, or when the decoder asked.
         if recovering
@@ -1510,5 +1661,61 @@ mod tests {
                 .insert(packet(sequence, Codec::Vp8, &[0x10, 0x11]), now);
             assert_eq!(drain(&mut video), [(Codec::Vp8, false)]);
         }
+    }
+
+    #[test]
+    fn tracks_simulcast_layers_and_filters_other_users_video() {
+        let mut streamer = Streamer {
+            user: Some(42),
+            codec: Some(Codec::H265),
+            ..Streamer::default()
+        };
+        streamer.learn(
+            12,
+            &json!({
+                "user_id": "99",
+                "video_ssrc": 9001,
+                "rtx_ssrc": 9002
+            }),
+        );
+        assert_eq!(streamer.video, None, "ignores op 12 for another user");
+
+        streamer.learn(
+            12,
+            &json!({
+                "user_id": "42",
+                "audio_ssrc": 5000,
+                "video_ssrc": 5001,
+                "rtx_ssrc": 5002,
+                "streams": [
+                    {"type":"video","rid":"100","ssrc":5001,"rtx_ssrc":5002,"active":true,"quality":100},
+                    {"type":"video","rid":"50","ssrc":5011,"rtx_ssrc":5012,"active":true,"quality":50}
+                ]
+            }),
+        );
+        assert_eq!((streamer.video, streamer.rtx), (Some(5001), Some(5002)));
+        assert_eq!(
+            streamer.media_sink_wants(),
+            json!({"any": 100, "5001": 100})
+        );
+        assert!(streamer.is_layer(5001));
+        assert!(streamer.is_layer(5011));
+
+        let alt_rtx = rtp::Packet {
+            payload_type: Codec::H265.payload_types().1,
+            marker: true,
+            sequence: 7,
+            timestamp: 3000,
+            ssrc: 5012,
+            payload: &[0, 4, 0x42, 0x01],
+        };
+        assert_eq!(streamer.rtx_media(&alt_rtx), Some(5011));
+
+        streamer.select_layer(5011);
+        assert_eq!((streamer.video, streamer.rtx), (Some(5011), Some(5012)));
+        assert_eq!(
+            streamer.media_sink_wants(),
+            json!({"any": 100, "5011": 100})
+        );
     }
 }

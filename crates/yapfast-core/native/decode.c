@@ -21,6 +21,7 @@ struct yapfast_decoder {
   AVCodecContext *context;
   AVPacket *packet;
   AVFrame *frame;
+  AVFrame *scratch;
   unsigned char *padded;
   size_t padded_size;
 };
@@ -44,6 +45,7 @@ void yapfast_decoder_free(struct yapfast_decoder *decoder) {
     avcodec_free_context(&decoder->context);
     av_packet_free(&decoder->packet);
     av_frame_free(&decoder->frame);
+    av_frame_free(&decoder->scratch);
     free(decoder->padded);
   }
   free(decoder);
@@ -69,7 +71,8 @@ struct yapfast_decoder *yapfast_decoder_new(int codec, unsigned threads) {
   decoder->context = h264 ? avcodec_alloc_context3(h264) : NULL;
   decoder->packet = av_packet_alloc();
   decoder->frame = av_frame_alloc();
-  if (!decoder->context || !decoder->packet || !decoder->frame) {
+  decoder->scratch = av_frame_alloc();
+  if (!decoder->context || !decoder->packet || !decoder->frame || !decoder->scratch) {
     yapfast_decoder_free(decoder);
     return NULL;
   }
@@ -82,6 +85,20 @@ struct yapfast_decoder *yapfast_decoder_new(int codec, unsigned threads) {
     return NULL;
   }
   return decoder;
+}
+
+static int drain_h264_frames(AVCodecContext *context, AVFrame **latest, AVFrame **scratch,
+                             int *got) {
+  for (;;) {
+    av_frame_unref(*scratch);
+    int received = avcodec_receive_frame(context, *scratch);
+    if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) return 0;
+    if (received < 0) return received;
+    AVFrame *previous = *latest;
+    *latest = *scratch;
+    *scratch = previous;
+    *got = 1;
+  }
 }
 
 /* Decodes one frame. Returns 1 with a picture, 0 when the decoder has none
@@ -118,11 +135,20 @@ int yapfast_decoder_decode(struct yapfast_decoder *decoder, const unsigned char 
   memset(decoder->padded + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
   decoder->packet->data = decoder->padded;
   decoder->packet->size = (int)size;
-  if (avcodec_send_packet(decoder->context, decoder->packet) < 0) return -1;
-  av_frame_unref(decoder->frame);
-  int received = avcodec_receive_frame(decoder->context, decoder->frame);
-  if (received == AVERROR(EAGAIN)) return 0;
-  if (received < 0) return -1;
+  int got = 0;
+  int sent = avcodec_send_packet(decoder->context, decoder->packet);
+  if (sent == AVERROR(EAGAIN)) {
+    int drained = drain_h264_frames(decoder->context, &decoder->frame, &decoder->scratch, &got);
+    if (drained < 0 && !got) return -1;
+    sent = avcodec_send_packet(decoder->context, decoder->packet);
+  }
+  if (sent < 0 && sent != AVERROR(EAGAIN)) {
+    if (!got) return -1;
+  } else {
+    int drained = drain_h264_frames(decoder->context, &decoder->frame, &decoder->scratch, &got);
+    if (drained < 0 && !got) return -1;
+  }
+  if (!got) return 0;
   AVFrame *frame = decoder->frame;
   if (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_YUVJ420P) return -2;
   if (frame->width > MAX_SIDE || frame->height > MAX_SIDE) return -2;

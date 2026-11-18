@@ -5,6 +5,41 @@ import { ProfileData, ProfileBadge, ProfileBadgeRow, BadgeTipCard, ProfileTheme 
 import { StatusDot } from "../rail.slint";
 import { StatusOption } from "../dialogs.slint";
 
+component AccountImageEdit inherits FocusScope {
+    in property <bool> banner;
+    in property <string> label;
+    out property <bool> highlighted: pointer.has-hover || root.has-focus;
+    callback activated;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.activated(); }
+    key-pressed(event) => {
+        if event.text == "\n" || event.text == " " {
+            root.activated();
+            return accept;
+        }
+        return reject;
+    }
+    if root.highlighted: Rectangle {
+        background: root.banner ? #00000055 : transparent;
+        Rectangle {
+            width: 30px; height: 30px; border-radius: 15px;
+            x: root.banner ? parent.width - self.width - 12px : (parent.width - self.width) / 2;
+            y: root.banner ? 12px : (parent.height - self.height) / 2;
+            background: #000000aa;
+            Image {
+                width: 16px; height: 16px;
+                source: @image-url("../icons/pencil.svg");
+                colorize: white;
+            }
+        }
+    }
+    pointer := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.activated(); }
+    }
+}
+
 // Uses the account summary already supplied by Yapfast, and, once it has
 // come, the account's own profile: its banner or colour, theme, decoration,
 // styled name, server tag and badges, as Discord's own card shows them.
@@ -69,24 +104,22 @@ export component AccountPopover inherits Rectangle {
                     y: 0px; height: header.banner-height; background: header.banner-colour;
                     border-top-left-radius: 8px; border-top-right-radius: 8px; clip: true;
                     if root.profile.banner.width > 0: Image { width: parent.width; height: parent.height; source: root.profile.banner; image-fit: cover; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        accessible-role: button; accessible-label: "Edit profile from banner";
-                        accessible-action-default => { root.edit-profile(); }
-                        clicked => { root.edit-profile(); }
+                    AccountImageEdit {
+                        width: parent.width; height: parent.height;
+                        banner: true; label: "Edit profile banner";
+                        activated => { root.edit-profile(); }
                     }
                 }
                 Rectangle {
                     x: 12px; y: header.banner-height - 44px; width: 88px; height: 88px;
                     border-radius: 44px; background: header.ring;
-                    Avatar { size: 80px; initial: root.initial; tint: root.tint; picture: root.picture; decoration-url: AccountLook.decoration-url; animate: true; }
-                    StatusDot { x: 66px; y: 65px; width: 20px; height: 20px; border-radius: 10px; presence: root.status == "invisible" ? "offline" : root.status; ring: header.ring; }
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        accessible-role: button; accessible-label: "Edit profile from avatar";
-                        accessible-action-default => { root.edit-profile(); }
-                        clicked => { root.edit-profile(); }
+                    Avatar { size: 80px; initial: root.initial; tint: root.tint; picture: root.picture; decoration-url: AccountLook.decoration-url; animate: true; dimmed: avatar-edit.highlighted; }
+                    avatar-edit := AccountImageEdit {
+                        x: 4px; y: 4px; width: 80px; height: 80px;
+                        label: "Edit profile avatar";
+                        activated => { root.edit-profile(); }
                     }
+                    StatusDot { x: 66px; y: 65px; width: 20px; height: 20px; border-radius: 10px; presence: root.status == "invisible" ? "offline" : root.status; ring: header.ring; }
                 }
                 HorizontalLayout {
                     x: 16px; y: header.banner-height + 48px; width: parent.width - 32px; height: 24px; spacing: 6px; alignment: start;

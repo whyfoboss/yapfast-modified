@@ -756,7 +756,13 @@ fn server_rooms(
     let voice = server.voice_channels().map(|channel| (true, channel));
     let mut listed: Vec<_> = text
         .chain(voice)
-        .filter(|(_, channel)| show_hidden || channel.marks.access != Access::Hidden)
+        .filter(|(_, channel)| {
+            let listed = show_hidden || channel.marks.access != Access::Hidden;
+            yapfast_discord::ready::trace_channel_label(
+                "server-rooms", &channel.id, Some(&channel.name), None, Some(listed),
+            );
+            listed
+        })
         .collect();
     let mut rooms = Vec::with_capacity(listed.len());
     listed.sort_by_cached_key(|(voice, channel)| {
@@ -1494,6 +1500,7 @@ impl PictureLoads {
                         // Cache-only failures must not blacklist a picture
                         // before the foreground has ever tried to show it.
                         if for_good && pending.events().is_some() {
+                            yapfast_discord::own_activity::invalidate_external_asset(&pending.url);
                             locked(&self.failed).insert(pending.url.clone());
                         }
                         return;
@@ -1545,6 +1552,7 @@ impl PictureLoads {
             Ok(Some(picture)) => pending.show(picture),
             _ => {
                 tracing::debug!(url = %pending.url, "could not decode a Discord picture");
+                yapfast_discord::own_activity::invalidate_external_asset(&pending.url);
                 locked(&self.failed).insert(pending.url.clone());
             }
         }
@@ -1698,33 +1706,43 @@ async fn download(
     batch: &Arc<AtomicU64>,
     backoff: &Mutex<Backoff>,
 ) -> Result<Vec<u8>, bool> {
+    let external_proxy = url.contains("/external/");
+    let max_tries = if external_proxy { 3 } else { PICTURE_TRIES };
     let mut tries = 0;
     loop {
-        let turn = download_turn(turns, batch, backoff).await.ok_or(false)?;
+        let turn = if external_proxy {
+            turns.take(batch).await.ok_or(false)?
+        } else {
+            download_turn(turns, batch, backoff).await.ok_or(false)?
+        };
         tries += 1;
         let started = Instant::now();
         let result = discord.download_now(url, MAX_PICTURE_BYTES).await;
         match result {
             Ok(data) => {
-                locked(backoff).succeeded();
+                if !external_proxy {
+                    locked(backoff).succeeded();
+                }
                 return Ok(data);
             }
             Err(error) => {
                 let retryable = yapfast_discord::api::may_work_later(&error);
-                if retryable {
+                if retryable && !external_proxy {
                     // Publish the wait before handing the turn to a queued
                     // request, including when this URL used its last try.
                     locked(backoff).failed(started, Instant::now());
                 }
-                if retryable && tries < PICTURE_TRIES {
-                    tracing::debug!(%error, %url, tries, "will download a Discord picture again");
+                if retryable && tries < max_tries {
+                    drop(turn);
+                    if external_proxy {
+                        tokio::time::sleep(Duration::from_millis(1200 * u64::from(tries))).await;
+                    }
+                    continue;
                 } else {
-                    tracing::debug!(%error, %url, "could not download a Discord picture");
                     return Err(!retryable);
                 }
             }
         }
-        drop(turn);
     }
 }
 

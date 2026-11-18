@@ -16,6 +16,36 @@ pub fn trace_track(title: &str) -> u64 {
     KEY.get_or_init(RandomState::new).hash_one(title)
 }
 
+/// Evicts a permanently failed Discord media-proxy cover from the RPC external-asset cache.
+pub fn invalidate_external_asset(proxy_url: &str) {
+    #[cfg(any(target_os = "linux", windows, test))]
+    crate::rpc::proto::invalidate_external_asset(proxy_url);
+    #[cfg(not(any(target_os = "linux", windows, test)))]
+    let _ = proxy_url;
+}
+
+pub(crate) fn subscribe_late_soundcloud_artwork() -> watch::Receiver<Activity> {
+    #[cfg(any(target_os = "linux", windows, test))]
+    {
+        crate::rpc::proto::subscribe_late_soundcloud_artwork()
+    }
+    #[cfg(not(any(target_os = "linux", windows, test)))]
+    {
+        watch::channel(None).1
+    }
+}
+
+pub(crate) fn subscribe_soundcloud_rpc_clients() -> watch::Receiver<usize> {
+    #[cfg(any(target_os = "linux", windows, test))]
+    {
+        crate::rpc::proto::subscribe_soundcloud_rpc_clients()
+    }
+    #[cfg(not(any(target_os = "linux", windows, test)))]
+    {
+        watch::channel(0).1
+    }
+}
+
 pub(crate) fn eligible(activity: &Value) -> bool {
     crate::activity::activity(activity).is_some_and(|parsed| {
         parsed.eligible_for_own_presence()
@@ -67,7 +97,8 @@ impl MusicPlayback {
             return false;
         }
         let normalize = |text: &str| {
-            text.trim_end_matches('\u{2800}').split_whitespace()
+            text.trim_matches('\u{2800}')
+                .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_lowercase()
@@ -79,25 +110,201 @@ impl MusicPlayback {
         let duration_matches = rpc.start.zip(rpc.end).is_some_and(|(start, end)| {
             end > start && self.duration_ms > 0 && (end - start).abs_diff(self.duration_ms) <= 2_000
         });
-        let title_matches = !title.is_empty()
-            && (title == track_title
-                || (duration_matches
-                    && title
-                        .strip_suffix('…')
-                        .or_else(|| title.strip_suffix("..."))
-                        .is_some_and(|prefix| {
-                            let prefix = prefix.trim_end();
-                            prefix.chars().count() >= 12 && track_title.starts_with(prefix)
-                        })));
-        if !title_matches {
+        let allow_prefix = duration_matches || (rpc.start.is_none() && rpc.end.is_none());
+        let matches_candidate = |candidate: &str| {
+            !title.is_empty()
+                && (title == candidate
+                    || (allow_prefix
+                        && title
+                            .strip_suffix('…')
+                            .or_else(|| title.strip_suffix("..."))
+                            .is_some_and(|prefix| {
+                                let prefix = prefix.trim_end();
+                                prefix.chars().count() >= 12 && candidate.starts_with(prefix)
+                            })))
+        };
+        let is_soundcloud = rpc.name.eq_ignore_ascii_case("SoundCloud");
+        let split_match = split_artist_track(&track_title).is_some_and(|(parsed_artist, parsed_track)| {
+            matches_candidate(parsed_track)
+                && ((self.soundcloud_source && is_soundcloud)
+                    || rpc
+                        .state
+                        .as_deref()
+                        .is_some_and(|state| artists_match(parsed_artist, &normalize(state))))
+        });
+        if !matches_candidate(&track_title) && !split_match {
             return false;
         }
-        if self.soundcloud_source && rpc.name.eq_ignore_ascii_case("SoundCloud") {
+        if self.soundcloud_source && is_soundcloud {
+            return true;
+        }
+        if split_match {
             return true;
         }
         let artist = normalize(&self.artist);
-        !artist.is_empty() && rpc.state.as_deref().is_some_and(|state| normalize(state) == artist)
+        if is_soundcloud && is_paused_state(rpc.state.as_deref()) {
+            return !artist.is_empty() || duration_matches;
+        }
+        if artist.is_empty() {
+            return is_soundcloud && duration_matches;
+        }
+        rpc.state.as_deref().is_some_and(|state| {
+            let rpc_artist = normalize(state);
+            artists_match(&artist, &rpc_artist)
+                || (is_soundcloud
+                    && !rpc_artist.is_empty()
+                    && title_credits_artist(&track_title, &artist))
+        })
     }
+}
+
+fn artist_tokens(normalized: &str) -> Vec<&str> {
+    let mut parts = vec![normalized];
+    for sep in [
+        ",",
+        ";",
+        " & ",
+        " + ",
+        " × ",
+        " x ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        " w/ ",
+        " / ",
+        " · ",
+        " • ",
+    ] {
+        parts = parts
+            .into_iter()
+            .flat_map(|part| part.split(sep))
+            .collect();
+    }
+    parts
+        .into_iter()
+        .map(|part| {
+            part.trim_matches(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']'))
+        })
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn artists_match(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    let left_tokens = artist_tokens(left);
+    let right_tokens = artist_tokens(right);
+    left_tokens
+        .iter()
+        .any(|l| right_tokens.iter().any(|r| l == r))
+}
+
+fn title_credits_artist(normalized_title: &str, normalized_artist: &str) -> bool {
+    if normalized_title.is_empty() || normalized_artist.is_empty() {
+        return false;
+    }
+    let artist_parts = artist_tokens(normalized_artist);
+    for sep in [
+        " + ",
+        " & ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        " w/ ",
+        " prod. ",
+        " prod ",
+    ] {
+        if normalized_title.contains(sep) {
+            for segment in normalized_title.split(sep).skip(1) {
+                let seg_tokens = artist_tokens(segment);
+                if seg_tokens
+                    .iter()
+                    .any(|s| artist_parts.iter().any(|a| s == a))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn split_artist_track(title: &str) -> Option<(&str, &str)> {
+    for sep in [" - ", " – ", " — ", " ― ", " -- "] {
+        if let Some((artist, track)) = title.split_once(sep) {
+            let (artist, track) = (artist.trim(), track.trim());
+            if !artist.is_empty() && !track.is_empty() {
+                return Some((artist, track));
+            }
+        }
+    }
+    None
+}
+
+/// Treats minor running-clock anchor jitter (< 2s) on an otherwise identical
+/// Listening activity as unchanged so loop-detector or SMTC/RPC rounding ticks
+/// do not exhaust Discord's 5-per-20s presence rate limit.
+pub(crate) fn same_effective_presence(previous: &Value, next: &Value) -> bool {
+    if previous == next {
+        return true;
+    }
+    if previous["status"] != next["status"]
+        || previous["afk"] != next["afk"]
+        || previous["since"] != next["since"]
+    {
+        return false;
+    }
+    let (Some(old_list), Some(new_list)) = (
+        previous["activities"].as_array(),
+        next["activities"].as_array(),
+    ) else {
+        return false;
+    };
+    old_list.len() == new_list.len()
+        && old_list.iter().zip(new_list).all(|(old, new)| {
+            if old == new {
+                return true;
+            }
+            if old["type"] != 2 || new["type"] != 2 {
+                return false;
+            }
+            let same_fields = [
+                "name",
+                "application_id",
+                "details",
+                "state",
+                "assets",
+                "buttons",
+                "metadata",
+                "_artwork_pending",
+            ]
+            .into_iter()
+            .all(|field| old.get(field) == new.get(field));
+            if !same_fields {
+                return false;
+            }
+            let (Some(old_start), Some(new_start)) = (
+                old["timestamps"]["start"].as_u64(),
+                new["timestamps"]["start"].as_u64(),
+            ) else {
+                return false;
+            };
+            let end_same = match (
+                old["timestamps"]["end"].as_u64(),
+                new["timestamps"]["end"].as_u64(),
+            ) {
+                (Some(a), Some(b)) => a.abs_diff(b) < 2_500,
+                (None, None) => true,
+                _ => false,
+            };
+            old_start.abs_diff(new_start) < 2_000 && end_same
+        })
 }
 
 /// The game the account shows it plays.
@@ -220,6 +427,32 @@ async fn combine(
     }
 }
 
+/// Formats the visible SoundCloud pause status (`Paused on m:ss` or `Paused on h:mm:ss`,
+/// or `Paused` when no track timeline/position is available).
+pub fn format_pause_status(position_ms: u64, duration_ms: u64) -> String {
+    if position_ms == 0 && duration_ms == 0 {
+        return "Paused".into();
+    }
+    let clamped = if duration_ms > 0 {
+        position_ms.min(duration_ms)
+    } else {
+        position_ms
+    };
+    let secs = clamped / 1000;
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("Paused on {hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("Paused on {minutes}:{seconds:02}")
+    }
+}
+
+pub(crate) fn is_paused_state(state: Option<&str>) -> bool {
+    state.is_some_and(|s| s == "Paused" || s.starts_with("Paused on ") || s.starts_with("Paused at "))
+}
+
 /// Holds the track through SoundCloud's RPC clear or idle activity on pause.
 pub(crate) fn soundcloud_on_pause(
     current: Activity,
@@ -233,18 +466,32 @@ pub(crate) fn soundcloud_on_pause(
         return current;
     }
     if current.as_ref().is_none_or(|activity| activity["name"] == "SoundCloud")
-        && let Some(music) = music.filter(|music| music.soundcloud_source)
+        && let Some(music) = music
         && let Some(track) = previous.as_ref()
         && crate::activity::activity(track).is_some_and(|rpc| music.matches(&rpc))
     {
-        // The RPC clear may arrive before the Windows playback event.
-        return if music.start_ms.is_none() { previous.clone() } else { current };
+        // The RPC clear may arrive before the Windows playback event; keep `previous`
+        // intact while `music` still matches so the upcoming SMTC pause retains title & cover.
+        return if music.start_ms.is_none() {
+            previous.clone()
+        } else {
+            current
+        };
     }
     *previous = None;
     current
 }
 
 pub(crate) fn merge(presence: &mut Value, activity: Option<&Value>, music: Option<&MusicPlayback>) {
+    merge_with_fallback(presence, activity, music, true);
+}
+
+pub(crate) fn merge_with_fallback(
+    presence: &mut Value,
+    activity: Option<&Value>,
+    music: Option<&MusicPlayback>,
+    allow_stale_replace: bool,
+) {
     if let Some(activities) = presence["activities"].as_array_mut() {
         activities.retain(|value| value["type"] == 4);
         if let Some(activity) = activity.filter(|activity| eligible(activity)) {
@@ -252,7 +499,8 @@ pub(crate) fn merge(presence: &mut Value, activity: Option<&Value>, music: Optio
             if let Some(music) = music {
                 let matched =
                     crate::activity::activity(&activity).is_some_and(|rpc| music.matches(&rpc));
-                let replace_stale_track = !matched
+                let replace_stale_track = allow_stale_replace
+                    && !matched
                     && music.soundcloud_source
                     && !music.title.trim().is_empty()
                     && activity["name"]
@@ -281,8 +529,18 @@ pub(crate) fn merge(presence: &mut Value, activity: Option<&Value>, music: Optio
                     } else if let Some(activity) = activity.as_object_mut() {
                         // Discord timestamps run against the viewer's clock.
                         activity.remove("timestamps");
-                        if activity.get("name").and_then(Value::as_str) == Some("SoundCloud") {
-                            activity.insert("state".into(), Value::String("Paused".into()));
+                        if activity
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| name.eq_ignore_ascii_case("SoundCloud"))
+                        {
+                            activity.insert(
+                                "state".into(),
+                                Value::String(format_pause_status(
+                                    music.position_ms,
+                                    music.duration_ms,
+                                )),
+                            );
                         } else {
                             let position = if music.duration_ms > 0 {
                                 music.position_ms.min(music.duration_ms)
@@ -382,7 +640,10 @@ mod tests {
         let paused = &presence["activities"][0];
         assert!(paused.get("timestamps").is_none());
         assert_eq!(paused["details"], "Track");
-        assert_eq!(paused["state"], "Paused");
+        assert_eq!(paused["state"], "Paused on 1:49");
+        assert_eq!(format_pause_status(48_000, 72_000), "Paused on 0:48");
+        assert_eq!(format_pause_status(3_665_000, 4_000_000), "Paused on 1:01:05");
+        assert_eq!(format_pause_status(0, 0), "Paused");
 
         playback.start_ms = Some(2000);
         merge(&mut presence, Some(&activity), Some(&playback));
@@ -496,5 +757,183 @@ mod tests {
         let art = activity.large_image.as_deref().unwrap();
         assert!(art.ends_with("/app-assets/42/99.png?size=160"));
         assert_eq!(Playing::of(&json!({"type":0,"name":" "})), None);
+    }
+
+    #[test]
+    fn soundcloud_split_artist_dash_title_and_braille_padding_keep_rpc_cover() {
+        let smtc = MusicPlayback {
+            soundcloud_source: true,
+            title: "Burial - Archangel".into(),
+            artist: "Hyperdub Records".into(),
+            duration_ms: 238_000,
+            position_ms: 0,
+            start_ms: Some(1_800_000_000_000),
+        };
+        let rpc = json!({
+            "type": 2,
+            "name": "SoundCloud",
+            "application_id": "1090770350251458592",
+            "details": "Archangel",
+            "state": "Burial",
+            "assets": {"large_image": "mp:external/sig/https/i1.sndcdn.com/archangel.jpg"},
+            "buttons": ["▶️ Listen on SoundCloud"],
+            "metadata": {"button_urls": ["https://soundcloud.com/burial/archangel"]}
+        });
+        let mut presence = json!({"activities": []});
+        merge(&mut presence, Some(&rpc), Some(&smtc));
+        let card = &presence["activities"][0];
+        assert_eq!(card["details"], "Archangel");
+        assert_eq!(card["state"], "Burial");
+        assert_eq!(
+            card["assets"]["large_image"],
+            "mp:external/sig/https/i1.sndcdn.com/archangel.jpg"
+        );
+        assert_eq!(
+            card["timestamps"],
+            json!({"start": 1_800_000_000_000_u64, "end": 1_800_000_238_000_u64})
+        );
+        assert_eq!(card["buttons"], json!(["▶️ Listen on SoundCloud"]));
+
+        // Short 1-char title/artist padded with Braille blanks (`\u{2800}`) in presenceService.ts:
+        let short_smtc = MusicPlayback {
+            soundcloud_source: true,
+            title: "X".into(),
+            artist: "Y".into(),
+            duration_ms: 90_000,
+            position_ms: 0,
+            start_ms: Some(1_800_000_000_000),
+        };
+        let short_rpc = json!({
+            "type": 2,
+            "name": "SoundCloud",
+            "application_id": "1090770350251458592",
+            "details": "X\u{2800}\u{2800}",
+            "state": "Y\u{2800}\u{2800}",
+            "assets": {"large_image": "mp:external/sig/https/i1.sndcdn.com/xy.jpg"}
+        });
+        let mut short_presence = json!({"activities": []});
+        merge(&mut short_presence, Some(&short_rpc), Some(&short_smtc));
+        assert_eq!(
+            short_presence["activities"][0]["assets"]["large_image"],
+            "mp:external/sig/https/i1.sndcdn.com/xy.jpg"
+        );
+    }
+
+    #[test]
+    fn effective_presence_deduplicates_loop_clock_jitter_but_keeps_seek_pause_and_cover() {
+        let base = json!({
+            "status": "online",
+            "activities": [{
+                "type": 2,
+                "name": "SoundCloud",
+                "application_id": "1090770350251458592",
+                "details": "Archangel",
+                "state": "Burial",
+                "timestamps": {"start": 1_800_000_000_000_u64, "end": 1_800_000_238_000_u64}
+            }]
+        });
+        let mut jittered = base.clone();
+        jittered["activities"][0]["timestamps"] =
+            json!({"start": 1_800_000_000_850_u64, "end": 1_800_000_238_850_u64});
+        assert!(same_effective_presence(&base, &jittered));
+
+        let mut sought = base.clone();
+        sought["activities"][0]["timestamps"] =
+            json!({"start": 1_800_000_003_000_u64, "end": 1_800_000_241_000_u64});
+        assert!(!same_effective_presence(&base, &sought));
+
+        let mut with_cover = jittered.clone();
+        with_cover["activities"][0]["assets"] =
+            json!({"large_image": "mp:external/sig/https/i1.sndcdn.com/archangel.jpg"});
+        assert!(!same_effective_presence(&base, &with_cover));
+
+        let mut paused = with_cover.clone();
+        paused["activities"][0]["state"] = json!("Paused");
+        paused["activities"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamps");
+        assert!(!same_effective_presence(&with_cover, &paused));
+    }
+
+    #[test]
+    fn webview2_multi_artist_plus_title_matches_pause_at_008_and_blocks_stale_revival() {
+        let rpc_value = Arc::new(json!({
+            "type": 2,
+            "name": "SoundCloud",
+            "application_id": "1090770350251458592",
+            "details": "We feel tired  + jinatsu",
+            "state": "повреждённый, jinatsu",
+            "timestamps": {"start": 1_800_000_000_000_u64, "end": 1_800_000_134_000_u64},
+            "assets": {"large_image": "mp:external/sig/https/i1.sndcdn.com/we-feel-tired.jpg"}
+        }));
+        let parsed = crate::activity::activity(&rpc_value).unwrap();
+
+        // Observed live WebView2 SMTC session (`soundcloud_source: false`):
+        // RPC carries multi-artist badge `"повреждённый, jinatsu"`, SMTC carries uploader `"повреждённый"`.
+        let mut smtc = MusicPlayback {
+            soundcloud_source: false,
+            title: "We feel tired  + jinatsu".into(),
+            artist: "повреждённый".into(),
+            duration_ms: 134_000,
+            position_ms: 0,
+            start_ms: Some(1_800_000_000_000),
+        };
+        assert!(smtc.matches(&parsed));
+
+        // Co-artist only or empty SMTC artist with matching duration also match, while an
+        // unrelated session with the same title and a different artist must never match.
+        let mut co_artist = smtc.clone();
+        co_artist.artist = "jinatsu".into();
+        assert!(co_artist.matches(&parsed));
+
+        let mut foreign_same_title = smtc.clone();
+        foreign_same_title.artist = "Another artist".into();
+        assert!(!foreign_same_title.matches(&parsed));
+
+        // Trace observed pause sequence, including SMTC pause arriving AFTER the 250ms window:
+        let mut previous = None;
+        assert_eq!(
+            soundcloud_on_pause(Some(rpc_value.clone()), &mut previous, Some(&smtc)),
+            Some(rpc_value.clone())
+        );
+
+        // 1. RPC clears first while SMTC still reports playing -> after 250ms window expires,
+        // active presence clears (`None`), while `previous` stays retained for the matching track.
+        assert_eq!(soundcloud_on_pause(None, &mut previous, Some(&smtc)), None);
+        assert_eq!(previous, Some(rpc_value.clone()));
+
+        // 2. Confirmed SMTC pause at 0:08 arrives after the reconciliation window -> restores card!
+        smtc.start_ms = None;
+        smtc.position_ms = 8_000;
+        let restored = soundcloud_on_pause(None, &mut previous, Some(&smtc));
+        assert_eq!(restored, Some(rpc_value.clone()));
+        let mut presence = json!({"activities": []});
+        merge(&mut presence, restored.as_deref(), Some(&smtc));
+        assert_eq!(
+            presence["activities"][0]["details"],
+            "We feel tired  + jinatsu"
+        );
+        assert_eq!(presence["activities"][0]["state"], "Paused on 0:08");
+        assert!(presence["activities"][0].get("timestamps").is_none());
+        assert_eq!(
+            presence["activities"][0]["assets"]["large_image"],
+            "mp:external/sig/https/i1.sndcdn.com/we-feel-tired.jpg"
+        );
+
+        // 3. Confirmed pause with unavailable position (`0/0`) shows bare `Paused`:
+        let mut no_pos = smtc.clone();
+        no_pos.position_ms = 0;
+        no_pos.duration_ms = 0;
+        let mut bare_presence = json!({"activities": []});
+        merge(&mut bare_presence, restored.as_deref(), Some(&no_pos));
+        assert_eq!(bare_presence["activities"][0]["state"], "Paused");
+        assert!(bare_presence["activities"][0].get("timestamps").is_none());
+
+        // 4. Genuine stop (`None`) or foreign session (`!matches`) wipes `previous` permanently,
+        // so a late event from the old track can never revive its card.
+        assert_eq!(soundcloud_on_pause(None, &mut previous, None), None);
+        assert!(previous.is_none());
+        assert_eq!(soundcloud_on_pause(None, &mut previous, Some(&smtc)), None);
     }
 }

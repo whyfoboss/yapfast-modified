@@ -60,6 +60,29 @@ unsafe extern "C" {
 type DecodeFn = unsafe extern "C" fn(*mut Raw, *const c_uchar, usize, *mut RawPicture) -> c_int;
 type FreeFn = unsafe extern "C" fn(*mut Raw);
 
+#[derive(Debug)]
+pub struct UnsupportedFormat {
+    codec: Codec,
+    code: c_int,
+}
+
+impl std::fmt::Display for UnsupportedFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "could not decode a {:?} frame ({})",
+            self.codec, self.code
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedFormat {}
+
+/// Whether `error` came from a valid frame whose pixel format or dimensions
+/// this decoder does not render (such as 10-bit Main 10 HDR).
+pub fn is_unsupported_format(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<UnsupportedFormat>().is_some()
+}
 /// The codecs a viewer tells Discord it decodes, most wanted first: AV1
 /// everywhere, H265 only where FFmpeg's HEVC decoder is built in, on Linux
 /// and Windows.
@@ -157,6 +180,10 @@ impl Decoder {
         // decoder, which `Picture` borrows.
         let decoded = unsafe { (self.decode)(self.raw, frame.as_ptr(), frame.len(), &mut raw) };
         match decoded {
+            -2 => bail!(UnsupportedFormat {
+                codec: self.codec,
+                code: decoded,
+            }),
             ..0 => bail!("could not decode a {:?} frame ({decoded})", self.codec),
             0 => Ok(None),
             _ => {
@@ -315,6 +342,54 @@ mod tests {
             check(
                 Codec::H265,
                 first_unit(&fixture("stream-h265.h265"), 35 << 1),
+            );
+        }
+    }
+
+    #[cfg(hevcdec)]
+    #[test]
+    fn hevc_decoder_survives_repeated_idrs_when_sps_reorders_frames() {
+        let mut raw = fixture("stream-h265.h265");
+        let mut patched = 0usize;
+        for at in 0..raw.len().saturating_sub(32) {
+            if raw[at..at + 3] == [0, 0, 1] && ((raw[at + 3] >> 1) & 0x3f) == 33 {
+                if raw[at + 28] == 0xa9 {
+                    raw[at + 28] = 0x79;
+                    patched += 1;
+                }
+            }
+        }
+        assert!(patched > 0, "patched SPS sps_max_num_reorder_pics to 2");
+
+        let mut delimiters = vec![0usize];
+        for at in 1..raw.len().saturating_sub(5) {
+            if raw[at..at + 5] == [0, 0, 0, 1, 35 << 1] {
+                delimiters.push(at);
+            }
+        }
+        delimiters.push(raw.len());
+        let units: Vec<&[u8]> = delimiters
+            .windows(2)
+            .map(|pair| &raw[pair[0]..pair[1]])
+            .collect();
+        assert!(units.len() >= 10);
+
+        let mut decoder = Decoder::new(Codec::H265).unwrap();
+        let mut pictures = 0usize;
+        for round in 0..4 {
+            let before = pictures;
+            for (index, unit) in units.iter().enumerate() {
+                let decoded = decoder
+                    .decode(unit)
+                    .unwrap_or_else(|err| panic!("round {round} frame {index} failed: {err:#}"));
+                if let Some(picture) = decoded {
+                    assert_eq!((picture.width, picture.height), (320, 180));
+                    pictures += 1;
+                }
+            }
+            assert!(
+                pictures > before + units.len() / 2,
+                "round {round} produced too few pictures ({pictures} vs {before})"
             );
         }
     }

@@ -86,6 +86,14 @@ fn filter() -> Targets {
         .with_target("yapfast_core", level)
         .with_target("yapfast_media", media)
         .with_target(
+            "yapfast_channel",
+            if std::env::var_os("YAPFAST_CHANNEL_TRACE").is_some() {
+                LevelFilter::DEBUG
+            } else {
+                LevelFilter::OFF
+            },
+        )
+        .with_target(
             "yapfast_stream",
             if std::env::var_os("YAPFAST_STREAM_LOG").is_some() {
                 LevelFilter::INFO

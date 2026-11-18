@@ -5,6 +5,8 @@
 Drag a server or a folder above or below another entry to change the order on
 this device. A server can also be dragged out of an open folder. The order and
 removed folder membership are saved on this device.
+A server's drag preview follows the pointer outside the rail. Releasing
+outside the rail cancels the move.
 
 ## Permissions and roles
 
@@ -396,6 +398,17 @@ onboarding's default channels, which Yapfast doesn't fetch.
 out with the pinned channels when the server's snapshot changes, rather than a
 list of their ids on the server. The channel list drops them as it drops muted
 channels in a server that hides them (`AppState::scoped_rooms`).
+
+### Hidden channel labels
+
+Show Hidden Channels includes locked rows using the names in the current
+channel metadata. Discord can send a redacted channel with a placeholder.
+A later full channel update can supply the name when it is available.
+
+For a local label trace, set `YAPFAST_CHANNEL_TRACE` to two comma-separated
+channel IDs before starting Yapfast. The `yapfast_channel` log identifies
+the channels only as A and B and reports the label class, obfuscation flag
+and whether the row was listed.
 
 ### Browse Channels
 

@@ -3850,6 +3850,13 @@ impl Application {
                 }
                 // The switch moves at once; a refusal moves it back.
                 self.state.discord_show_game = shown;
+                if !shown {
+                    self.state.discord_playing = None;
+                    #[cfg(feature = "discord")]
+                    {
+                        self.state.discord_presence_preview = Default::default();
+                    }
+                }
                 vec![Effect::Backend(Command::Discord(DiscordCommand::ShowGame(
                     shown,
                 )))]

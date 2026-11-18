@@ -1571,7 +1571,13 @@ export component GameActivitySettings inherits VerticalLayout {
         border-radius: 8px;
         HorizontalLayout {
             padding: 12px; spacing: 8px;
-            Text { text: root.preview-status == "Update pending" ? root.preview-status : "No game or media activity currently active."; color: Theme.muted; font-size: 13px; }
+            if root.preview-status == "Update pending": Middle {
+                Rectangle {
+                    width: 8px; height: 8px; border-radius: 4px;
+                    background: #f0b232;
+                }
+            }
+            Text { text: root.preview-status == "Update pending" ? root.preview-status : "No game or media activity currently active."; color: Theme.muted; font-size: 13px; vertical-alignment: center; }
         }
     }
 

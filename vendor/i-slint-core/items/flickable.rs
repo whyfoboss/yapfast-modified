@@ -219,10 +219,16 @@ impl Item for Flickable {
         if let Some(pos) = event.position() {
             let geometry = Self::geometry_without_virtual_keyboard(self_rc);
 
-            if (pos.x < 0 as _
-                || pos.y < 0 as _
-                || pos.x_length() > geometry.width_length()
-                || pos.y_length() > geometry.height_length())
+            let child_mouse_drag = matches!(
+                event,
+                MouseEvent::Moved { .. } | MouseEvent::Released { .. }
+            ) && !event.is_from_touch()
+                && !self.mouse_drag_pan_enabled();
+            if !child_mouse_drag
+                && (pos.x < 0 as _
+                    || pos.y < 0 as _
+                    || pos.x_length() > geometry.width_length()
+                    || pos.y_length() > geometry.height_length())
                 && self.data.inner.borrow().pressed_mouse_state.is_none()
             {
                 return InputEventFilterResult::Intercept;

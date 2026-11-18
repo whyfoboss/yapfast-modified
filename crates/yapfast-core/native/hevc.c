@@ -15,6 +15,7 @@ struct yapfast_hevc {
   AVCodecContext *context;
   AVPacket *packet;
   AVFrame *frame;
+  AVFrame *scratch;
   unsigned char *padded;
   size_t padded_size;
 };
@@ -35,6 +36,7 @@ void yapfast_hevc_free(struct yapfast_hevc *decoder) {
   avcodec_free_context(&decoder->context);
   av_packet_free(&decoder->packet);
   av_frame_free(&decoder->frame);
+  av_frame_free(&decoder->scratch);
   free(decoder->padded);
   free(decoder);
 }
@@ -47,7 +49,8 @@ struct yapfast_hevc *yapfast_hevc_new(unsigned threads) {
   decoder->context = hevc ? avcodec_alloc_context3(hevc) : NULL;
   decoder->packet = av_packet_alloc();
   decoder->frame = av_frame_alloc();
-  if (!decoder->context || !decoder->packet || !decoder->frame) {
+  decoder->scratch = av_frame_alloc();
+  if (!decoder->context || !decoder->packet || !decoder->frame || !decoder->scratch) {
     yapfast_hevc_free(decoder);
     return NULL;
   }
@@ -60,6 +63,23 @@ struct yapfast_hevc *yapfast_hevc_new(unsigned threads) {
     return NULL;
   }
   return decoder;
+}
+
+/* Drains all decoded frames currently queued in FFmpeg (for example when a new
+ * IDR flushes reordered pictures into output_fifo), keeping the newest picture
+ * in *latest so buffer_pkt never wedges with AVERROR(EAGAIN). */
+static int drain_hevc_frames(AVCodecContext *context, AVFrame **latest, AVFrame **scratch,
+                             int *got) {
+  for (;;) {
+    av_frame_unref(*scratch);
+    int received = avcodec_receive_frame(context, *scratch);
+    if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) return 0;
+    if (received < 0) return received;
+    AVFrame *previous = *latest;
+    *latest = *scratch;
+    *scratch = previous;
+    *got = 1;
+  }
 }
 
 /* Decodes one frame. Returns 1 with a picture, 0 when the decoder has none
@@ -79,11 +99,20 @@ int yapfast_hevc_decode(struct yapfast_hevc *decoder, const unsigned char *data,
   memset(decoder->padded + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
   decoder->packet->data = decoder->padded;
   decoder->packet->size = (int)size;
-  if (avcodec_send_packet(decoder->context, decoder->packet) < 0) return -1;
-  av_frame_unref(decoder->frame);
-  int received = avcodec_receive_frame(decoder->context, decoder->frame);
-  if (received == AVERROR(EAGAIN)) return 0;
-  if (received < 0) return -1;
+  int got = 0;
+  int sent = avcodec_send_packet(decoder->context, decoder->packet);
+  if (sent == AVERROR(EAGAIN)) {
+    int drained = drain_hevc_frames(decoder->context, &decoder->frame, &decoder->scratch, &got);
+    if (drained < 0 && !got) return -1;
+    sent = avcodec_send_packet(decoder->context, decoder->packet);
+  }
+  if (sent < 0 && sent != AVERROR(EAGAIN)) {
+    if (!got) return -1;
+  } else {
+    int drained = drain_hevc_frames(decoder->context, &decoder->frame, &decoder->scratch, &got);
+    if (drained < 0 && !got) return -1;
+  }
+  if (!got) return 0;
   AVFrame *frame = decoder->frame;
   /* Main profile's 8-bit 4:2:0, as Yapfast's encoders send; Main 10
    * pictures don't show. */
