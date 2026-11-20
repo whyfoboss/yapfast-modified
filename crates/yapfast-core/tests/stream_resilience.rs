@@ -84,6 +84,7 @@ struct WatchedMetrics {
     pictures_phase1: usize,
     pictures_phase2: usize,
     pictures_phase3: usize,
+    pictures_after_rollovers: usize,
     audio_decoded: usize,
     audio_errors: usize,
     max_audio_gap_ms: u128,
@@ -144,6 +145,7 @@ fn watch_for_duration(server: StreamServer, duration: Duration) -> WatchedMetric
         pictures_phase1: 0,
         pictures_phase2: 0,
         pictures_phase3: 0,
+        pictures_after_rollovers: 0,
         audio_decoded: 0,
         audio_errors: 0,
         max_audio_gap_ms: 0,
@@ -180,6 +182,9 @@ fn watch_for_duration(server: StreamServer, duration: Duration) -> WatchedMetric
                     _ => {}
                 }
                 let elapsed = started.elapsed();
+                if elapsed >= Duration::from_millis(10_900) {
+                    metrics.pictures_after_rollovers += 1;
+                }
                 if elapsed < Duration::from_millis(1200) {
                     metrics.pictures_phase1 += 1;
                 } else if elapsed < Duration::from_millis(3400) {
@@ -225,26 +230,28 @@ fn watched_streams_survive_hevc_idrs_loss_simulcast_switch_and_10bit_fallback_wi
     let carol_server = fake.server_for("1400000000000000088", "sess-carol");
 
     let bob_handle =
-        std::thread::spawn(move || watch_for_duration(bob_server, Duration::from_millis(5800)));
+        std::thread::spawn(move || watch_for_duration(bob_server, Duration::from_millis(12_300)));
     let carol_handle =
-        std::thread::spawn(move || watch_for_duration(carol_server, Duration::from_millis(5800)));
+        std::thread::spawn(move || watch_for_duration(carol_server, Duration::from_millis(12_300)));
 
     let bob = bob_handle.join().unwrap();
     let carol = carol_handle.join().unwrap();
 
     eprintln!(
-        "Bob (HEVC+loss+simulcast): p1={} p2={} p3={} audio={} max_gap={}ms",
+        "Bob (HEVC+loss+simulcast): p1={} p2={} p3={} last={} audio={} max_gap={}ms",
         bob.pictures_phase1,
         bob.pictures_phase2,
         bob.pictures_phase3,
+        bob.pictures_after_rollovers,
         bob.audio_decoded,
         bob.max_audio_gap_ms
     );
     eprintln!(
-        "Carol (2nd stream):        p1={} p2={} p3={} audio={} max_gap={}ms",
+        "Carol (2nd stream):        p1={} p2={} p3={} last={} audio={} max_gap={}ms",
         carol.pictures_phase1,
         carol.pictures_phase2,
         carol.pictures_phase3,
+        carol.pictures_after_rollovers,
         carol.audio_decoded,
         carol.max_audio_gap_ms
     );
@@ -260,6 +267,14 @@ fn watched_streams_survive_hevc_idrs_loss_simulcast_switch_and_10bit_fallback_wi
         bob.pictures_phase3 >= 30,
         "Bob kept advancing after simulcast SSRC switch 5001->5011 without rejoin ({})",
         bob.pictures_phase3
+    );
+    // The last unannounced layer is selected only after one second of silence
+    // on its predecessor, leaving about 400 ms at 25 FPS in this window.
+    assert!(
+        bob.pictures_after_rollovers >= 6 && !bob.saw_h264 && carol.pictures_after_rollovers >= 20,
+        "picture progression after five SSRC changes (Bob={}, Carol={})",
+        bob.pictures_after_rollovers,
+        carol.pictures_after_rollovers
     );
     assert!(
         bob.audio_decoded >= 220 && bob.audio_errors == 0 && bob.max_audio_gap_ms < 250,

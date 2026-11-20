@@ -862,6 +862,8 @@ initial reconciliation window; genuine stops, track replacements and RPC client
 exits clear the retained track so stale events never revive it. On resume it restores the artist and uses the Windows
 playback timeline. Video RPC,
 including YouTube reported as Playing, is filtered from own presence.
+For a new SoundCloud track, Windows playback waits briefly for matching RPC
+metadata. Corrections to the same running track keep that original deadline.
 Media and RPC artwork can arrive after the initial activity. SoundCloud
 cover and clock refreshes leave the last available presence update for
 playback changes, while a settled track's initial cover delivers after a brief

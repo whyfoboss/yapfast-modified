@@ -1403,6 +1403,46 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
     presence_where(server, |p| shows(p, "Fixture track", Some(cover))).await;
     eprintln!("SoundCloud cached RPC cover to gateway fixture: {} ms", cached.elapsed().as_millis());
 
+    // SMTC corrects the timeline as the player settles, while RPC still
+    // advertises the previous track. These corrections must share one wait.
+    let mut native = yapfast_discord::own_activity::MusicPlayback {
+        soundcloud_source: true,
+        title: "Native first".into(),
+        artist: "Fixture artist".into(),
+        duration_ms: 69_000,
+        position_ms: 0,
+        start_ms: Some(1_800_000_000_000),
+    };
+    let changed = tokio::time::Instant::now();
+    discord.set_music_playback(Some(native.clone()));
+    let new_cover = "mp:external/fixture/https/example.com/native-first.png";
+    let (_, text_ms, cover_ms) = tokio::join!(
+        async {
+            for offset in [400, 800, 1_200] {
+                tokio::time::sleep_until(changed + Duration::from_millis(offset)).await;
+                native.duration_ms += 1_000;
+                discord.set_music_playback(Some(native.clone()));
+            }
+            tokio::time::sleep_until(changed + Duration::from_millis(2_100)).await;
+            send(&mut music, 1, send_track(track("Native first", "native-first"))).await;
+            receive(&mut music).await;
+        },
+        async {
+            presence_where(server, |p| shows(p, "Native first", None) || shows(p, "Native first", Some(new_cover))).await;
+            changed.elapsed().as_millis()
+        },
+        async {
+            presence_where(server, |p| shows(p, "Native first", Some(new_cover))).await;
+            changed.elapsed().as_millis()
+        },
+    );
+    eprintln!("SoundCloud delayed RPC with SMTC corrections: text={text_ms} ms, cover={cover_ms} ms");
+    assert!(text_ms < 1_100, "timeline corrections extended the wait: {text_ms} ms");
+    discord.set_music_playback(None);
+    send(&mut music, 1, send_track(track("Fixture track", "slow-artwork"))).await;
+    receive(&mut music).await;
+    presence_where(server, |p| shows(p, "Fixture track", Some(cover))).await;
+
     // Cold fast artwork coalesces into a single presence update with its cover, and SMTC arriving
     // ahead of RPC for an "Artist - Track" title keeps the previous sent card pending until RPC merges.
     tokio::time::sleep(Duration::from_millis(320)).await;

@@ -31,6 +31,44 @@ fn classic_window() -> YapfastWindow {
     window
 }
 
+#[test]
+fn account_footer_tints_only_the_music_note() {
+    slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+        i_slint_backend_testing::TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("skia".into()),
+        },
+    )))
+    .unwrap();
+    let window = classic_window();
+    window.set_workspace(true);
+    window.set_account_name("Alice".into());
+    window.set_account_status("Activity".into());
+    window.set_account_presence("offline".into());
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(900., 640.));
+
+    let accent = window.global::<Theme>().get_live();
+    let green = [accent.red(), accent.green(), accent.blue()];
+    let green_pixels = |icon| {
+        window.set_account_activity_icon(icon);
+        let frame = window.window().take_snapshot().unwrap();
+        let width = frame.width() as usize;
+        let footer_start = width * (frame.height() as usize - 56);
+        frame.as_bytes()[footer_start * 4..]
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(at, pixel)| at % width < 280 && pixel[..3] == green)
+            .count()
+    };
+    let idle = green_pixels(0);
+    assert_eq!(green_pixels(1), idle, "the classic game icon stays muted");
+    assert!(green_pixels(2) > idle, "the music note uses the live accent");
+}
+
 fn message_row_plain(message: &ChatMessage) -> MessageRow {
     message_row(message, &HashSet::new())
 }

@@ -298,7 +298,7 @@ const server = Bun.serve<{ ssrc?: number; streamKey?: string; sess?: any }>({
               }
               // Fault 3 (3400ms): SFU switches RTP forwarding from 5001 to simulcast layer 5011 (SF-02)
               if (elapsed >= 3400) {
-                ssrc = sess.baseSsrc + 11;
+                ssrc = sess.baseSsrc + 11 + Math.floor((elapsed - 3400) / 1500);
                 if (!sess.switchedSimulcast) {
                   sess.switchedSimulcast = true;
                   clipCursor = 0;

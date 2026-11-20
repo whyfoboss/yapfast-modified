@@ -1006,6 +1006,20 @@ fn control(path: PathBuf, shell: Rc<shell::Shell>) -> slint::Timer {
                         }
                     }
                     "quit" => slint::quit_event_loop().map_err(|error| error.to_string().into()),
+                    // Exercises normal Go Live without reading a real screen.
+                    #[cfg(feature = "discord")]
+                    "share-test-pattern"
+                        if yapfast_core::yapfast_discord::client::test_server().is_some()
+                            && std::env::var("YAPFAST_STREAM_TEST_PATTERN").as_deref() == Ok("1") =>
+                    {
+                        if let Some(window) = window {
+                            adapter.borrow_mut().action(
+                                &window,
+                                Action::Voice(voice::Command::GoLive(voice::StreamQuality::default())),
+                            );
+                        }
+                        Ok(())
+                    }
                     // `pick avatar PATH` or `pick banner PATH` chooses a
                     // picture in the server profile editor, `pick icon PATH`
                     // a server's icon in its settings, and `pick emoji` and
@@ -2228,6 +2242,8 @@ struct Adapter {
     emoji_due: slint::Timer,
     /// A layout change waiting to be written; see [`Adapter::write_layout_soon`].
     layout_due: slint::Timer,
+    #[cfg(windows)]
+    voice_heap_release: Option<yapfast_core::runtime::BackgroundTask<()>>,
     layout_dirty: bool,
     /// Writes the layout once the window holds still after moving or resizing.
     placement_due: slint::Timer,
@@ -2591,6 +2607,8 @@ impl Adapter {
                 pictures_due: slint::Timer::default(),
                 emoji_due: slint::Timer::default(),
                 layout_due: slint::Timer::default(),
+                #[cfg(windows)]
+                voice_heap_release: None,
                 layout_dirty: false,
                 placement_due: slint::Timer::default(),
                 video_quiet: Cell::new(0),
@@ -3572,8 +3590,35 @@ impl Adapter {
 
     /// Applies a backend event; the caller shows what it can have changed after.
     fn apply(&mut self, event: Event) -> Reach {
+        #[cfg(windows)]
+        let previous_voice = self.app.state.voice.phase;
         let reach = Reach::of(&event);
         let effects = self.app.apply(event);
+        #[cfg(windows)]
+        if self.app.state.voice.phase != previous_voice {
+            self.voice_heap_release = None;
+            if self.app.state.voice.phase == Phase::Disconnected
+                && matches!(
+                    previous_voice,
+                    Phase::Connected | Phase::Reconnecting | Phase::Leaving
+                )
+            {
+                // WASAPI and the microphone thread can still be releasing memory.
+                // A new call cancels the wait before the heap is optimized.
+                self.voice_heap_release = Some(self.runtime.spawn(async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    let _ = tokio::task::spawn_blocking(|| {
+                        let started = std::time::Instant::now();
+                        trim();
+                        tracing::debug!(
+                            elapsed_us = started.elapsed().as_micros() as u64,
+                            "released idle voice heap"
+                        );
+                    })
+                    .await;
+                }));
+            }
+        }
         // What it set off, such as opening a DM that just started, can change
         // anything; a sound changes nothing on screen.
         let reach = if effects

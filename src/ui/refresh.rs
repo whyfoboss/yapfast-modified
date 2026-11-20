@@ -4492,6 +4492,7 @@ impl Adapter {
                 Some(voice::SharePhase::Choosing) => "Choose what to share",
                 Some(voice::SharePhase::Starting) => "Starting your stream...",
                 Some(voice::SharePhase::Live) => "Live",
+                Some(voice::SharePhase::Reconnecting) => "Reconnecting your stream...",
                 None => "",
             }
             .into(),

@@ -525,7 +525,7 @@ async fn open(
         .into_iter()
         .collect();
     let connection = Connection::open(&identity, codecs, &streamer).await?;
-    tracing::info!(rtc_server = %server.rtc_server_id, channel, "connected to a Discord stream");
+    tracing::info!(target: "yapfast_stream", worker_pid = std::process::id(), "connected to a Discord stream");
     Ok(connection)
 }
 
@@ -556,8 +556,14 @@ async fn send(
                 shared.keyframe.store(true, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(500 * u64::from(failures))).await;
                 if frames.is_closed() { return Ok(()); }
-                while frames.try_recv().is_ok() {}
-                while sounds.try_recv().is_ok() {}
+                // Discard the backlog once. The capture thread can keep adding
+                // packets, including the next keyframe, while we reconnect.
+                for _ in 0..frames.len() {
+                    let _ = frames.try_recv();
+                }
+                for _ in 0..sounds.len() {
+                    let _ = sounds.try_recv();
+                }
             }
         }
     }
@@ -715,7 +721,7 @@ async fn send_once(
                 {
                     let mut text = data.to_string();
                     text.truncate(400);
-                    tracing::debug!(op, data = %text, "the stream server said");
+                    tracing::debug!(op, "the stream server said");
                     // Session update: a viewer can't decode the codec, or the
                     // one who couldn't left.
                     if op == 14
@@ -1186,7 +1192,7 @@ async fn receive_stream_once(
                     if !matches!(op, 2 | 4 | 6) {
                         let mut text = data.to_string();
                         text.truncate(400);
-                        tracing::debug!(op, data = %text, "the stream server said");
+                        tracing::debug!(op, "the stream server said");
                     }
                     let previous = streamer.video;
                     streamer.learn(op, &data);
@@ -1326,6 +1332,10 @@ async fn receive_stream_once(
                         || (primary_video && quiet_for >= VIDEO_PACKET_GAP)
                     {
                         streamer.select_layer(held.ssrc);
+                        // Only the selected layer can feed the decoder.
+                        // Free the old jitter buffers before admitting its first packet.
+                        incoming.clear();
+                        stalled_video = None;
                         selected_since = arrived;
                         last_selected_packet = Some(arrived);
                         last_report = None;

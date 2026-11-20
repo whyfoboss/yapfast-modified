@@ -721,10 +721,10 @@ pub(crate) async fn call(
                             }
                         }
                         Some(Command::StopLive) => {
+                            starting = None;
                             if let Some(stopped) = share.take() {
                                 stopped.stop(discord, state);
                             }
-                            starting = None;
                             clear_stopped_share_error(state);
                         }
                         Some(Command::Watch(user)) => {
@@ -881,10 +881,22 @@ pub(crate) async fn call(
                                 sharing.phase = SharePhase::Live;
                             }
                         }
+                        Some(Report::ShareReconnecting) => {
+                            if let Some(sharing) = state.sharing.as_mut()
+                                && sharing.phase == SharePhase::Live
+                            {
+                                sharing.phase = SharePhase::Reconnecting;
+                            }
+                        }
                         Some(Report::ReconnectShare { reason }) => {
                             if starting.is_none() {
                                 if share.as_mut().is_some_and(Share::allow_reconnect) {
-                                    tracing::warn!(%reason, "reopening outgoing stream connection");
+                                    if let Some(sharing) = state.sharing.as_mut()
+                                        && sharing.phase == SharePhase::Live
+                                    {
+                                        sharing.phase = SharePhase::Reconnecting;
+                                    }
+                                    tracing::warn!(target: "yapfast_stream", "reopening outgoing stream connection");
                                     let (discord, guild, channel) =
                                         (discord.clone(), guild.to_owned(), channel.to_owned());
                                     starting = Some(Box::pin(async move { discord.go_live(&guild, &channel).await }));
@@ -945,7 +957,9 @@ pub(crate) async fn call(
                         }
                         Err(error) => {
                             tracing::warn!(error = format!("{error:#}"), kind = kind(guild), "could not open the stream connection");
-                            let was_live = state.sharing.as_ref().is_some_and(|sharing| sharing.phase == SharePhase::Live);
+                            let was_live = state.sharing.as_ref().is_some_and(|sharing| {
+                                matches!(sharing.phase, SharePhase::Live | SharePhase::Reconnecting)
+                            });
                             if was_live && share.as_mut().is_some_and(Share::allow_reconnect) {
                                 let (discord, guild, channel) =
                                     (discord.clone(), guild.to_owned(), channel.to_owned());
@@ -1042,6 +1056,7 @@ pub(crate) async fn call(
                         WatchEvent::Report(_, Some(
                             Report::Sharing { .. }
                             | Report::Sending(_)
+                            | Report::ShareReconnecting
                             | Report::ReconnectShare { .. }
                             | Report::Preview { .. }
                             | Report::Opened { .. }
@@ -1127,8 +1142,12 @@ pub(crate) async fn call(
                             snapshots.send_replace(state.clone());
                         }
                         if share.as_ref().is_some_and(|share| share.key.as_ref() == Some(&stream_key))
-                            && let Some(stopped) = share.take()
+                            && let Some(mut stopped) = share.take()
                         {
+                            starting = None;
+                            // Discord already removed this stream. A second delete
+                            // could reach a replacement with the same stream key.
+                            stopped.key = None;
                             stopped.stop(discord, state);
                             if reason.as_deref() != Some("user_requested") {
                                 state.report_error(Some("Discord ended your stream.".into()));

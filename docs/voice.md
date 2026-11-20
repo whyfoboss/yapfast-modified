@@ -25,6 +25,10 @@ intermediate navigation. Clicking another one during a call opens a dialog that
 asks before leaving the current one, and confirming joins it the same way. Coming
 back to a server that had a voice channel selected shows it without joining.
 
+On Windows, the desktop client gives the allocator a few seconds to release
+the call's resources, then asks Windows to decommit unused heap pages off the
+UI thread. Starting another call cancels the pending wait.
+
 The native LiveKit audio engine captures and plays audio through system
 devices. Settings › Voice & video selects the microphone and speakers too.
 Yapfast remembers the choice in `devices.json` in its data folder; it never

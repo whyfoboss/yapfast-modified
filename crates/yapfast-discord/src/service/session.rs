@@ -717,6 +717,15 @@ impl Session<'_> {
                 self.show_presence().await
             }
             Request::MusicPlayback(playback) => {
+                let same_running_track = playback
+                    .as_ref()
+                    .zip(self.shared.music_playback.as_ref())
+                    .is_some_and(|(next, previous)| {
+                        previous.soundcloud_source
+                            && previous.start_ms.is_some()
+                            && next.title == previous.title
+                            && next.artist == previous.artist
+                    });
                 self.shared.music_playback = playback;
                 self.smtc_supersedes_rpc = self.shared.music_playback.is_some();
                 self.waiting_for_smtc_pause = false;
@@ -738,11 +747,15 @@ impl Session<'_> {
                                             .is_some_and(|rpc| !music.matches(&rpc))
                                 })
                         });
-                if await_rpc {
+                // Give RPC one chance to supply the new track and its cover.
+                // Timeline corrections must not extend or restart that wait.
+                if await_rpc && !same_running_track {
                     self.waiting_for_rpc = true;
                     self.rpc_catchup
                         .as_mut()
                         .reset(Instant::now() + Duration::from_millis(650));
+                }
+                if await_rpc && self.waiting_for_rpc {
                     self.gateway.set_presence_pending(true);
                     Ok(())
                 } else {

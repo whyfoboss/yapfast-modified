@@ -2702,6 +2702,10 @@ fn local_stream_sounds_once_when_live_and_at_stop() {
             [Effect::OwnStreamSound(Sound::StreamStart)]
         ));
         assert!(app.apply(Event::Voice(state.clone())).is_empty());
+        state.sharing.as_mut().unwrap().phase = voice::SharePhase::Reconnecting;
+        assert!(app.apply(Event::Voice(state.clone())).is_empty());
+        state.sharing.as_mut().unwrap().phase = voice::SharePhase::Live;
+        assert!(app.apply(Event::Voice(state.clone())).is_empty());
         let mut stopped = state.clone();
         stopped.sharing = None;
         assert!(matches!(

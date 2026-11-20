@@ -332,6 +332,8 @@ pub enum Report {
     /// Sharing: the video reaches the stream server. Watching: the first
     /// picture is on screen.
     Streaming,
+    /// Sharing: the transport is recovering while capture keeps running.
+    ShareReconnecting,
     /// Sharing: capture is still running and needs another stream server.
     ReconnectShare { reason: String },
     /// Sharing: how the stream goes out, once a second while it's live.
@@ -774,9 +776,19 @@ impl Sink {
                 self.preview_due = Some(Instant::now());
                 report(Report::Streaming);
             }
+            Some(Link::Connecting) if self.streaming => {
+                self.streaming = false;
+                self.preview_due = None;
+                report(Report::ShareReconnecting);
+            }
             // Discord ends the connection when it moves the stream to
             // another server, which then arrives as another Send.
             Some(Link::Ended(reason)) if self.server.is_none() => {
+                if self.streaming {
+                    self.streaming = false;
+                    self.preview_due = None;
+                    report(Report::ShareReconnecting);
+                }
                 self.lost_link(reason, report);
             }
             _ => self.lost = None,

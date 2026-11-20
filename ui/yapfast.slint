@@ -2917,7 +2917,7 @@ export component YapfastWindow inherits Window {
                                     if (account-touch.has-hover || avatar-touch.has-hover) && root.account-username != "": Text {
                                         text: root.account-username; color: Theme.muted; font-size: 13px; overflow: elide;
                                     }
-                                    if !((account-touch.has-hover || avatar-touch.has-hover) && root.account-username != ""): StatusText { text: root.account-status; emoji-url: root.account-status-emoji; icon: root.account-activity-icon; bullet: root.account-activity-bullet; }
+                                    if !((account-touch.has-hover || avatar-touch.has-hover) && root.account-username != ""): StatusText { text: root.account-status; emoji-url: root.account-status-emoji; icon: root.account-activity-icon; accent-music-icon: true; bullet: root.account-activity-bullet; }
                                 }
                                 account-touch := TouchArea {
                                     enabled: root.discord-linked; mouse-cursor: MouseCursor.pointer;

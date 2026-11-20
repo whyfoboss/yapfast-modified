@@ -701,6 +701,7 @@ export component StatusText inherits HorizontalLayout {
     /// What they're doing, as a small icon before the words: 1 a controller,
     /// 2 a music note, 3 a screen, 4 a camera, 5 a trophy; 0 for none.
     in property <int> icon;
+    in property <bool> accent-music-icon;
     /// A bullet follows the icon, before a custom status.
     in property <bool> bullet;
     property <image> emoji: root.emoji-url != "" ? PictureStore.picture(root.emoji-url, PictureStore.revision) : @image-url("");
@@ -720,7 +721,7 @@ export component StatusText inherits HorizontalLayout {
             width: root.font-size * 1.25; height: root.font-size * 1.25;
             image-fit: contain; accessible-role: none;
             // Discord draws the game controller in its online green.
-            colorize: root.icon == 1 && ClientStyle.enabled ? Theme.live : root.color;
+            colorize: (root.icon == 1 && ClientStyle.enabled) || (root.icon == 2 && root.accent-music-icon) ? Theme.live : root.color;
         }
     }
     if root.icon > 0 && root.bullet: VerticalLayout {

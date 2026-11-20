@@ -54,6 +54,9 @@ impl StreamOpenings {
         channel: String,
         reply: oneshot::Sender<Result<StreamServer>>,
     ) -> Result<()> {
+        if reply.is_closed() {
+            return Ok(());
+        }
         if tracker
             .voice_channel(&guild)
             .is_none_or(|current| current != channel)

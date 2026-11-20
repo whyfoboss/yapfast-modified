@@ -132,6 +132,8 @@ pub enum SharePhase {
     Starting,
     /// Others in the call can watch.
     Live,
+    /// Capture continues while the sending connection recovers.
+    Reconnecting,
 }
 
 /// How the call's connection is doing, as Discord's client shows it: the

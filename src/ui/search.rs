@@ -462,31 +462,60 @@ pub(super) fn highlight_search_terms(text: &str, query: &str) -> String {
 
     let mut result = text.to_string();
     for term in terms {
-        let mut i = 0;
-        while i < result.len() {
-            let lower = result[i..].to_lowercase();
-            if let Some(pos) = lower.find(&term) {
-                let match_start = i + pos;
-                let match_end = match_start + term.len();
-                let before = &result[..match_start];
-                let after = &result[match_end..];
+        let lower = result.to_lowercase();
+        // Lowercasing can change both the byte length and the number of
+        // characters (for example, U+0130). Translate whole character
+        // boundaries back to offsets in the original text.
+        let boundaries = (!result.is_ascii()).then(|| {
+            let mut boundaries = Vec::with_capacity(result.len() + 1);
+            let mut offset = 0;
+            for (original, ch) in result.char_indices() {
+                boundaries.push((offset, original));
+                offset += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+            }
+            boundaries.push((offset, result.len()));
+            boundaries
+        });
+        let original = |offset| {
+            let Some(boundaries) = &boundaries else {
+                return Some(offset);
+            };
+            boundaries
+                .binary_search_by_key(&offset, |&(lower, _)| lower)
+                .ok()
+                .map(|index| boundaries[index].1)
+        };
+        let matches: Vec<_> = lower
+            .match_indices(&term)
+            .filter_map(|(start, matched)| {
+                Some((original(start)?, original(start + matched.len())?))
+            })
+            .filter(|&(start, end)| {
+                let before = &result[..start];
+                let after = &result[end..];
                 let in_link = before
                     .rfind("http://")
                     .or_else(|| before.rfind("https://"))
                     .is_some_and(|http_idx| !before[http_idx..].contains(' '));
                 let already_bold = before.ends_with("**") && after.starts_with("**");
-                if !in_link && !already_bold {
-                    let matched_slice = &result[match_start..match_end];
-                    let replacement = format!("**{matched_slice}**");
-                    result = format!("{}{replacement}{}", before, after);
-                    i = match_start + replacement.len();
-                } else {
-                    i = match_end;
-                }
-            } else {
-                break;
-            }
+                !in_link && !already_bold
+            })
+            .collect();
+        for (start, end) in matches.into_iter().rev() {
+            result.insert_str(end, "**");
+            result.insert_str(start, "**");
         }
     }
     result
+}
+
+#[cfg(all(test, feature = "discord"))]
+#[test]
+fn search_highlight_keeps_unicode_character_boundaries() {
+    assert_eq!(highlight_search_terms("İЖ потом", "потом"), "İЖ **потом**");
+    assert_eq!(highlight_search_terms("İЖ", "i\u{307}ж"), "**İЖ**");
+    assert_eq!(
+        highlight_search_terms("https://example.test/İЖ потом", "потом i\u{307}ж"),
+        "https://example.test/İЖ **потом**"
+    );
 }

@@ -2098,6 +2098,8 @@ function streamOf(key: string): { channel?: string; user?: string } {
   return parts[0] === "call" ? { channel: parts[1], user: parts[2] } : { channel: parts[2], user: parts[3] };
 }
 const streams = new Map<string, Stream>([[streamKey(GUILD, LOUNGE, users.bob.id), { viewers: new Set(), paused: false }]]);
+let holdNextStreamOpen = false;
+let heldStreamOpens = 0;
 
 function wireStream(key: string, stream: Stream) {
   return { stream_key: key, rtc_server_id: "fake-rtc", region: "fake", viewer_ids: [...stream.viewers], paused: stream.paused };
@@ -3297,6 +3299,11 @@ function gatewayMessage(ws: Socket, text: string) {
       streams.set(key, stream);
       state.self_stream = true;
       announce(ALICE);
+      if (holdNextStreamOpen) {
+        holdNextStreamOpen = false;
+        heldStreamOpens++;
+        break;
+      }
       send(ws, 0, wireStream(key, stream), "STREAM_CREATE");
       send(ws, 0, streamServer(ws, key), "STREAM_SERVER_UPDATE");
       break;
@@ -8202,7 +8209,7 @@ const ENV_IDS = 1_450_000_000_000_000_000n;
 const GENERIC_CONTROLS = new Set([
   "media-requests", "history", "forwards", "gif-selects", "nitro", "profile", "profile-reset", "server-profile", "health", "presence", "logouts",
   "voice-identifies", "voice-changes", "call-audio", "call-video", "voice-link", "voice-drop", "voice-move", "voice-kick",
-  "stream-move", "stream-stop", "stream-start", "sessions", "cookies", "list-requests", "audit-log", "slow", "gateway-reconnect", "qr-scan",
+  "stream-move", "stream-drop", "stream-stop", "stream-start", "sessions", "cookies", "list-requests", "audit-log", "slow", "gateway-reconnect", "qr-scan",
   "qr-confirm", "qr-captcha", "qr-cancel", "qr-expire", "voice-audio", "video", "stream-codec", "stream-video", "reactor-pages",
   "reactor-removals", "thread-searches", "thread-creates", "thread-members", "typed", "acks", "invites",
   "invite-joins", "invite-captcha", "invite-form", "event-interest", "gift-redeems", "oauth-authorizations", "mfa", "soundboard-sends", "custom-call-sounds",
@@ -8983,6 +8990,15 @@ const server = Bun.serve<SocketData>({
       }
       return new Response(`moved ${key}\n`);
     }
+    if (req.method === "POST" && path === "/_control/stream-drop") {
+      const key = [...streams.keys()].find((key) => streamOf(key).user === ALICE);
+      const publishing = [...voiceSockets].filter((ws) => ws.data.stream === key && ws.data.ssrc != null);
+      if (key == null || !publishing.length) return new Response("no local stream transport\n", { status: 404 });
+      if (url.searchParams.has("hold-open")) holdNextStreamOpen = true;
+      const code = url.searchParams.has("expired") ? 4006 : 4015;
+      for (const ws of publishing) ws.close(code, "Fixture interrupted the stream transport.");
+      return new Response("dropped local stream transport\n");
+    }
     if (req.method === "POST" && path === "/_control/stream-stop") {
       const whoParam = (url.searchParams.get("who") ?? url.searchParams.get("user") ?? (await req.text()).trim()).toLowerCase();
       let foundKey: string | undefined;
@@ -9135,6 +9151,7 @@ const server = Bun.serve<SocketData>({
     }
     if (path === "/_control/video") {
       return json({
+        heldStreamOpens,
         received: [...received.values()].map(({ key: _, socket: _socket, ...stream }) => stream),
         watchers: [...watchers.values()].map(({ timer: _, resend: _resend, repairs: _repairs, ...watcher }) => watcher),
         repairs,

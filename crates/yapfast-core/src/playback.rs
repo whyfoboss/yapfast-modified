@@ -172,6 +172,7 @@ impl Playback {
                 Report::Sharing { .. }
                 | Report::Sending(_)
                 | Report::Streaming
+                | Report::ShareReconnecting
                 | Report::ReconnectShare { .. }
                 | Report::Preview { .. }
                 | Report::Screen { .. },
