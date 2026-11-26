@@ -5263,6 +5263,117 @@ const OAUTH_APP = "157730590492196864";
 /** Each change of Alice's interest in the scheduled event, oldest first,
  *  for GET /_control/event-interest. */
 const eventInterest: Record<string, unknown>[] = [];
+/** Submitted V3 in-app message reports, oldest first, for GET /_control/reports. */
+const submittedReports: Record<string, unknown>[] = [];
+let reportAttemptCount = 0;
+let reportConfig: {
+  menu_status?: number;
+  menu_empty?: boolean;
+  menu_delay_ms?: number;
+  submit_status?: number;
+  submit_code?: number;
+  submit_message?: string;
+  submit_delay_ms?: number;
+  retry_after?: number;
+} = {};
+
+function buildMessageReportMenu() {
+  if (reportConfig.menu_empty) {
+    return {
+      name: "message",
+      version: "1.0",
+      variant: "1",
+      postback_url: "/api/v9/reporting/message",
+      language: "en",
+      root_node_id: 1,
+      success_node_id: 900,
+      fail_node_id: 901,
+      nodes: {
+        "1": { id: 1, key: "root", header: "What's wrong with this message?", children: [] },
+      },
+    };
+  }
+  return {
+    name: "message",
+    version: "1.0",
+    variant: "1",
+    postback_url: "/api/v9/reporting/message",
+    language: "en",
+    root_node_id: 1,
+    success_node_id: 900,
+    fail_node_id: 901,
+    nodes: {
+      "1": {
+        id: 1,
+        key: "root",
+        header: "What's wrong with this message?",
+        subheader: "Choose the category that best describes the problem.",
+        children: [
+          ["Spam or scam", 10],
+          ["Harassment or bullying", 20],
+        ],
+      },
+      "10": {
+        id: 10,
+        key: "spam",
+        header: "What kind of spam is this?",
+        children: [
+          ["Phishing or malicious link", 101],
+          ["Unsolicited promotion", 102],
+        ],
+      },
+      "101": {
+        id: 101,
+        key: "spam_phishing",
+        report_type: "SPAM",
+        header: "Review and submit your phishing report",
+        subheader: "Discord Trust & Safety will review this message.",
+        info: "Reporting does not block the sender or remove the message from your chat.",
+        button: { type: "submit" },
+      },
+      "102": {
+        id: 102,
+        key: "spam_promo",
+        report_type: "SPAM",
+        header: "Review and submit your spam report",
+        is_auto_submit: true,
+        button: { type: "submit" },
+      },
+      "20": {
+        id: 20,
+        key: "harassment",
+        header: "Additional details for harassment",
+        subheader: "Select any details that apply, then submit your report.",
+        elements: [
+          {
+            name: "additional_context",
+            type: "checkbox",
+            should_submit_data: true,
+            is_localized: true,
+            data: [
+              ["repeated", "Repeated unwanted behavior"],
+              ["targeted_insult", "Direct personal attack"],
+            ],
+          },
+        ],
+        button: { type: "submit" },
+        is_multi_select_required: false,
+      },
+      "900": {
+        id: 900,
+        key: "success",
+        header: "Thanks for reporting",
+        button: { type: "done" },
+      },
+      "901": {
+        id: 901,
+        key: "fail",
+        header: "Could not send report",
+        button: { type: "cancel" },
+      },
+    },
+  };
+}
 /** The scheduled event in "Server"'s Lounge, and whether Alice is
  *  interested in it. */
 const SCHEDULED_EVENT = "1400000000000000901";
@@ -7772,6 +7883,59 @@ async function api(req: Request, path: string, origin: string): Promise<Response
     return empty();
   }
 
+  // V3 in-app message reporting menu and submission.
+  if (method === "GET" && path === "/reporting/menu/message") {
+    if (reportConfig.menu_delay_ms) await Bun.sleep(reportConfig.menu_delay_ms);
+    if (reportConfig.menu_status && reportConfig.menu_status >= 400) {
+      return json(
+        {
+          message: reportConfig.submit_message ?? "Report menu unavailable",
+          code: reportConfig.submit_code ?? 0,
+          ...(reportConfig.menu_status === 429 ? { retry_after: reportConfig.retry_after ?? 1 } : {}),
+        },
+        reportConfig.menu_status,
+      );
+    }
+    return json(buildMessageReportMenu());
+  }
+
+  if (method === "POST" && path === "/reporting/message") {
+    reportAttemptCount++;
+    if (reportConfig.submit_delay_ms) await Bun.sleep(reportConfig.submit_delay_ms);
+    if (reportConfig.submit_status && reportConfig.submit_status >= 400) {
+      return json(
+        {
+          message: reportConfig.submit_message ?? (reportConfig.submit_status === 429 ? "You are being rate limited." : "Request refused"),
+          code: reportConfig.submit_code ?? 0,
+          ...(reportConfig.submit_status === 429 ? { retry_after: reportConfig.retry_after ?? 1 } : {}),
+        },
+        reportConfig.submit_status,
+        reportConfig.submit_status === 429 ? { "retry-after": String(reportConfig.retry_after ?? 1) } : {},
+      );
+    }
+    const body: any = await req.json().catch(() => ({}));
+    const channelId = String(body.channel_id ?? "");
+    const messageId = String(body.message_id ?? "");
+    const msg = byId.get(messageId);
+    if (!msg || msg.channel !== channelId) {
+      return notFound("Unknown Message", 10008);
+    }
+    if (msg.author.id === ALICE) {
+      return json({ message: "Cannot report your own message", code: 50001 }, 403);
+    }
+    submittedReports.push({
+      version: body.version ?? null,
+      variant: body.variant ?? null,
+      language: body.language ?? null,
+      name: body.name ?? null,
+      channel_id: channelId,
+      message_id: messageId,
+      breadcrumbs: Array.isArray(body.breadcrumbs) ? body.breadcrumbs : [],
+      elements: body.elements ?? {},
+    });
+    return json({ report_id: nextId(Date.now()) });
+  }
+
   return unknown(req, path);
 }
 
@@ -8213,7 +8377,8 @@ const GENERIC_CONTROLS = new Set([
   "qr-confirm", "qr-captcha", "qr-cancel", "qr-expire", "voice-audio", "video", "stream-codec", "stream-video", "reactor-pages",
   "reactor-removals", "thread-searches", "thread-creates", "thread-members", "typed", "acks", "invites",
   "invite-joins", "invite-captcha", "invite-form", "event-interest", "gift-redeems", "oauth-authorizations", "mfa", "soundboard-sends", "custom-call-sounds",
-  "logger-scenario", "logger-edit", "logger-delete",
+  "logger-scenario", "logger-edit", "logger-delete", "duplicate-group-dm",
+  "reports", "reports/clear", "report-config",
 ]);
 
 /** A status's emoji as the env gives it, Unicode or `<:name:id>`, as Discord sends it. */
@@ -9281,6 +9446,37 @@ const server = Bun.serve<SocketData>({
       dispatch("MESSAGE_CREATE", dispatched(message, origin));
       return new Response("Dave wrote\n");
     }
+    if (req.method === "POST" && path === "/_control/duplicate-group-dm") {
+      const channelId = "1400000000000000199";
+      const alexOld: User = { id: "1400000000000000091", username: "alex.old", global_name: "Alex", avatar: null };
+      const alexNew: User = { id: "1400000000000000092", username: "alex.new", global_name: "Alex", avatar: null };
+      const exAuthor: User = { id: "1400000000000000093", username: "former_member", global_name: "Former Member", avatar: null };
+      const extFriend: User = { id: "1400000000000000094", username: "sam_friend", global_name: "Sam Friend", avatar: null };
+      for (const user of [alexOld, alexNew, exAuthor, extFriend]) userById.set(user.id, user);
+      relationships.set(extFriend.id, 1);
+      dispatch("RELATIONSHIP_ADD", {
+        id: extFriend.id, type: 1, user: wireUser(extFriend), nickname: null, since: new Date().toISOString(), should_notify: false,
+      });
+      if (!privates.has(channelId)) {
+        const channel: Private = { type: 3, recipients: [alexOld, alexNew], name: "Alex Sync" };
+        privates.set(channelId, channel);
+        messages.set(channelId, []);
+        const now = Date.now();
+        post(channelId, exAuthor, "Old deploy notes from former member", now - 5_000);
+        post(channelId, alexOld, "Deploy check from old alex", now - 4_000);
+        post(channelId, alexNew, "Deploy check from new alex", now - 3_000);
+        post(channelId, users.alice, `Ping <@${alexNew.id}> about deploy check`, now - 2_000);
+        post(channelId, users.alice, `Ping <@${alexOld.id}> about archive`, now - 1_000);
+        dispatch("CHANNEL_CREATE", wirePrivate(channelId, channel, "objects"));
+      }
+      return Response.json({
+        channel_id: channelId,
+        alex_old_id: alexOld.id,
+        alex_new_id: alexNew.id,
+        ex_author_id: exAuthor.id,
+        ext_friend_id: extFriend.id,
+      });
+    }
     if (req.method === "POST" && path === "/_control/call") {
       const channel = url.searchParams.has("group") ? WEEKEND : DM_BOB;
       joinCall(users.bob.id, channel, origin);
@@ -9583,6 +9779,29 @@ const server = Bun.serve<SocketData>({
     }
     if (req.method === "GET" && path === "/_control/oauth-authorizations") {
       return Response.json(oauthAuthorizations);
+    }
+    if (req.method === "GET" && path === "/_control/reports") {
+      return Response.json({ reports: submittedReports, attempts: reportAttemptCount });
+    }
+    if (req.method === "POST" && path === "/_control/reports/clear") {
+      submittedReports.length = 0;
+      reportAttemptCount = 0;
+      reportConfig = {};
+      return new Response("reports cleared\n");
+    }
+    if (req.method === "POST" && path === "/_control/report-config") {
+      const body: any = await req.json().catch(() => ({}));
+      reportConfig = {
+        ...(typeof body.menu_status === "number" ? { menu_status: body.menu_status } : {}),
+        ...(typeof body.menu_empty === "boolean" ? { menu_empty: body.menu_empty } : {}),
+        ...(typeof body.menu_delay_ms === "number" ? { menu_delay_ms: body.menu_delay_ms } : {}),
+        ...(typeof body.submit_status === "number" ? { submit_status: body.submit_status } : {}),
+        ...(typeof body.submit_code === "number" ? { submit_code: body.submit_code } : {}),
+        ...(typeof body.submit_message === "string" ? { submit_message: body.submit_message } : {}),
+        ...(typeof body.submit_delay_ms === "number" ? { submit_delay_ms: body.submit_delay_ms } : {}),
+        ...(typeof body.retry_after === "number" ? { retry_after: body.retry_after } : {}),
+      };
+      return Response.json(reportConfig);
     }
     if (req.method === "POST" && path === "/_control/mfa") {
       if (url.searchParams.has("off")) {

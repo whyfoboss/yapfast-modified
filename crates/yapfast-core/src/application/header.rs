@@ -37,38 +37,171 @@ impl Application {
         }
     }
 
-    pub(super) fn search(&mut self, query: String) -> Vec<Effect> {
+    pub(super) fn search(
+        &mut self,
+        query: String,
+        bindings: Vec<chat::SearchUserBinding>,
+    ) -> Vec<Effect> {
         let query = query.trim().to_owned();
         let (Some(place), false) = (self.state.search_place(), query.is_empty()) else {
-            self.state.search = None;
-            return vec![];
+            return self.close_search();
         };
+        let place_label = self.state.search_place_label(&place);
         self.state.edit_history = None;
+        self.search_request = self.search_request.wrapping_add(1);
+        let generation = self.search_request;
         self.state.search = Some(Search {
             place: place.clone(),
+            place_label,
             query: query.clone(),
+            bindings: bindings.clone(),
+            generation,
             loading: true,
             ..Search::default()
         });
         vec![Effect::Backend(Command::Discord(DiscordCommand::Search {
             place,
             query,
+            bindings,
+            request: generation,
             offset: 0,
         }))]
     }
 
-    pub(super) fn search_start_at(&mut self, position: u32) -> Vec<Effect> {
-        let Some(search) = self.state.search.as_mut().filter(|search| {
-            !search.loading && position > 0 && position <= search.total
-        }) else {
+    pub(super) fn search_here(&mut self) -> Vec<Effect> {
+        let Some(search) = self.state.search.as_ref() else {
             return vec![];
         };
-        // Number results from oldest to newest; Discord pages in reverse order.
-        let offset = search.total - position;
-        search.first = offset;
-        search.next = offset;
-        search.results.clear();
-        self.more_results()
+        if self.state.search_place().is_none() {
+            return vec![];
+        }
+        let query = search.query.clone();
+        let bindings = search.bindings.clone();
+        self.search(query, bindings)
+    }
+
+    pub(super) fn close_search(&mut self) -> Vec<Effect> {
+        let had = self.state.search.take().is_some();
+        self.search_request = self.search_request.wrapping_add(1);
+        self.trim_offscreen_pictures(false);
+        if had {
+            vec![Effect::Backend(Command::Discord(DiscordCommand::ClearSearch))]
+        } else {
+            vec![]
+        }
+    }
+
+    pub(super) fn search_viewport(&mut self, start: usize, end: usize) -> Vec<Effect> {
+        let Some(search) = self.state.search.as_mut() else {
+            return vec![];
+        };
+        if search.results.is_empty() {
+            return vec![];
+        }
+        let keep_start = start.saturating_sub(12);
+        let keep_end = end.saturating_add(12).min(search.results.len());
+        for (idx, hit) in search.results.iter_mut().enumerate() {
+            if idx < keep_start || idx >= keep_end {
+                let mut cleared = false;
+                for att in &mut hit.message.attachments {
+                    if att.preview.take().is_some() {
+                        att.preview_failed = false;
+                        cleared = true;
+                    }
+                }
+                if cleared {
+                    search.preview_requested.remove(&hit.message.item);
+                }
+            }
+        }
+        let req_start = start.saturating_sub(2);
+        let req_end = end.saturating_add(4).min(search.results.len());
+        let mut items = Vec::new();
+        for hit in &search.results[req_start..req_end] {
+            if search.preview_requested.contains(&hit.message.item) {
+                continue;
+            }
+            let needs_preview = hit
+                .message
+                .attachments
+                .iter()
+                .any(|a| (a.image || a.video) && a.preview.is_none() && !a.preview_failed);
+            if needs_preview {
+                search.preview_requested.insert(hit.message.item.clone());
+                items.push((hit.room.clone(), hit.message.item.clone()));
+            }
+        }
+        if items.is_empty() {
+            vec![]
+        } else {
+            vec![Effect::Backend(Command::Discord(
+                DiscordCommand::SearchPreviews {
+                    request: search.generation,
+                    items,
+                },
+            ))]
+        }
+    }
+
+    pub(super) fn search_preview(
+        &mut self,
+        request: u64,
+        item: String,
+        index: usize,
+        preview: Option<Arc<Picture>>,
+    ) {
+        let Some(search) = self
+            .state
+            .search
+            .as_mut()
+            .filter(|search| search.generation == request)
+        else {
+            return;
+        };
+        if let Some(hit) = search
+            .results
+            .iter_mut()
+            .find(|hit| hit.message.item == item)
+            && let Some(attachment) = hit.message.attachments.get_mut(index)
+        {
+            match preview {
+                Some(picture) => {
+                    attachment.preview = Some(picture);
+                    attachment.preview_failed = false;
+                }
+                None => {
+                    attachment.preview_failed = true;
+                }
+            }
+        }
+    }
+
+    pub(super) fn search_start_at(&mut self, position: String) -> Vec<Effect> {
+        let Some(search) = self.state.search.as_mut() else {
+            return vec![];
+        };
+        search.jump_revision = search.jump_revision.wrapping_add(1);
+        let position = position.trim();
+        search.jump_to = position
+            .parse::<u32>()
+            .ok()
+            .filter(|&number| number > 0 && number <= search.total)
+            .filter(|_| position.bytes().all(|byte| byte.is_ascii_digit()));
+        search.jump_hint = if search.jump_to.is_none() {
+            format!("Enter a result number from 1 to {}", search.total)
+        } else {
+            String::new()
+        };
+        self.more_results_for_jump()
+    }
+
+    fn more_results_for_jump(&mut self) -> Vec<Effect> {
+        if self.state.search.as_ref().is_some_and(|search| {
+            search.jump_to.is_some_and(|number| number as usize > search.results.len())
+        }) {
+            return self.more_results();
+        }
+        vec![]
     }
 
     pub(super) fn more_results(&mut self) -> Vec<Effect> {
@@ -85,6 +218,8 @@ impl Application {
         vec![Effect::Backend(Command::Discord(DiscordCommand::Search {
             place: search.place.clone(),
             query: search.query.clone(),
+            bindings: search.bindings.clone(),
+            request: search.generation,
             offset: search.next,
         }))]
     }
@@ -93,18 +228,14 @@ impl Application {
     /// it asked for.
     pub(super) fn found(
         &mut self,
-        place: String,
-        query: String,
+        request: u64,
         offset: u32,
         result: Result<(u32, Vec<chat::SearchHit>), String>,
-    ) {
+    ) -> Vec<Effect> {
         let Some(search) = self.state.search.as_mut().filter(|search| {
-            search.loading
-                && search.place == place
-                && search.query == query
-                && search.next == offset
+            search.loading && self.search_request == request && search.next == offset
         }) else {
-            return;
+            return vec![];
         };
         search.loading = false;
         match result {
@@ -122,8 +253,19 @@ impl Application {
                 search.total = total;
                 search.next = offset + SEARCH_PAGE;
             }
-            Err(error) => search.error = Some(error),
+            Err(error) => {
+                search.jump_to = None;
+                search.error = Some(error);
+                return vec![];
+            }
         }
+        if search.jump_to.is_some_and(|number| {
+            number > search.total || (!search.more() && number as usize > search.results.len())
+        }) {
+            search.jump_to = None;
+            search.jump_hint = "That result is unavailable. Try another number.".into();
+        }
+        self.more_results_for_jump()
     }
 
     pub(super) fn open_add_people(&mut self) -> Vec<Effect> {

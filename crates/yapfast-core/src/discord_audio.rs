@@ -77,6 +77,10 @@ impl Hearing {
         }
     }
 
+    pub fn is_deafened(&self) -> bool {
+        self.deafened.load(Ordering::Relaxed)
+    }
+
     /// Plays a soundboard sound, 48 kHz interleaved stereo, at its own
     /// `volume` times the speakers'; not while deafened.
     pub fn play(&self, samples: Vec<i16>, volume: f32) {
@@ -1159,6 +1163,7 @@ mod tests {
                 &mut state,
                 &mut received,
                 &snapshots,
+                None,
                 None,
             );
             let speak = async {

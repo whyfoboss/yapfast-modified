@@ -1435,6 +1435,8 @@ export component ParticipantGrid inherits Flickable {
 export component CallControls inherits HorizontalLayout {
     in property <bool> muted;
     in property <bool> deafened;
+    in property <bool> show-fake-deafen;
+    in property <bool> fake-deafened;
     in property <bool> voice-ready;
     in property <bool> voice-leaving;
     in property <bool> can-share;
@@ -1445,6 +1447,7 @@ export component CallControls inherits HorizontalLayout {
     /// The camera is on its way, until its first picture.
     in property <bool> camera-starting;
     callback toggle-mute;
+    callback toggle-fake-deafen;
     callback toggle-deafen;
     callback toggle-camera;
     callback toggle-share;
@@ -1463,6 +1466,15 @@ export component CallControls inherits HorizontalLayout {
         enabled: root.voice-ready;
         fill: self.alert ? Theme.danger.with-alpha(0.18) : Theme.raised;
         clicked => { root.toggle-mute(); }
+    }
+    if root.show-fake-deafen: IconButton {
+        size: 52px; glyph: 22px; radius: 26px;
+        icon: root.fake-deafened ? @image-url("icons/fake-deafen-on.svg") : @image-url("icons/fake-deafen.svg");
+        label: root.fake-deafened ? "Disable Fake Deafen" : "Fake Deafen";
+        tint: root.fake-deafened ? Theme.accent : Theme.text;
+        enabled: root.voice-ready;
+        fill: root.fake-deafened ? Theme.accent.with-alpha(0.22) : Theme.raised;
+        clicked => { root.toggle-fake-deafen(); }
     }
     IconButton {
         size: 52px; glyph: 22px; radius: 26px;

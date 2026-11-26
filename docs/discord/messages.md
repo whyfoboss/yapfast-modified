@@ -47,13 +47,13 @@ events. Otherwise it loads the latest page in the background and fits it
 in: messages kept within the page's
 span that it lacks were deleted meanwhile, and when a full page starts after
 everything kept, more came than a page holds, so only the page stays. The UI
-keeps the same 40 channels' last timeline and member list, so going back shows
+keeps the same 24 channels' last timeline and member list, so going back shows
 them before the chat side answers, without "Loading messages...". Channels also
 go to disk, as the startup cache below describes, so a channel opened after a
 restart shows its saved messages while the latest page loads and fits in the
 same way.
 
-All channels share one 8 MiB cache for decoded preview pixels, with least
+All channels share one 5 MiB cache for decoded preview pixels, with least
 recently used eviction. Only messages in or near the timeline viewport
 request previews, and previews show as loading until then; evicted previews
 can be decoded again from the disk cache. The UI drops decoded preview
@@ -120,7 +120,7 @@ overwrite hides it, else a MurmurHash3 of the overwrites that allow or deny
 seeing it, as Discord's client computes it. Yapfast keys its lists by that id, so
 moving between such channels shows the same list and asks Discord for
 nothing, and an update applies only to the list it names. Yapfast keeps the last
-40 lists. An INVALIDATE, by which Discord stops sending rows, leaves them as
+10 lists. An INVALIDATE, by which Discord stops sending rows, leaves them as
 they were, to show when their channel is again. One Discord still sends, or
 sent within 10 minutes, shows without asking again. An older one shows at
 once while Yapfast subscribes, and Discord's sync replaces it. A list
@@ -138,10 +138,11 @@ Yapfast starts from Discord as it last saw it, kept in the data directory by
   status. It also holds the names Yapfast learned (users, server nicknames,
   server avatars and members' roles), which messages and member lists show
   people by, and the member lists shown lately. Every message Discord sends
-  from any server teaches Yapfast its author, so it keeps the 20,000 people it
+  from any server teaches Yapfast its author, so it keeps the 4,000 people it
   learned most lately and forgets a quarter of them, those learned longest
-  ago, once there are more. It's written at most every 20
-  seconds while connected. Calls and who is in voice aren't saved. On the
+  ago, once there are more. It's written at most every 180 seconds while
+  connected when persistent state changes (ephemeral voice/presence updates do
+  not rewrite it). Calls and who is in voice aren't saved. On the
   next start Yapfast shows it all at once, identifies with the saved status, and
   READY replaces it. A saved member list shows at once, even before Yapfast
   connects, and Discord's sync replaces it. The list on screen is kept with
@@ -201,8 +202,12 @@ Yapfast is back, rather than showing an error.
   Yapfast asks for each one once it shows: in the rail, beside people in a
   voice channel of the open server, in the call, or beside a message. A
   member's server avatar wins over their own. Yapfast decodes them at 128px
-  before the UI sees them. Once more than 400 have arrived, those off
-  screen go, and Yapfast asks for them again, from disk, when they show.
+  before the UI sees them. Once more than 256 (or 10 MiB of decoded pixels) have
+  arrived — or after idle room switches, closing search, closing the profile
+  editor, closing the image viewer, or closing a profile card — those off screen
+  go (and the UI picture map prunes dropped URLs), along with closed channel
+  render caches, decoded search previews outside the viewport margin, and dead
+  preview entries, and Yapfast asks for them again, from disk, when they show.
   Custom emoji stay, since the picker asks for hundreds at once.
   Initials show until a picture arrives or when it fails. A download that
   may work later, when the CDN is out of reach, fails or answers 429, is
@@ -946,6 +951,26 @@ the width is the same for all three tabs and comes back at the next start
 - A sticker sent closes the picker as closing it does, and the renderer's
   caches go a second later.
 
+## Searching messages
+
+Search responses are keyed by monotonic request generation so delayed pages or
+stale member-search results from previous queries or switched rooms are ignored,
+even for repeated identical queries. Image and video previews in search results
+are fetched on demand only around the visible viewport (`SearchPreviews`) and
+evicted outside a small margin, while clicking a thumbnail in search or pins
+resolves attachments across unopened channels and opens the image viewer without
+jumping to the message.
+
+`from:` and `mentions:` suggestions read current group DM recipients from
+`recipients`, server members, and DM participants first (deduplicated strictly by
+user ID), showing external known users only while typing a query and marking
+them as outside the conversation. Picking a suggestion binds that user ID (until
+the token is edited or removed), `from:@username` / `mentions:@username`
+matches usernames first, and an unbound ambiguous display name returns an error
+listing the matching `@username` accounts rather than guessing. When browsing
+to another channel or server with a saved search open, clicking **Search here**
+immediately re-runs the saved query and user bindings in the current scope.
+
 ## Jumping to a message
 
 A reply's quote, a pin, a search result and the bar over the "New" divider
@@ -1150,3 +1175,34 @@ When enabled:
 - "Clear Log" in Settings → Discord purges all in-memory entries immediately and
   removes retained deleted messages from the conversation. Toggling the feature
   off likewise clears all logs from memory.
+
+## Reporting messages
+
+Right-clicking (or opening the keyboard message menu on) an eligible sent
+Discord message written by someone else in a server channel, side thread, DM,
+or group DM offers "Report Message" near the bottom of `MessageMenu`
+(`ui/messages.slint`). Own messages, deleted placeholders, pending or failed
+local sends, system notices, ephemeral/loading app answers, collapsed blocked
+placeholders, and Matrix messages do not offer reporting.
+
+Clicking "Report Message" snapshots the account, exact channel or thread ID
+(resolving `THREAD_STARTER_MESSAGE`, type 21, back to the original message's
+parent channel and message snowflake — or hiding the menu item if those source
+IDs are missing/invalid), and message snowflake in `ReportDialog`
+(`crates/yapfast-core/src/application/report.rs`) with a spoiler-redacted
+snippet and attachment count (never downloading media or revealing spoilers), and
+fetches Discord's V3 in-app reporting menu via `GET /reporting/menu/message`
+(`crates/yapfast-discord/src/report.rs`). Stepping through categories, going
+back, cancelling, or closing sends nothing; even when a node sets
+`is_auto_submit`, Yapfast shows **Submit Report** only on leaf steps or nodes
+with an explicit Submit button, filters submitted elements by
+`should_submit_data`, and submits `POST /reporting/message` only on explicit
+click. While submitting, Close/Cancel/Escape/backdrop closing is locked so the
+server outcome cannot be orphaned (backdrop clicks are also ignored past the root
+category step). Menu-fetch timeouts suggest retrying (`Network`), whereas submit
+timeouts surface `TimeoutUnknown` ("Submit Again") without automatic retries,
+and `ReportDialog` provides a `https://discord.com/channels/...` copy-link
+fallback if loading fails or access is lost. Pending dialogs close on account
+change or logout and block/ignore stale responses when channel access disappears.
+Note: tested against `testing/fake_discord.ts`; submission against live Discord
+servers is unverified.

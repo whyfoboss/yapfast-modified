@@ -58,42 +58,41 @@ impl Tray {
 /// unread messages cut into its corner.
 #[cfg(any(target_os = "linux", test))]
 fn logo(size: u32, unread: bool) -> Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
-    logo_in_colour(size, unread, 0xffbf47)
+    logo_in_colours(size, unread, 0xffbf47, 0x1d1607)
 }
 
-fn logo_in_colour(
+fn logo_in_colours(
     size: u32,
     unread: bool,
-    colour: u32,
+    accent: u32,
+    foreground: u32,
 ) -> Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
-    let mut svg = include_str!("../ui/icons/logo.svg")
-        .replacen(
-            r#"width="24" height="24""#,
-            &format!(r#"width="{size}" height="{size}""#),
-            1,
+    let accent = format!("#{:06x}", accent & 0xffffff);
+    let foreground = format!("#{:06x}", foreground & 0xffffff);
+    let mask = if unread { r#" mask="url(#unread)""# } else { "" };
+    let body = format!(
+        r#"<g{mask}><path fill="{accent}" stroke="{accent}" stroke-width="3" stroke-linejoin="round" d="M50,14 L58,27 L73,19 L72,35 L88,38 L77,50 L87,62 L71,64 L69,78 L56,71 L38,88 L40,71 L26,74 L30,60 L14,52 L27,43 L18,29 L35,31 L37,17 Z" /><circle cx="38" cy="51" r="5" fill="{foreground}" /><circle cx="51" cy="51" r="5" fill="{foreground}" /><circle cx="64" cy="51" r="5" fill="{foreground}" /></g>"#
+    );
+    let svg = if unread {
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="12 12 78 78"><mask id="unread"><rect x="0" y="0" width="100" height="100" fill="#fff" /><circle cx="74" cy="74" r="21" fill="#000" /></mask>{body}<circle cx="74" cy="74" r="15" fill="#f0545e" /></svg>"##
         )
-        .replacen(
-            r##"fill="#fff" mask"##,
-            &format!("fill=\"#{:06x}\" mask", colour & 0xffffff),
-            1,
-        );
-    if unread {
-        svg = svg
-            .replacen("</mask>", r#"<circle cx="74" cy="74" r="21" /></mask>"#, 1)
-            .replacen(
-                "</svg>",
-                r##"<circle cx="74" cy="74" r="15" fill="#f0545e" /></svg>"##,
-                1,
-            );
-    }
+    } else {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="12 12 78 78">{body}</svg>"#
+        )
+    };
     slint::Image::load_from_svg_data(svg.as_bytes())
         .ok()?
         .to_rgba8()
 }
 
 #[cfg(windows)]
-pub fn set_icon_theme(accent: slint::Color) {
-    windows::set_icon_theme(accent.as_argb_encoded() & 0xffffff);
+pub fn set_icon_theme(accent: slint::Color, foreground: slint::Color) {
+    windows::set_icon_theme(
+        accent.as_argb_encoded() & 0xffffff,
+        foreground.as_argb_encoded() & 0xffffff,
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -316,11 +315,11 @@ mod windows {
         /// thread, whose message loop winit runs.
         static ICON: RefCell<Option<Icon>> = const { RefCell::new(None) };
         static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
-        static COLOUR: Cell<u32> = const { Cell::new(0xffbf47) };
+        static COLOUR: Cell<(u32, u32)> = const { Cell::new((0xffbf47, 0x1d1607)) };
     }
 
-    pub fn set_icon_theme(colour: u32) {
-        if COLOUR.replace(colour) == colour {
+    pub fn set_icon_theme(accent: u32, foreground: u32) {
+        if COLOUR.replace((accent, foreground)) == (accent, foreground) {
             return;
         }
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 256) as u32;
@@ -467,7 +466,8 @@ mod windows {
     /// The logo as an icon with an alpha channel: colour as BGRA, and an empty
     /// mask, which the alpha replaces.
     fn icon(size: u32, unread: bool) -> HICON {
-        let Some(pixels) = super::logo_in_colour(size, unread, COLOUR.get()) else {
+        let (accent, foreground) = COLOUR.get();
+        let Some(pixels) = super::logo_in_colours(size, unread, accent, foreground) else {
             return std::ptr::null_mut();
         };
         let colour: Vec<u8> = pixels
@@ -591,14 +591,20 @@ mod none {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn themed_tray_icon_keeps_the_unread_indicator() {
-        let plain = super::logo_in_colour(32, false, 0xffffff).unwrap();
-        let unread = super::logo_in_colour(32, true, 0xffffff).unwrap();
+    fn themed_tray_icon_keeps_the_unread_indicator_and_foreground() {
+        let plain = super::logo_in_colours(32, false, 0xffffff, 0x112233).unwrap();
+        let unread = super::logo_in_colours(32, true, 0xffffff, 0x112233).unwrap();
         assert!(
             plain
                 .as_slice()
                 .iter()
                 .any(|pixel| pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (255, 255, 255))
+        );
+        assert!(
+            plain
+                .as_slice()
+                .iter()
+                .any(|pixel| pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (0x11, 0x22, 0x33))
         );
         assert!(
             unread
@@ -616,12 +622,17 @@ mod tests {
         let marigold = |pixel: &slint::Rgba8Pixel| {
             pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (0xff, 0xbf, 0x47)
         };
+        let dark = |pixel: &slint::Rgba8Pixel| {
+            pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (0x1d, 0x16, 0x07)
+        };
         let red = |pixel: &slint::Rgba8Pixel| {
             pixel.a == 255 && (pixel.r, pixel.g, pixel.b) == (0xf0, 0x54, 0x5e)
         };
         assert!(plain.as_slice().iter().any(marigold));
+        assert!(plain.as_slice().iter().any(dark));
         assert!(!plain.as_slice().iter().any(red));
         assert!(unread.as_slice().iter().any(marigold));
+        assert!(unread.as_slice().iter().any(dark));
         // The dot is in the bottom-right corner.
         let corner = (24 * 32 + 24) as usize;
         assert!(red(&unread.as_slice()[corner]));

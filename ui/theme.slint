@@ -76,6 +76,9 @@ export global Theme {
 // has no ring at rest.
 export global FocusRing {
     in-out property <bool> keyboard: false;
+    /// True while Slint dispatches a key event claimed by a user keybind so
+    /// focused buttons do not fire Space/Enter a second time.
+    in-out property <bool> suppress-activate: false;
 }
 
 // One tooltip for the whole window, drawn above everything else.

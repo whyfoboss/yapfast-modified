@@ -1830,6 +1830,8 @@ async fn a_server_channels_pins_and_search_show_its_members() {
         Command::Discord(DiscordCommand::Search {
             place: discord::server_id(FAKE_GUILD),
             query: query.into(),
+            bindings: Vec::new(),
+            request: 1,
             offset: 0,
         })
     };

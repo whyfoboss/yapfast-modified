@@ -973,10 +973,6 @@ impl Application {
         self.state.found_members.clear();
         self.state.role = None;
         self.state.pins = None;
-        // A server's search stays open in its channels.
-        if self.state.search.is_some() && self.state.search_shown().is_none() {
-            self.state.search = None;
-        }
         self.state.add_people = None;
         self.state.topic = None;
         self.searched.clear();
@@ -985,6 +981,7 @@ impl Application {
         let mut effects = self.close_threads();
         effects.extend(self.close_forum());
         self.state.new_thread = None;
+        self.trim_offscreen_pictures(false);
         if self.state.preview {
             if !voice_room {
                 self.state.messages = Arc::new(self.samples.get(&id).cloned().unwrap_or_default());
@@ -1104,6 +1101,16 @@ impl Application {
         if rooms || servers {
             self.state.list_changes = self.state.list_changes.wrapping_add(1);
         }
+        self.check_report_room_access();
+        let mut effects = Vec::new();
+        if self
+            .state
+            .search
+            .as_ref()
+            .is_some_and(|search| !self.state.search_place_accessible(&search.place))
+        {
+            effects.extend(self.close_search());
+        }
         if let Navigation::Server(id) = &self.state.navigation
             && !self.state.servers.iter().any(|server| &server.id == id)
         {
@@ -1112,11 +1119,11 @@ impl Application {
         // A screen of the DM list stands in for a conversation, as Browse
         // Channels does for a server's.
         if self.state.dm_screen.is_some() && self.state.navigation == Navigation::DirectMessages {
-            return vec![];
+            return effects;
         }
         match &self.state.browse {
             Some(browse) if Navigation::Server(browse.server.clone()) == self.state.navigation => {
-                return vec![];
+                return effects;
             }
             Some(_) => self.state.browse = None,
             None => {}
@@ -1127,8 +1134,8 @@ impl Application {
             .iter()
             .any(|room| Some(&room.id) == self.state.selected.as_ref() && self.state.in_scope(room))
         {
-            return self.restore_selection();
+            effects.extend(self.restore_selection());
         }
-        vec![]
+        effects
     }
 }

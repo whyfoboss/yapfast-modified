@@ -45,14 +45,18 @@ struct Share {
 impl Share {
     /// Starts the worker; Discord hears of the stream once there's something
     /// to show, so a cancelled dialog shares nothing.
-    fn start(state: &mut State, quality: StreamQuality) -> Result<Self> {
+    fn start(
+        state: &mut State,
+        quality: StreamQuality,
+        include_audio_pid: Option<u32>,
+    ) -> Result<Self> {
         // Tests and screenshots share colour bars instead of a screen.
         let source = if std::env::var_os("YAPFAST_STREAM_TEST_PATTERN").is_some() {
             stream_worker::Source::TestPattern
         } else {
             stream_worker::Source::Screen
         };
-        let (worker, frames, reports) = Worker::share(source, quality)?;
+        let (worker, frames, reports) = Worker::share(source, quality, include_audio_pid)?;
         state.sharing = Some(Sharing {
             phase: SharePhase::Choosing,
             frames: Arc::new(frames),
@@ -358,6 +362,19 @@ async fn watch_event(watches: &mut [Watch]) -> WatchEvent {
     }
 }
 
+async fn play_pid_changed(
+    play_audio_pid: &mut Option<watch::Receiver<Option<u32>>>,
+) -> Option<u32> {
+    let Some(receiver) = play_audio_pid.as_mut() else {
+        return std::future::pending().await;
+    };
+    if receiver.changed().await.is_err() {
+        *play_audio_pid = None;
+        return std::future::pending().await;
+    }
+    *receiver.borrow_and_update()
+}
+
 /// A Discord voice call, from asking Discord to join until leaving. Commands
 /// stay responsive throughout, as in a Matrix call.
 pub(crate) async fn call(
@@ -368,6 +385,7 @@ pub(crate) async fn call(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     snapshots: &watch::Sender<State>,
     remembered: Option<&Path>,
+    mut play_audio_pid: Option<watch::Receiver<Option<u32>>>,
 ) -> Result<()> {
     ensure!(
         discord_audio::AVAILABLE,
@@ -646,10 +664,11 @@ pub(crate) async fn call(
                         Some(Command::Deafen(deafened)) => {
                             if deafened {
                                 capture = None;
-                                state.muted = true;
                             }
-                            state.deafened = deafened;
-                            hearing.set_deafened(deafened);
+                            apply_deafen_command(state, &hearing, deafened);
+                        }
+                        Some(Command::FakeDeafen(enabled)) => {
+                            apply_fake_deafen_command(state, &hearing, enabled);
                         }
                         Some(Command::Devices) => { let _ = devices(state); }
                         Some(Command::Microphone(id)) => {
@@ -701,7 +720,8 @@ pub(crate) async fn call(
                             if share.is_none() {
                                 state.quality = quality;
                                 Chosen::write(remembered, state);
-                                match Share::start(state, quality) {
+                                let pid = play_audio_pid.as_ref().and_then(|rx| *rx.borrow());
+                                match Share::start(state, quality, pid) {
                                     Ok(started) => {
                                         share = Some(started);
                                         state.error = None;
@@ -835,7 +855,7 @@ pub(crate) async fn call(
                         }
                         Some(Command::LeaveStale) => {}
                     }
-                    discord.set_self(guild, &channel, state.muted, state.deafened, state.camera_phase == CameraPhase::On);
+                    send_self_state(discord, guild, &channel, state);
                     snapshots.send_replace(state.clone());
                 }
                 result = camera::opened(&mut opening) => {
@@ -854,7 +874,7 @@ pub(crate) async fn call(
                             state.report_error(Some(error.to_string()));
                         }
                     }
-                    discord.set_self(guild, &channel, state.muted, state.deafened, state.camera_phase == CameraPhase::On);
+                    send_self_state(discord, guild, &channel, state);
                     snapshots.send_replace(state.clone());
                 }
                 report = next_report(&mut share) => {
@@ -1016,6 +1036,14 @@ pub(crate) async fn call(
                     for w in &mut watches {
                         w.volume();
                     }
+                }
+                pid = play_pid_changed(&mut play_audio_pid) => {
+                    if let Some(going) = share.as_mut()
+                        && let Err(error) = going.worker.include_audio_pid(pid)
+                    {
+                        tracing::warn!(error = format!("{error:#}"), "could not update internal player stream sound");
+                    }
+                    continue;
                 }
                 event = watch_event(&mut watches) => {
                     let mut stop_idx = None;
@@ -1458,6 +1486,36 @@ fn alone(snapshot: &yapfast_discord::service::Snapshot, channel: &str, me: &str)
         .into_iter()
         .flatten()
         .all(|member| member.user_id == me)
+}
+
+/// Computes `(self_mute, self_deaf, self_video)` sent to Discord Gateway.
+/// Under Fake Deafen, Discord receives `(true, true)` while local audio stays real.
+pub(crate) fn wire_self_state(state: &State) -> (bool, bool, bool) {
+    let wire_deaf = state.deafened || state.fake_deafen;
+    let wire_mute = state.muted || state.fake_deafen;
+    (wire_mute, wire_deaf, state.camera_phase == CameraPhase::On)
+}
+
+fn send_self_state(discord: &Discord, guild: &str, channel: &str, state: &State) {
+    let (mute, deaf, video) = wire_self_state(state);
+    discord.set_self(guild, channel, mute, deaf, video);
+}
+
+pub(crate) fn apply_deafen_command(state: &mut State, hearing: &Hearing, deafened: bool) {
+    if deafened {
+        state.fake_deafen = false;
+        state.muted = true;
+    }
+    state.deafened = deafened;
+    hearing.set_deafened(deafened);
+}
+
+pub(crate) fn apply_fake_deafen_command(state: &mut State, hearing: &Hearing, enabled: bool) {
+    state.fake_deafen = enabled;
+    if enabled && state.deafened {
+        state.deafened = false;
+        hearing.set_deafened(false);
+    }
 }
 
 #[cfg(test)]

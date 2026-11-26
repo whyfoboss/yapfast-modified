@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Member lists kept for channels shown again.
-const LISTS: usize = 40;
+const LISTS: usize = 10;
 /// How long a member list Discord sent stands without asking again. A list
 /// Discord still sends stays current however old.
 const LIST_FRESH: Duration = Duration::from_secs(10 * 60);
@@ -55,11 +55,17 @@ pub(super) struct MemberLists {
 
 impl MemberLists {
     pub(super) fn new(
-        kept: Vec<MemberList>,
+        mut kept: Vec<MemberList>,
         live: broadcast::Sender<Live>,
         names: Arc<RwLock<Names>>,
         own: Presence,
     ) -> Self {
+        if kept.len() > LISTS {
+            let drop_count = kept.len() - LISTS;
+            kept.drain(..drop_count);
+            kept.shrink_to_fit();
+            cache::keep_lists(kept.clone());
+        }
         Self {
             live,
             names,
@@ -414,6 +420,9 @@ impl MemberLists {
         self.kept.push(list);
         if self.kept.len() > LISTS {
             self.kept.remove(0);
+            if self.kept.capacity() > LISTS * 2 {
+                self.kept.shrink_to_fit();
+            }
         }
         cache::keep_lists(self.kept.clone());
     }
@@ -518,5 +527,17 @@ mod tests {
         assert_eq!(presence(), Presence::Offline);
         lists.own_presence(&tracker, Presence::Idle);
         assert_eq!(presence(), Presence::Idle);
+    }
+
+    #[tokio::test]
+    async fn new_trims_oversized_kept_lists_to_limit() {
+        let (live, _) = broadcast::channel(8);
+        let names = Arc::<RwLock<Names>>::default();
+        let kept: Vec<MemberList> = (0..25)
+            .map(|i| MemberList::new("10".into(), format!("{i}"), "everyone".into()))
+            .collect();
+        let lists = MemberLists::new(kept, live, names, Presence::Online);
+        assert_eq!(lists.kept.len(), LISTS);
+        assert_eq!(lists.kept[0].channel(), "15");
     }
 }

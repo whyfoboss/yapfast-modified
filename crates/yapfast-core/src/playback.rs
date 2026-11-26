@@ -130,6 +130,11 @@ impl Playback {
         }
     }
 
+    /// Operating-system process id of the active playback worker.
+    pub fn audio_pid(&self) -> Option<u32> {
+        self.reports.is_some().then(|| self.worker.pid())
+    }
+
     /// Takes what woke it. False once it stopped.
     pub fn handle(&mut self, wake: Wake) -> bool {
         match wake {
@@ -181,8 +186,10 @@ impl Playback {
         true
     }
 
-    /// The worker's gone; what it showed stays, with why.
+    /// The worker's gone; abort any pending download and keep the error reason.
     fn stopped(&mut self, error: Option<String>) {
+        self.download.abort();
+        self.arrivals = None;
         self.reports = None;
         self.video.playing = false;
         self.video.loading = false;

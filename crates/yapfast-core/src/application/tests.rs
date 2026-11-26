@@ -5956,7 +5956,7 @@ fn server_tag_badges_on_screen_stay_with_the_avatars() {
 fn avatars_stay_only_near_the_rows_on_screen() {
     let mut app = connected();
     // A busy channel followed for a while: each message someone else's.
-    let messages: Vec<_> = (0..300)
+    let messages: Vec<_> = (0..200)
         .map(|index| ChatMessage {
             avatar: Some(format!("{index}.png")),
             ..message(&format!("e:${index}"), false)
@@ -5968,7 +5968,7 @@ fn avatars_stay_only_near_the_rows_on_screen() {
     });
     app.dispatch(Action::VisibleMessages {
         room: "dm".into(),
-        items: (280..290).map(|index| format!("e:${index}")).collect(),
+        items: (180..190).map(|index| format!("e:${index}")).collect(),
         at_end: false,
     });
     for index in 0..=KEPT_PICTURES {
@@ -5979,9 +5979,9 @@ fn avatars_stay_only_near_the_rows_on_screen() {
         });
     }
     let kept = |index: usize| app.state.pictures.contains_key(&format!("{index}.png"));
-    assert!(kept(280) && kept(289), "those on screen stay");
-    assert!(kept(250) && kept(299), "as do those a short scroll away");
-    assert!(!kept(249) && !kept(0), "the rest of the timeline's go");
+    assert!(kept(180) && kept(189), "those on screen stay");
+    assert!(kept(150) && kept(199), "as do those a short scroll away");
+    assert!(!kept(149) && !kept(0), "the rest of the timeline's go");
     assert_eq!(app.state.pictures.len(), 50);
 }
 
@@ -6108,6 +6108,50 @@ fn animation_pins_cover_viewport_emoji_not_every_loaded_message() {
     assert_eq!(app.visible_message_emoji().count(), 1);
     app.visible_messages.clear();
     assert_eq!(app.visible_message_emoji().count(), 0);
+}
+
+#[test]
+fn pictures_trim_on_byte_limit_and_room_switch_while_keeping_shown_and_emoji() {
+    let mut app = connected();
+    app.apply(Event::Timeline {
+        room: "dm".into(),
+        messages: timeline(vec![ChatMessage {
+            avatar: Some("on-screen.png".into()),
+            ..message("e:$ann", false)
+        }]),
+    });
+    let arrive = |app: &mut Application, url: String, bytes: usize| {
+        app.requested_pictures.insert(url.clone());
+        app.apply(Event::Picture {
+            url,
+            picture: Arc::new(Picture {
+                width: 256,
+                height: (bytes / (256 * 4)) as u32,
+                rgba: chat::Pixels::new(256, (bytes / (256 * 4)) as u32, vec![0; bytes]),
+                ..Default::default()
+            }),
+        });
+    };
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+    let emoji = "https://cdn.discordapp.com/emojis/99.png?size=64".to_owned();
+    arrive(&mut app, "on-screen.png".into(), TWO_MIB);
+    arrive(&mut app, emoji.clone(), 4096);
+    for index in 0..5 {
+        arrive(&mut app, format!("gallery-{index}.png"), TWO_MIB);
+    }
+    assert!(app.state.pictures.contains_key("on-screen.png"));
+    assert!(app.state.pictures.contains_key(&emoji));
+    assert!(!app.state.pictures.contains_key("gallery-0.png"));
+
+    for index in 0..3 {
+        arrive(&mut app, format!("room-switch-{index}.png"), TWO_MIB);
+    }
+    assert!(app.state.pictures.contains_key("room-switch-0.png"));
+    let changes = app.state.picture_changes;
+    app.dispatch(Action::Open("general".into()));
+    assert!(app.state.picture_changes > changes);
+    assert!(!app.state.pictures.contains_key("room-switch-0.png"));
+    assert!(app.state.pictures.contains_key(&emoji));
 }
 
 fn yapfast_core_emoji(picture: &str) -> crate::chat::CustomEmoji {
@@ -6988,9 +7032,9 @@ fn a_dm_search_loads_its_results_a_page_at_a_time() {
     let dm = "discord:@me:30".to_owned();
     app.dispatch(Action::SelectRoom(dm.clone()));
     assert!(matches!(
-        app.dispatch(Action::Search("  trip ".into())).as_slice(),
-        [Effect::Backend(Command::Discord(DiscordCommand::Search { place, query, offset: 0 }))]
-            if *place == dm && query == "trip"
+        app.dispatch(Action::Search("  trip has:image ".into())).as_slice(),
+        [Effect::Backend(Command::Discord(DiscordCommand::Search { place, query, offset: 0, .. }))]
+            if *place == dm && query == "trip has:image"
     ));
     let page = |from: u32, count: u32| -> Vec<chat::SearchHit> {
         (from..from + count)
@@ -7000,18 +7044,17 @@ fn a_dm_search_loads_its_results_a_page_at_a_time() {
             })
             .collect()
     };
-    let found = |query: &str, offset: u32, result| Event::Found {
-        place: dm.clone(),
-        query: query.into(),
+    let found = |request, offset, result| Event::Found {
+        request,
         offset,
         result,
     };
-    app.apply(found("old", 0, Ok((1, page(0, 1)))));
+    app.apply(found(0, 0, Ok((1, page(0, 1)))));
     assert!(
         app.state.search.as_ref().unwrap().results.is_empty(),
         "an earlier search's results don't show"
     );
-    app.apply(found("trip", 0, Ok((30, page(0, 25)))));
+    app.apply(found(1, 0, Ok((30, page(0, 25)))));
     let search = app.state.search.as_ref().unwrap();
     assert!(!search.loading && search.more());
     assert_eq!((search.total, search.results.len()), (30, 25));
@@ -7028,33 +7071,60 @@ fn a_dm_search_loads_its_results_a_page_at_a_time() {
         "one page at a time"
     );
     // A message sent meanwhile moves one already shown onto the next page.
-    app.apply(found("trip", 25, Ok((51, page(24, 25)))));
+    app.apply(found(1, 25, Ok((51, page(24, 25)))));
     let search = app.state.search.as_ref().unwrap();
     assert_eq!(search.results.len(), 49, "each result shows once");
     assert!(search.more());
     app.dispatch(Action::MoreResults);
-    app.apply(found("trip", 50, Err("Discord is busy.".into())));
+    app.apply(found(1, 50, Err("Discord is busy.".into())));
     let search = app.state.search.as_ref().unwrap();
     assert_eq!(search.error.as_deref(), Some("Discord is busy."));
     assert_eq!(search.results.len(), 49, "a failed page keeps those found");
     app.dispatch(Action::MoreResults);
-    app.apply(found("trip", 50, Ok((51, page(49, 2)))));
+    app.apply(found(1, 50, Ok((51, page(49, 2)))));
     assert!(
         !app.state.search.as_ref().unwrap().more(),
         "all 51 are there"
     );
 
+    app.dispatch(Action::Search("trip has:image".into()));
+    app.apply(found(1, 0, Ok((1, page(80, 1)))));
+    assert!(
+        app.state.search.as_ref().unwrap().loading,
+        "a repeated query still waits for its own response"
+    );
+    app.apply(found(2, 0, Ok((55, page(0, 25)))));
+    assert!(app.dispatch(Action::SearchStartAt("1".into())).is_empty());
+    assert_eq!(app.state.search.as_ref().unwrap().jump_to, Some(1));
     assert!(matches!(
-        app.dispatch(Action::SearchStartAt(22)).as_slice(),
-        [Effect::Backend(Command::Discord(DiscordCommand::Search { offset: 29, .. }))]
+        app.dispatch(Action::SearchStartAt("49".into())).as_slice(),
+        [Effect::Backend(Command::Discord(DiscordCommand::Search { offset: 25, query, .. }))]
+            if query == "trip has:image"
     ));
-    app.apply(found("trip", 25, Ok((51, page(25, 25)))));
-    assert!(app.state.search.as_ref().unwrap().results.is_empty());
-    app.apply(found("trip", 29, Ok((51, page(29, 22)))));
+    assert_eq!(app.state.search.as_ref().unwrap().results.len(), 25);
+    assert!(app.apply(found(2, 25, Ok((55, page(25, 25))))).is_empty());
     let search = app.state.search.as_ref().unwrap();
-    assert_eq!(search.first, 29);
-    assert_eq!(search.results.len(), 22);
-    assert!(app.dispatch(Action::SearchStartAt(52)).is_empty());
+    assert_eq!(search.jump_to, Some(49));
+    assert_eq!(search.results[48].message.item, "d:48");
+
+    assert!(matches!(
+        app.dispatch(Action::SearchStartAt("55".into())).as_slice(),
+        [Effect::Backend(Command::Discord(DiscordCommand::Search { offset: 50, .. }))]
+    ));
+    app.apply(found(2, 50, Ok((55, page(50, 5)))));
+    let search = app.state.search.as_ref().unwrap();
+    assert_eq!(search.jump_to, Some(55));
+    assert_eq!(search.results[0].message.item, "d:0");
+    assert_eq!(search.results[54].message.item, "d:54");
+    assert_eq!(search.results.len(), 55);
+
+    for input in ["", "abc", "0", "-1", "56"] {
+        assert!(app.dispatch(Action::SearchStartAt(input.into())).is_empty());
+        let search = app.state.search.as_ref().unwrap();
+        assert_eq!(search.jump_to, None);
+        assert_eq!(search.jump_hint, "Enter a result number from 1 to 55");
+        assert_eq!(search.results.len(), 55);
+    }
 
     app.dispatch(Action::Search(" ".into()));
     assert!(app.state.search.is_none(), "an empty search ends it");
@@ -7491,8 +7561,7 @@ fn a_server_search_stays_open_in_its_channels_and_jumps_into_them() {
         message: message(item, false),
     };
     app.apply(Event::Found {
-        place: "discord:10".into(),
-        query: "plan".into(),
+        request: 1,
         offset: 0,
         result: Ok((
             2,
@@ -7570,20 +7639,213 @@ fn a_server_search_stays_open_in_its_channels_and_jumps_into_them() {
         "the \"New\" divider doesn't take the view from it"
     );
 
-    // A voice channel can't search, so it closes the search.
+    // Switching to a voice channel preserves the server's saved search session.
     app.dispatch(Action::Open("discord:10:14".into()));
+    assert!(app.state.search_shown().is_some());
+    assert!(!app.state.search_in_current_place());
+    assert!(matches!(
+        app.dispatch(Action::CloseSearch).as_slice(),
+        [Effect::Backend(Command::Discord(DiscordCommand::ClearSearch))]
+    ));
     assert!(app.state.search.is_none());
 }
 
 #[test]
 #[cfg(feature = "discord")]
-fn a_dm_search_closes_in_another_dm() {
+fn a_search_persists_across_chats_until_closed_or_invalidated() {
     let mut app = discord_dms(vec![]);
     app.dispatch(Action::SelectRoom("discord:@me:30".into()));
-    app.dispatch(Action::Search("trip".into()));
+    let effects = app.dispatch(Action::Search("trip".into()));
+    assert_eq!(effects.len(), 1);
     assert_eq!(app.state.search_place().as_deref(), Some("discord:@me:30"));
+    assert!(app.state.search_in_current_place());
+    assert_eq!(
+        app.state.search.as_ref().unwrap().place_label,
+        "DM: Annie"
+    );
+
+    // Switching to another DM keeps the saved search, marked outside current scope.
     app.dispatch(Action::SelectRoom("discord:@me:31".into()));
+    assert!(app.state.search_shown().is_some());
+    assert!(!app.state.search_in_current_place());
+
+    // Returning to the original DM restores the scope match.
+    app.dispatch(Action::SelectRoom("discord:@me:30".into()));
+    assert!(app.state.search_in_current_place());
+
+    // Stale responses (wrong generation, even for an identical repeated query) are dropped.
+    app.apply(Event::Found {
+        request: 99,
+        offset: 0,
+        result: Ok((1, vec![])),
+    });
+    assert!(app.state.search.as_ref().unwrap().loading);
+
+    // Explicit close clears the search.
+    app.dispatch(Action::CloseSearch);
     assert!(app.state.search.is_none());
+
+    // Account switch in snapshot invalidates an active search.
+    app.dispatch(Action::Search("trip".into()));
+    assert!(app.state.search.is_some());
+    let mut next_snap = yapfast_discord::service::Snapshot::clone(app.discord.as_ref().unwrap());
+    next_snap.user_id = Some("999".into());
+    let effects = app.apply(discord_event(next_snap));
+    assert!(app.state.search.is_none());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Backend(Command::Discord(DiscordCommand::ClearSearch))
+    )));
+
+    // Logout clears an active search and bumps generation so late responses are ignored.
+    app.dispatch(Action::Search("trip".into()));
+    let gen_before_logout = app.state.search.as_ref().unwrap().generation;
+    app.apply(Event::LoggedOut);
+    assert!(app.state.search.is_none());
+    app.apply(Event::Found {
+        request: gen_before_logout,
+        offset: 0,
+        result: Ok((1, vec![])),
+    });
+    assert!(app.state.search.is_none());
+
+    // Losing access to a server removes its saved search.
+    let mut app = discord_server();
+    app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    app.dispatch(Action::SelectRoom("discord:10:11".into()));
+    app.dispatch(Action::Search("plan".into()));
+    assert!(app.state.search.is_some());
+    let mut dropped = yapfast_discord::service::Snapshot::clone(app.discord.as_ref().unwrap());
+    dropped.servers.clear();
+    let effects = app.apply(discord_event(dropped));
+    assert!(app.state.search.is_none());
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Backend(Command::Discord(DiscordCommand::ClearSearch))
+    )));
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn search_images_in_unopened_channel_open_viewer_and_load_previews_lazily() {
+    let mut app = discord_server();
+    app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    app.dispatch(Action::SelectRoom("discord:10:11".into()));
+    app.dispatch(Action::Search("pic".into()));
+
+    let img = |name: &str| chat::Attachment {
+        voice_ms: None,
+        voice_waveform: None,
+        name: name.into(),
+        size: None,
+        image: true,
+        dimensions: None,
+        preview: None,
+        preview_failed: false,
+        placement: chat::Placement::Message,
+        spoiler: false,
+        video: false,
+        gif: None,
+        url: Some(format!("https://cdn.discordapp.com/attachments/1/{name}").into()),
+        description: None,
+    };
+    let mut hits = Vec::new();
+    for i in 0..40 {
+        hits.push(chat::SearchHit {
+            room: "discord:10:13".into(),
+            message: ChatMessage {
+                item: format!("d:{i}"),
+                attachments: vec![img("a.png"), img("b.png")],
+                ..message(&format!("d:{i}"), false)
+            },
+        });
+    }
+    let generation = app.state.search.as_ref().unwrap().generation;
+    app.apply(Event::Found {
+        request: generation,
+        offset: 0,
+        result: Ok((40, hits)),
+    });
+
+    // Only visible window + small buffer gets preview requests.
+    let effects = app.dispatch(Action::SearchViewport { start: 0, end: 4 });
+    let items = match effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::SearchPreviews { request, items }))]
+            if *request == generation =>
+        {
+            items
+        }
+        _ => panic!("expected SearchPreviews for active generation"),
+    };
+    assert_eq!(items.len(), 8);
+
+    // Apply preview to item d:0, then scroll far away -> evicted and untracked for re-fetch.
+    app.apply(Event::SearchPreview {
+        request: generation,
+        item: "d:0".into(),
+        index: 0,
+        preview: Some(Arc::new(Picture::default())),
+    });
+    assert!(
+        app.state.search.as_ref().unwrap().results[0].message.attachments[0]
+            .preview
+            .is_some()
+    );
+    app.dispatch(Action::SearchViewport { start: 25, end: 32 });
+    assert!(
+        app.state.search.as_ref().unwrap().results[0].message.attachments[0]
+            .preview
+            .is_none(),
+        "far offscreen search preview must be evicted"
+    );
+
+    // View attachment #1 in unopened channel #memes (discord:10:13).
+    let effects = app.dispatch(Action::ViewImageInRoom {
+        room: "discord:10:13".into(),
+        item: "d:5".into(),
+        index: 1,
+    });
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Backend(Command::ViewImage { room, item, index: 1 })]
+            if room == "discord:10:13" && item == "d:5"
+    ));
+    assert_eq!(app.state.viewer.as_ref().unwrap().room, "discord:10:13");
+
+    // Step backwards to index 0, deliver Event::Image, Save & Copy while viewer is open.
+    let effects = app.dispatch(Action::StepImage(-1));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Backend(Command::ViewImage { room, item, index: 0 })]
+            if room == "discord:10:13" && item == "d:5"
+    ));
+    app.apply(Event::Image {
+        room: "discord:10:13".into(),
+        item: "d:5".into(),
+        index: 0,
+        picture: Ok(Arc::new(Picture::default())),
+    });
+    assert!(app.state.viewer.as_ref().unwrap().pictures[&0].is_some());
+    assert!(matches!(
+        app.dispatch(Action::CopyAttachment {
+            item: "d:5".into(),
+            index: 0,
+        })
+        .as_slice(),
+        [Effect::Backend(Command::CopyAttachment { room, item, index: 0 })]
+            if room == "discord:10:13" && item == "d:5"
+    ));
+    app.apply(Event::Saved {
+        room: "discord:10:13".into(),
+        name: "a.png".into(),
+        result: Ok(()),
+    });
+    assert_eq!(app.state.notice.as_deref(), Some("Saved a.png."));
+
+    // Closing viewer returns to the search without clearing it.
+    app.dispatch(Action::CloseImage);
+    assert!(app.state.viewer.is_none());
+    assert!(app.state.search_shown().is_some());
 }
 
 /// `app`'s Discord snapshot again, with its first server changed by `change`.
@@ -12963,4 +13225,807 @@ fn a_user_option_takes_a_pasted_mention_and_asks_discord_for_names() {
         })
         .expect("it runs");
     assert_eq!(run.options[0]["value"], "140000000000000099");
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_message_eligibility_across_discord_rooms_and_exclusions() {
+    use crate::{chat::Delivery, report::can_report_message};
+
+    let other_msg = |item: &str| ChatMessage {
+        item: item.into(),
+        own: false,
+        delivery: Delivery::Sent,
+        ..Default::default()
+    };
+
+    // Server channel, thread (same room shape), 1:1 DM, group DM are all eligible.
+    for room in [
+        "discord:10:21",
+        "discord:10:30",
+        "discord:@me:500",
+        "discord:@me:600",
+    ] {
+        assert!(
+            can_report_message(room, &other_msg("d:999")),
+            "expected {room} to allow reporting"
+        );
+    }
+
+    // Matrix rooms, own messages, deleted, pending/failed, notices, ephemeral, loading, and non-snowflakes are excluded.
+    assert!(!can_report_message("!room:example.org", &other_msg("e:1")));
+    assert!(!can_report_message(
+        "!room:example.org",
+        &other_msg("d:999")
+    ));
+    assert!(!can_report_message("discord:10:21", &other_msg("t:999")));
+    assert!(!can_report_message("discord:10:21", &other_msg("d:abc")));
+    assert!(!can_report_message(
+        "discord:10:21",
+        &ChatMessage {
+            own: true,
+            ..other_msg("d:999")
+        }
+    ));
+    assert!(!can_report_message(
+        "discord:10:21",
+        &ChatMessage {
+            deleted: true,
+            ..other_msg("d:999")
+        }
+    ));
+    for delivery in [Delivery::Sending, Delivery::Waiting, Delivery::Failed] {
+        assert!(!can_report_message(
+            "discord:10:21",
+            &ChatMessage {
+                delivery,
+                ..other_msg("d:999")
+            }
+        ));
+    }
+    assert!(!can_report_message(
+        "discord:10:21",
+        &ChatMessage {
+            notice: Some(chat::Notice {
+                kind: chat::NoticeKind::Joined,
+                text: "joined".into(),
+            }),
+            ..other_msg("d:999")
+        }
+    ));
+    assert!(!can_report_message(
+        "discord:10:21",
+        &ChatMessage {
+            flags: crate::report::EPHEMERAL,
+            ..other_msg("d:999")
+        }
+    ));
+    assert!(!can_report_message(
+        "discord:10:21",
+        &ChatMessage {
+            flags: crate::report::LOADING,
+            ..other_msg("d:999")
+        }
+    ));
+}
+
+#[cfg(feature = "discord")]
+fn sample_report_menu() -> crate::report::ReportMenu {
+    use crate::report::{
+        ReportButton, ReportButtonKind, ReportChild, ReportElement, ReportMenu, ReportNode,
+        ReportOption,
+    };
+    use std::collections::HashMap;
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        1,
+        ReportNode {
+            id: 1,
+            key: "root".into(),
+            report_type: None,
+            header: "What's wrong?".into(),
+            subheader: None,
+            info: None,
+            children: vec![
+                ReportChild {
+                    label: "Spam or scam".into(),
+                    target_node_id: 10,
+                },
+                ReportChild {
+                    label: "Harassment".into(),
+                    target_node_id: 20,
+                },
+            ],
+            elements: vec![],
+            button: None,
+            is_multi_select_required: false,
+            is_auto_submit: false,
+        },
+    );
+    nodes.insert(
+        10,
+        ReportNode {
+            id: 10,
+            key: "spam".into(),
+            report_type: Some("SPAM".into()),
+            header: "Spam".into(),
+            subheader: None,
+            info: None,
+            children: vec![],
+            elements: vec![],
+            button: Some(ReportButton {
+                kind: ReportButtonKind::Submit,
+                target: None,
+            }),
+            is_multi_select_required: false,
+            is_auto_submit: true,
+        },
+    );
+    nodes.insert(
+        20,
+        ReportNode {
+            id: 20,
+            key: "harassment".into(),
+            report_type: Some("HARASSMENT".into()),
+            header: "Harassment".into(),
+            subheader: None,
+            info: None,
+            children: vec![],
+            elements: vec![ReportElement {
+                name: "context".into(),
+                kind: "checkbox".into(),
+                should_submit_data: true,
+                options: vec![ReportOption {
+                    value: "repeated".into(),
+                    label: "Repeated behavior".into(),
+                }],
+            }],
+            button: Some(ReportButton {
+                kind: ReportButtonKind::Submit,
+                target: None,
+            }),
+            is_multi_select_required: true,
+            is_auto_submit: false,
+        },
+    );
+    ReportMenu {
+        name: "message".into(),
+        version: "1.0".into(),
+        variant: "1".into(),
+        postback_path: "/reporting/message".into(),
+        language: "en".into(),
+        root_node_id: 1,
+        success_node_id: Some(900),
+        fail_node_id: Some(901),
+        nodes,
+    }
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_dialog_binds_target_protects_spoilers_and_requires_explicit_submit() {
+    use crate::chat::Delivery;
+    use yapfast_discord::{
+        marked::MarkedServer,
+        ready::{Channel, Server},
+        service::{Snapshot, Status},
+    };
+
+    let mut app = connected();
+    app.apply(discord_event(Snapshot {
+        status: Status::Online,
+        user_id: Some("100".into()),
+        servers: vec![MarkedServer::from(Server {
+            id: "10".into(),
+            name: "Test".into(),
+            text_channels: vec![
+                Channel {
+                    id: "21".into(),
+                    name: "general".into(),
+                    ..Default::default()
+                },
+                Channel {
+                    id: "22".into(),
+                    name: "other".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })],
+        ..Default::default()
+    }));
+    app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    app.dispatch(Action::SelectRoom("discord:10:21".into()));
+    app.apply(Event::Timeline {
+        room: "discord:10:21".into(),
+        messages: timeline(vec![ChatMessage {
+            id: "d:777".into(),
+            item: "d:777".into(),
+            author: "Bob".into(),
+            time: "12:00".into(),
+            body: "Watch ||hidden spoiler text|| closely".into(),
+            spoilers: true,
+            attachments: vec![chat::Attachment {
+                voice_ms: None,
+                voice_waveform: None,
+                name: "evidence.png".into(),
+                size: None,
+                image: true,
+                dimensions: None,
+                preview: None,
+                preview_failed: false,
+                placement: chat::Placement::Message,
+                gif: None,
+                spoiler: false,
+                video: false,
+                url: None,
+                description: None,
+            }],
+            delivery: Delivery::Sent,
+            ..Default::default()
+        }]),
+    });
+
+    // Opening asks only for the menu — never downloads attachments and never submits.
+    let effects = app.dispatch(Action::OpenReportMessage {
+        item: "d:777".into(),
+        aside: false,
+    });
+    let menu_req = match effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::ReportMessageMenu { request }))] => {
+            *request
+        }
+        _ => panic!("expected ReportMessageMenu"),
+    };
+    let report = app.state.report.as_ref().unwrap();
+    assert_eq!(report.channel_id, "21");
+    assert_eq!(report.message_id, "777");
+    assert!(!report.preview.contains("hidden spoiler text"));
+    assert!(report.preview.contains("(spoiler)"));
+    assert_eq!(report.attachments_note, "1 attachment");
+    assert_eq!(report.message_link, "https://discord.com/channels/10/21/777");
+
+    app.apply(Event::ReportMessageMenu {
+        request: menu_req,
+        result: Ok(sample_report_menu()),
+    });
+
+    // Switching chats does not rebind the report target.
+    app.dispatch(Action::SelectRoom("discord:10:22".into()));
+    assert_eq!(app.state.report.as_ref().unwrap().channel_id, "21");
+
+    // Navigating even onto an is_auto_submit node must NOT send a report automatically.
+    assert!(app.dispatch(Action::ReportChooseChild(10)).is_empty());
+    assert!(app.dispatch(Action::ReportBack).is_empty());
+    assert!(app.dispatch(Action::ReportChooseChild(20)).is_empty());
+    // Required multi-select prevents submit until checked.
+    assert!(app.dispatch(Action::SubmitReport).is_empty());
+    assert!(
+        app.dispatch(Action::ReportToggleOption {
+            element: "context".into(),
+            value: "repeated".into(),
+        })
+        .is_empty()
+    );
+
+    // Explicit Submit sends once; double click while in-flight is ignored.
+    let effects = app.dispatch(Action::SubmitReport);
+    let submit_req = match effects.as_slice() {
+        [
+            Effect::Backend(Command::Discord(DiscordCommand::SubmitMessageReport {
+                request,
+                submission,
+            })),
+        ] => {
+            assert_eq!(submission.channel_id, "21");
+            assert_eq!(submission.message_id, "777");
+            assert_eq!(submission.breadcrumbs, vec![1, 20]);
+            assert_eq!(
+                submission.elements.get("context").cloned(),
+                Some(vec!["repeated".to_owned()])
+            );
+            *request
+        }
+        _ => panic!("expected SubmitMessageReport"),
+    };
+    assert!(app.dispatch(Action::SubmitReport).is_empty());
+
+    // Timeout leaves selection intact and reports TimeoutUnknown.
+    app.apply(Event::MessageReported {
+        request: submit_req,
+        result: Err(crate::report::ReportError {
+            kind: crate::report::ReportErrorKind::TimeoutUnknown,
+            message: "Timed out".into(),
+        }),
+    });
+    let report = app.state.report.as_ref().unwrap();
+    assert_eq!(report.phase, ReportPhase::Selecting);
+    assert_eq!(
+        report.submit_error.as_ref().map(|e| e.kind),
+        Some(crate::report::ReportErrorKind::TimeoutUnknown)
+    );
+    assert_eq!(report.breadcrumbs, vec![1, 20]);
+
+    // Explicit retry submits again and confirms without mutating chat messages.
+    let retry_effects = app.dispatch(Action::SubmitReport);
+    let retry_req = match retry_effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::SubmitMessageReport { request, .. }))] => {
+            *request
+        }
+        _ => panic!("expected retry SubmitMessageReport"),
+    };
+    app.apply(Event::MessageReported {
+        request: retry_req,
+        result: Ok(Some("999000".into())),
+    });
+    assert!(matches!(
+        app.state.report.as_ref().unwrap().phase,
+        ReportPhase::Submitted {
+            report_id: Some(ref id)
+        } if id == "999000"
+    ));
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_dialog_aside_target_and_invalidation_rules() {
+    use crate::chat::Delivery;
+    use yapfast_discord::{
+        marked::MarkedServer,
+        ready::{Channel, Server, Thread},
+        service::{Snapshot, Status},
+    };
+
+    let make_snapshot = |user_id: &str, include_thread: bool| Snapshot {
+        status: Status::Online,
+        user_id: Some(user_id.into()),
+        servers: vec![MarkedServer::from(Server {
+            id: "10".into(),
+            name: "Test".into(),
+            text_channels: vec![Channel {
+                id: "21".into(),
+                name: "general".into(),
+                ..Default::default()
+            }],
+            threads: if include_thread {
+                vec![Channel {
+                    id: "30".into(),
+                    name: "Side Thread".into(),
+                    parent: Some("21".into()),
+                    thread: Some(Box::new(Thread {
+                        joined: true,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+
+    let mut app = connected();
+    app.apply(discord_event(make_snapshot("100", true)));
+    app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    app.dispatch(Action::SelectRoom("discord:10:21".into()));
+    app.apply(Event::Timeline {
+        room: "discord:10:21".into(),
+        messages: timeline(vec![ChatMessage {
+            id: "d:555".into(),
+            item: "d:555".into(),
+            author: "Bob".into(),
+            body: "Main message".into(),
+            delivery: Delivery::Sent,
+            ..Default::default()
+        }]),
+    });
+    app.dispatch(Action::OpenAside("discord:10:30".into()));
+    app.apply(Event::Timeline {
+        room: "discord:10:30".into(),
+        messages: timeline(vec![ChatMessage {
+            id: "d:555".into(),
+            item: "d:555".into(),
+            author: "Carol".into(),
+            body: "Thread message".into(),
+            delivery: Delivery::Sent,
+            ..Default::default()
+        }]),
+    });
+
+    // Aside thread binds thread channel id ("30"), even when main channel has same item id.
+    let effects = app.dispatch(Action::OpenReportMessage {
+        item: "d:555".into(),
+        aside: true,
+    });
+    let menu_req = match effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::ReportMessageMenu { request }))] => {
+            *request
+        }
+        _ => panic!("expected menu req"),
+    };
+    let report = app.state.report.as_ref().unwrap();
+    assert_eq!(report.room_id, "discord:10:30");
+    assert_eq!(report.channel_id, "30");
+    assert_eq!(report.author, "Carol");
+
+    // Closing dialog ignores late menu response.
+    app.dispatch(Action::CloseReport);
+    app.apply(Event::ReportMessageMenu {
+        request: menu_req,
+        result: Ok(sample_report_menu()),
+    });
+    assert!(app.state.report.is_none());
+
+    // Reopen on thread, load menu, then lose access to thread -> Blocked.
+    let effects = app.dispatch(Action::OpenReportMessage {
+        item: "d:555".into(),
+        aside: true,
+    });
+    let req2 = match effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::ReportMessageMenu { request }))] => {
+            *request
+        }
+        _ => panic!(),
+    };
+    app.apply(Event::ReportMessageMenu {
+        request: req2,
+        result: Ok(sample_report_menu()),
+    });
+    app.apply(discord_event(make_snapshot("100", false)));
+    assert!(matches!(
+        app.state.report.as_ref().unwrap().phase,
+        ReportPhase::Blocked(_)
+    ));
+    assert!(app.dispatch(Action::ReportChooseChild(10)).is_empty());
+
+    // Account switch closes any open report dialog.
+    app.apply(discord_event(make_snapshot("200", true)));
+    assert!(app.state.report.is_none());
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_starter_message_protocol_guards_and_submit_close_lock() {
+    use crate::chat::Delivery;
+    use crate::report::{ReportChild, ReportElement, ReportMenu, ReportNode, ReportOption, can_report_message};
+    use std::collections::HashMap;
+    use yapfast_discord::{
+        marked::MarkedServer,
+        ready::{Channel, Server, Thread},
+        service::{Snapshot, Status},
+    };
+
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        1,
+        ReportNode {
+            id: 1,
+            key: "root".into(),
+            report_type: None,
+            header: "Root".into(),
+            subheader: None,
+            info: None,
+            children: vec![ReportChild {
+                label: "With unsubmitted element".into(),
+                target_node_id: 10,
+            }],
+            elements: vec![],
+            button: None,
+            is_multi_select_required: false,
+            is_auto_submit: true,
+        },
+    );
+    nodes.insert(
+        10,
+        ReportNode {
+            id: 10,
+            key: "leaf".into(),
+            report_type: Some("SPAM".into()),
+            header: "Details".into(),
+            subheader: None,
+            info: None,
+            children: vec![],
+            elements: vec![
+                ReportElement {
+                    name: "send_me".into(),
+                    kind: "checkbox".into(),
+                    should_submit_data: true,
+                    options: vec![ReportOption {
+                        value: "v1".into(),
+                        label: "Send me".into(),
+                    }],
+                },
+                ReportElement {
+                    name: "ignore_me".into(),
+                    kind: "checkbox".into(),
+                    should_submit_data: false,
+                    options: vec![ReportOption {
+                        value: "v2".into(),
+                        label: "Ignore me".into(),
+                    }],
+                },
+            ],
+            button: None,
+            is_multi_select_required: false,
+            is_auto_submit: false,
+        },
+    );
+    let menu = ReportMenu {
+        name: "message".into(),
+        version: "1.0".into(),
+        variant: "1".into(),
+        postback_path: "/reporting/message".into(),
+        language: "en".into(),
+        root_node_id: 1,
+        success_node_id: None,
+        fail_node_id: None,
+        nodes,
+    };
+
+    // Thread starter message (type 21) carries parent (channel, message) in report_target.
+    let starter = ChatMessage {
+        id: "d:30".into(),
+        item: "d:30".into(),
+        author: "Bob".into(),
+        body: "Welcome starter".into(),
+        delivery: Delivery::Sent,
+        report_target: Some(Box::new(("21".into(), "999".into()))),
+        ..Default::default()
+    };
+    let bad_starter = ChatMessage {
+        id: "d:31".into(),
+        item: "d:31".into(),
+        report_target: Some(Box::new(("".into(), "999".into()))),
+        ..starter.clone()
+    };
+    assert!(can_report_message("discord:10:30", &starter));
+    assert!(!can_report_message("discord:10:30", &bad_starter));
+
+    let mut app = connected();
+    app.apply(discord_event(Snapshot {
+        status: Status::Online,
+        user_id: Some("100".into()),
+        servers: vec![MarkedServer::from(Server {
+            id: "10".into(),
+            name: "Test".into(),
+            text_channels: vec![
+                Channel {
+                    id: "21".into(),
+                    name: "general".into(),
+                    ..Default::default()
+                },
+                Channel {
+                    id: "22".into(),
+                    name: "random".into(),
+                    ..Default::default()
+                },
+            ],
+            threads: vec![Channel {
+                id: "30".into(),
+                name: "Plans".into(),
+                parent: Some("21".into()),
+                thread: Some(Box::new(Thread {
+                    joined: true,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })],
+        ..Default::default()
+    }));
+    app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    app.dispatch(Action::SelectRoom("discord:10:21".into()));
+    app.dispatch(Action::OpenAside("discord:10:30".into()));
+    app.apply(Event::Timeline {
+        room: "discord:10:30".into(),
+        messages: timeline(vec![starter, bad_starter]),
+    });
+
+    // Invalid starter target is ignored cleanly.
+    assert!(
+        app.dispatch(Action::OpenReportMessage {
+            item: "d:31".into(),
+            aside: true,
+        })
+        .is_empty()
+    );
+    assert!(app.state.report.is_none());
+
+    assert!(
+        !app.dispatch(Action::OpenReportMessage {
+            item: "d:30".into(),
+            aside: true,
+        })
+        .is_empty()
+    );
+    let report = app.state.report.as_ref().unwrap();
+    assert_eq!(report.room_id, "discord:10:30");
+    assert_eq!(report.channel_id, "21", "starter reports parent channel");
+    assert_eq!(report.message_id, "999", "starter reports original message id");
+    assert_eq!(report.message_link, "https://discord.com/channels/10/21/999");
+    let tick0 = report.focus_tick;
+    let menu_req = report.request_id;
+
+    app.apply(Event::ReportMessageMenu {
+        request: menu_req,
+        result: Ok(menu),
+    });
+    let report = app.state.report.as_ref().unwrap();
+    assert!(report.focus_tick > tick0);
+    assert!(
+        !report.can_submit_step(),
+        "non-leaf node without Submit button must not submit even with is_auto_submit"
+    );
+
+    let tick1 = report.focus_tick;
+    app.dispatch(Action::ReportChooseChild(10));
+    assert!(app.state.report.as_ref().unwrap().focus_tick > tick1);
+    app.dispatch(Action::ReportToggleOption {
+        element: "send_me".into(),
+        value: "v1".into(),
+    });
+    app.dispatch(Action::ReportToggleOption {
+        element: "ignore_me".into(),
+        value: "v2".into(),
+    });
+
+    let submit_effects = app.dispatch(Action::SubmitReport);
+    let submit_req = match submit_effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::SubmitMessageReport { request, submission }))] => {
+            assert_eq!(submission.channel_id, "21");
+            assert_eq!(submission.message_id, "999");
+            assert_eq!(submission.elements.get("send_me"), Some(&vec!["v1".to_owned()]));
+            assert!(
+                !submission.elements.contains_key("ignore_me"),
+                "should_submit_data: false element must be excluded"
+            );
+            *request
+        }
+        _ => panic!("expected SubmitMessageReport"),
+    };
+
+    // CloseReport during Submitting must be blocked so the response isn't lost.
+    assert!(app.dispatch(Action::CloseReport).is_empty());
+    let still_open = app.state.report.as_ref().unwrap();
+    assert_eq!(still_open.phase, ReportPhase::Submitting);
+    assert_eq!(still_open.request_id, submit_req);
+
+    app.apply(Event::MessageReported {
+        request: submit_req,
+        result: Ok(Some("rep-starter".into())),
+    });
+    assert!(matches!(
+        app.state.report.as_ref().unwrap().phase,
+        ReportPhase::Submitted { report_id: Some(ref id) } if id == "rep-starter"
+    ));
+
+    // CloseReport succeeds once submission finished.
+    app.dispatch(Action::CloseReport);
+    assert!(app.state.report.is_none());
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn search_here_re_runs_saved_search_with_bindings_in_new_scope() {
+    use crate::chat::{SearchUserBinding, SearchUserFilter};
+    use yapfast_discord::{
+        marked::MarkedServer,
+        ready::{Channel, Server},
+        service::{Snapshot, Status},
+    };
+
+    let mut app = connected();
+    app.apply(discord_event(Snapshot {
+        status: Status::Online,
+        user_id: Some("100".into()),
+        servers: vec![
+            MarkedServer::from(Server {
+                id: "10".into(),
+                name: "Alpha".into(),
+                text_channels: vec![Channel {
+                    id: "11".into(),
+                    name: "general".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            MarkedServer::from(Server {
+                id: "20".into(),
+                name: "Beta".into(),
+                text_channels: vec![Channel {
+                    id: "21".into(),
+                    name: "general".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+        ],
+        ..Default::default()
+    }));
+
+    app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+    app.dispatch(Action::SelectRoom("discord:10:11".into()));
+    let bindings = vec![SearchUserBinding {
+        filter: SearchUserFilter::From,
+        token: "bob".into(),
+        user_id: "2".into(),
+    }];
+    let first_search = app.dispatch(Action::SearchWithBindings {
+        query: "from:bob hello".into(),
+        bindings: bindings.clone(),
+    });
+    let old_req = match first_search.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::Search { place, request, .. }))] => {
+            assert_eq!(place, "discord:10");
+            *request
+        }
+        _ => panic!("expected server Alpha search"),
+    };
+
+    app.dispatch(Action::Navigate(Navigation::Server("discord:20".into())));
+    app.dispatch(Action::SelectRoom("discord:20:21".into()));
+    assert!(!app.state.search_in_current_place());
+
+    let here_effects = app.dispatch(Action::SearchHere);
+    let new_req = match here_effects.as_slice() {
+        [Effect::Backend(Command::Discord(DiscordCommand::Search {
+            place,
+            query,
+            bindings: b,
+            request,
+            offset,
+        }))] => {
+            assert_eq!(place, "discord:20");
+            assert_eq!(query, "from:bob hello");
+            assert_eq!(b, &bindings);
+            assert_eq!(*offset, 0);
+            *request
+        }
+        _ => panic!("expected SearchHere to start search in current server Beta"),
+    };
+    assert_ne!(new_req, old_req);
+    assert!(app.state.search_in_current_place());
+
+    // Late response from the previous server search is dropped.
+    app.apply(Event::Found {
+        request: old_req,
+        offset: 0,
+        result: Ok((1, vec![])),
+    });
+    assert!(app.state.search.as_ref().unwrap().loading);
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn fake_deafen_commands_emit_no_deafen_sounds() {
+    let mut app = connected();
+    app.state.voice = voice::State {
+        phase: voice::Phase::Connected,
+        room: Some("discord:10:14".into()),
+        muted: false,
+        deafened: false,
+        fake_deafen: false,
+        ..Default::default()
+    };
+
+    let on_effects = app.dispatch(Action::Voice(voice::Command::FakeDeafen(true)));
+    assert!(matches!(
+        on_effects.as_slice(),
+        [Effect::Backend(Command::Voice(voice::Command::FakeDeafen(true)))]
+    ));
+    assert!(
+        !on_effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Sound(_))),
+        "FakeDeafen must not play real Deafen/Undeafen audio cues"
+    );
+
+    let off_effects = app.dispatch(Action::Voice(voice::Command::FakeDeafen(false)));
+    assert!(matches!(
+        off_effects.as_slice(),
+        [Effect::Backend(Command::Voice(voice::Command::FakeDeafen(false)))]
+    ));
 }

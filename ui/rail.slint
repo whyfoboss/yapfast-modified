@@ -1018,6 +1018,9 @@ export component ServerRail inherits Rectangle {
                     }
                 }
                 property <length> middle: self.absolute-position.y + self.height / 2;
+                property <bool> picture-nearby:
+                    self.absolute-position.y + self.height > list.absolute-position.y - ClientStyle.rail-tile
+                    && self.absolute-position.y < list.absolute-position.y + list.visible-height + ClientStyle.rail-tile;
                 property <bool> pointed: root.drag-id != "" && !server.dm && !server.divider
                     && root.within-rail(root.drag-x, root.drag-y)
                     && root.drag-y >= self.absolute-position.y && root.drag-y < self.absolute-position.y + self.height;
@@ -1052,7 +1055,8 @@ export component ServerRail inherits Rectangle {
                     label: server.name + " folder, " + (server.open ? "open" : "closed") + (server.call && !server.open ? ", in a call" : "")
                         + (server.badge != "" ? ", " + server.badge + " mentions" : server.unread ? ", unread" : "");
                     tip: server.name;
-                    open: server.open; tint: server.tint; servers: server.preview;
+                    open: server.open; tint: server.tint;
+                    servers: server-slot.picture-nearby ? server.preview : [];
                     selected: server.selected; unread: server.unread; badge: server.badge; call: server.call;
                     clicked => { root.toggle-folder(server.id); }
                     drag-start => { root.target-id = ""; root.drag-id = server.id; }
@@ -1062,7 +1066,8 @@ export component ServerRail inherits Rectangle {
                 }
                 if server.dm: RailItem {
                     y: 0px;
-                    initial: server.initial; picture-url: server.picture-url;
+                    initial: server.initial;
+                    picture-url: server-slot.picture-nearby ? server.picture-url : "";
                     label: server.name + (server.discord && root.matrix-build ? ", Discord" : "")
                         + (server.badge != "" ? ", " + server.badge + " unread" : ", unread");
                     tip: server.discord && root.matrix-build ? server.name + " (Discord)" : server.name;
@@ -1074,7 +1079,8 @@ export component ServerRail inherits Rectangle {
                     y: 0px;
                     reorderable: true;
                     server-tip: true;
-                    initial: server.initial; picture: server.picture; picture-url: server.picture-url;
+                    initial: server.initial; picture: server.picture;
+                    picture-url: server-slot.picture-nearby ? server.picture-url : "";
                     label: server.name + (server.discord && root.matrix-build ? ", Discord" : "") + (server.unavailable ? ", unavailable" : "")
                         + (server.call ? ", in a call" : "")
                         + (server.badge != "" ? ", " + server.badge + " mentions" : server.unread ? ", unread" : "");

@@ -138,7 +138,7 @@ with details, elapsed time, images and buttons.
 **Settings → Game activity** turns sharing on and off as Discord's own setting
 does, and names games Yapfast doesn't know. See
 [game detection](docs/discord/people.md#game-detection) and
-[Rich Presence](docs/discord/people.md#linux-rich-presence).
+[Rich Presence](docs/discord/people.md#local-rich-presence).
 
 <p align="center">
   <img src="docs/images/features/playing.webp" width="260" alt="A profile card saying Playing Deadlock, with the game's icon.">

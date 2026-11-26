@@ -68,6 +68,7 @@ pub mod picture;
 #[cfg(feature = "discord")]
 pub mod playback;
 pub mod push_to_talk;
+pub mod report;
 #[cfg(feature = "discord")]
 pub mod ring;
 pub mod runtime;

@@ -107,18 +107,20 @@ Discord and Matrix download and decode previews for those items and release
 distant decoded handles. A report goes out at once after a quiet spell and at most every 50 ms
 while the view moves; reports reject old rooms,
 and refresh when temporary message ids become server event ids even if the
-row count stays the same. Discord's recent channels share an 8 MiB LRU cache
+row count stays the same. Discord's recent channels share a 5 MiB LRU cache
 of decoded preview pixels; closing a channel clears its own preview handles
 and the remembered application's handles. Active rows can hold additional
 images outside the cache budget.
 
-Virtualized server, DM, member, friend and message rows carry avatar URLs.
-`PictureStore` resolves them only when Slint instantiates their components,
+DM, member, friend and message rows carry avatar URLs. The server rail
+keeps its rows alive for drag-and-drop, and supplies picture URLs only for
+rows in or near the viewport. `PictureStore` resolves URLs when their
+components need them,
 queues missing pictures for one batch, and updates visible bindings when
 pictures arrive. Its source registry holds weak pointers. The UI has
 yapfast-core decode pictures into Slint's pixel buffers (`set_pixel_buffers`), so
 a Slint image of a picture shares its pixels rather than copying them.
-Converted avatars and gallery previews share an 8 MiB Slint image cache;
+Converted avatars and gallery previews share a 5 MiB Slint image cache;
 profiles and call controls still request their visible pictures directly. A one-second timer
 releases animation decoders and their last frames after they stop being used,
 and stops itself when no decoders need checking.

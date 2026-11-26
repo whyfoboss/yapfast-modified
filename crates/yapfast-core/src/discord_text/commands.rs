@@ -122,6 +122,7 @@ pub fn command(
         discord,
         &channels.searches,
         &channels.previews,
+        &channels.found_attachments,
         events,
     ) else {
         return;
@@ -163,6 +164,9 @@ pub fn command(
         return;
     };
     let Some(command) = super::app_commands::command(command, discord, events) else {
+        return;
+    };
+    let Some(command) = super::report::command(command, discord, events) else {
         return;
     };
     let room = match &command {
@@ -282,6 +286,40 @@ pub fn command(
     // Discord ends the typing a message follows.
     if matches!(command, Command::Send { .. }) {
         channels.typed = None;
+    }
+    if channels.shown_mut(&room).is_none() {
+        match command {
+            Command::SaveAttachment {
+                room,
+                item,
+                index,
+                path,
+            } => {
+                let url = channels
+                    .find_attachment(&room, &item, index)
+                    .map(|a| a.url);
+                open_channel::save_attachment(discord, done, room, url, path);
+                return;
+            }
+            Command::CopyAttachment { room, item, index } => {
+                let url = channels.find_attachment(&room, &item, index).map(|a| {
+                    a.still_url
+                        .as_deref()
+                        .unwrap_or(&a.url)
+                        .to_owned()
+                });
+                open_channel::copy_attachment(discord, done, room, url, None);
+                return;
+            }
+            Command::ViewImage { room, item, index } => {
+                let url = channels
+                    .find_attachment(&room, &item, index)
+                    .and_then(|a| a.view_url);
+                open_channel::fetch_view_image(discord, done, room, item, index, url, None);
+                return;
+            }
+            _ => {}
+        }
     }
     let Some(channel) = channels.shown_mut(&room) else {
         let again = "Open this conversation again, then retry.";

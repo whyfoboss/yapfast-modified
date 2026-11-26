@@ -1,7 +1,12 @@
 //! Opens web pages in the browser people chose.
 
-/// Opens `page` in the default browser, and logs why if it couldn't.
+/// Opens `page` in the default browser if it is a safe web address, and logs
+/// why if it was refused or couldn't start.
 pub(super) fn open(page: &str) {
+    if !can_open(page) {
+        tracing::warn!("refused to open an unsafe link in the browser");
+        return;
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     match xdg_open(page) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -11,6 +16,10 @@ pub(super) fn open(page: &str) {
     if let Err(error) = webbrowser::open(page) {
         tracing::warn!(%error, "could not open a page in the browser");
     }
+}
+
+fn can_open(page: &str) -> bool {
+    yapfast_core::links::openable(page)
 }
 
 /// Starts `xdg-open` without `LD_LIBRARY_PATH`: the libraries Yapfast was
@@ -38,4 +47,22 @@ fn xdg_open(page: &str) -> std::io::Result<()> {
             Ok(_) => {}
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_open;
+
+    #[test]
+    fn allows_only_clean_http_links() {
+        assert!(can_open("https://discord.com/invite/abc"));
+        assert!(can_open("http://localhost:8080/callback"));
+        assert!(!can_open("file:///C:/Windows/System32/calc.exe"));
+        assert!(!can_open("ms-msdt:/id"));
+        assert!(!can_open("javascript:alert(1)"));
+        assert!(!can_open(r"\\attacker\share\payload.exe"));
+        assert!(!can_open("https://discord.com@evil.example/"));
+        assert!(!can_open("https://example.com/\u{202e}gnp.exe"));
+        assert!(!can_open("https://example.com/\n"));
+    }
 }

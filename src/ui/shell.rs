@@ -217,6 +217,7 @@ impl Shell {
     pub(super) fn open(self: &Rc<Self>) -> Option<YapfastWindow> {
         if let Some(window) = self.window() {
             let _ = window.show();
+            crate::icon::reapply_window_icon(&window);
             window.window().set_minimized(false);
             window.window().with_winit_window(|winit| {
                 winit.focus_window();
@@ -404,6 +405,7 @@ impl Adapter {
     /// The window closed: what only it used stops with it. The models stay, so
     /// the next window shows them without building them again.
     pub(super) fn detach(&mut self) {
+        crate::keybinds::pause(false);
         self.meter = None;
         #[cfg(feature = "discord")]
         {

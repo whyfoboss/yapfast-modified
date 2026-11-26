@@ -1,10 +1,10 @@
 # The tray
 
 Closing the window leaves Yapfast running in the system tray: the session, a call, notifications, ringing and sounds go on. The
-tray icon is Yapfast's logo in the selected theme's accent on Windows (Yap's
+tray icon is Yapfast's logo in the selected theme's accent and foreground on Windows (Yap's
 marigold on Linux), with a red dot cut into its
 corner while a mention or a DM waits unread, as Discord counts them. Clicking
-it opens the window. Its menu has Open Yapfast, Disconnect during a call, and
+it opens the window (reapplying the themed icons and keybind window target). Its menu has Open Yapfast, Disconnect during a call, and
 Quit.
 
 Settings → Advanced has "Close to tray", on unless turned off

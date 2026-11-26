@@ -281,7 +281,7 @@ struct CachedPreview {
     bytes: usize,
 }
 
-const PREVIEW_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const PREVIEW_CACHE_BYTES: usize = 5 * 1024 * 1024;
 
 impl Previews {
     fn image(&mut self, source: &Arc<Picture>, spoiler: bool) -> slint::Image {
@@ -324,6 +324,37 @@ impl Previews {
 
 thread_local! {
     static PREVIEWS: RefCell<Previews> = RefCell::default();
+}
+
+/// Evicts Slint image wrappers whose backing decoded `Picture` was already dropped,
+/// along with expired weak avatar/animation entries and excess table capacity.
+pub(super) fn prune_dead_previews() {
+    PREVIEWS.with_borrow_mut(|cache| {
+        cache
+            .images
+            .retain(|cached| cached.source.strong_count() > 0);
+        cache.bytes = cache.images.iter().map(|cached| cached.bytes).sum();
+        if cache.images.capacity() > cache.images.len().saturating_mul(2) + 32 {
+            cache.images.shrink_to_fit();
+        }
+    });
+    AVATAR_SOURCES.with_borrow_mut(|sources| {
+        sources.retain(|_, weak| weak.strong_count() > 0);
+        if sources.capacity() > sources.len().saturating_mul(2) + 64 {
+            sources.shrink_to_fit();
+        }
+    });
+    FRAMES.with_borrow_mut(|frames| {
+        frames.retain(|weak| weak.strong_count() > 0);
+        if frames.capacity() > frames.len().saturating_mul(2) + 32 {
+            frames.shrink_to_fit();
+        }
+    });
+}
+
+/// Returns `(entry_count, rgba_bytes)` currently retained in the UI preview cache.
+pub(super) fn preview_cache_stats() -> (usize, usize) {
+    PREVIEWS.with_borrow(|cache| (cache.images.len(), cache.bytes))
 }
 
 /// An animation's frames for Slint and how long each shows, in milliseconds;
@@ -687,18 +718,19 @@ fn gallery_cells(previews: &[Preview<'_>], covered: &dyn Fn(usize) -> bool) -> (
                 preview: Option<&Arc<Picture>>| {
         let description: SharedString =
             attachment.description.as_deref().unwrap_or_default().into();
+        let spoiler = attachment.spoiler && covered(index);
         // A video whose poster didn't come plays all the same.
         let Some(preview) = preview else {
             return ImageCell {
                 index: index as i32,
                 name: attachment.name.clone().into(),
                 loading: loading(attachment),
+                spoiler,
                 video: attachment.video,
                 description: description.clone(),
                 ..Default::default()
             };
         };
-        let spoiler = attachment.spoiler && covered(index);
         if spoiler {
             return ImageCell {
                 index: index as i32,

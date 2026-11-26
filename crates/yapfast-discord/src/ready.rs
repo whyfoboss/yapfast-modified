@@ -1471,6 +1471,20 @@ pub fn server(guild: &Value) -> Option<Server> {
     threads.sort_by_cached_key(|thread| std::cmp::Reverse(thread.id.parse::<u64>().unwrap_or(0)));
     threads.dedup_by(|later, earlier| later.id == earlier.id);
     server.threads = threads;
+    server.text_channels.shrink_to_fit();
+    server.voice_channels.shrink_to_fit();
+    server.threads.shrink_to_fit();
+    Arc::make_mut(&mut server.categories).shrink_to_fit();
+    Arc::make_mut(&mut server.roles).shrink_to_fit();
+    Arc::make_mut(&mut server.role_names).shrink_to_fit();
+    Arc::make_mut(&mut server.role_colors).shrink_to_fit();
+    Arc::make_mut(&mut server.role_icons).shrink_to_fit();
+    Arc::make_mut(&mut server.role_positions).shrink_to_fit();
+    Arc::make_mut(&mut server.mentionable_roles).shrink_to_fit();
+    Arc::make_mut(&mut server.managed_roles).shrink_to_fit();
+    Arc::make_mut(&mut server.emojis).shrink_to_fit();
+    Arc::make_mut(&mut server.stickers).shrink_to_fit();
+    Arc::make_mut(&mut server.events).shrink_to_fit();
     Some(server)
 }
 

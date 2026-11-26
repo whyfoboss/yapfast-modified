@@ -148,6 +148,7 @@ pub(super) fn found(
         poll: message.poll.as_ref().map(|poll| chat_poll(poll, false)),
         notice: chat_notice(message),
         used: used_command(discord, guild, server, message),
+        report_target: message.starter_target.clone(),
         ..Default::default()
     }
 }

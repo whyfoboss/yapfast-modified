@@ -1037,3 +1037,331 @@ export component PollDialog inherits Rectangle {
         }
     }
 }
+
+/// A selectable category/reason option inside Discord's V3 message report flow.
+export struct ReportOptionRow {
+    id: int,
+    label: string,
+}
+
+/// An optional or required checkbox item rendered on a report node.
+export struct ReportCheckRow {
+    element: string,
+    value: string,
+    label: string,
+    checked: bool,
+}
+
+/// Modal dialog for reporting a specific Discord message through Discord's V3
+/// in-app reporting flow. Sending happens only when clicking Submit Report.
+export component ReportDialog inherits Rectangle {
+    in property <string> report-author;
+    in property <string> report-time;
+    in property <string> report-preview;
+    in property <string> report-attachments;
+    in property <string> report-message-link;
+    in property <bool> report-loading;
+    in property <bool> report-submitting;
+    in property <bool> report-submitted;
+    in property <string> report-id;
+    in property <string> report-blocked;
+    in property <string> report-menu-error;
+    in property <string> report-header;
+    in property <string> report-subheader;
+    in property <string> report-info;
+    in property <string> report-summary;
+    in property <[ReportOptionRow]> report-options;
+    in property <[ReportCheckRow]> report-checks;
+    in property <bool> report-can-back;
+    in property <bool> report-can-submit;
+    in property <bool> report-can-submit-now;
+    in property <string> report-submit-error;
+    in property <bool> report-timeout-unknown;
+    in property <int> report-focus-tick;
+    changed report-focus-tick => { dialog-focus.focus(); }
+    callback report-choose(int);
+    callback report-toggle-option(string, string);
+    callback report-back;
+    callback report-retry-menu;
+    callback submit-report;
+    callback close-report;
+    callback copy-report-link(string);
+    in property <float> motion: 1;
+    background: rgba(0, 0, 0, 0.6 * root.motion);
+    TouchArea {
+        clicked => {
+            if !root.report-submitting && (!root.report-can-back || root.report-submitted || root.report-blocked != "" || root.report-menu-error != "") {
+                root.close-report();
+            }
+        }
+    }
+    Rectangle {
+        opacity: Popup.opacity(root.motion); transform-scale: Popup.scale(root.motion);
+        width: min(460px, root.width - 32px);
+        height: min(600px, max(280px, root.height - 48px));
+        background: Theme.raised; border-color: Theme.edge; border-width: 1px; border-radius: 12px;
+        drop-shadow-blur: 32px; drop-shadow-color: #00000066; drop-shadow-offset-y: 12px;
+        accessible-role: groupbox;
+        accessible-label: "Report Message";
+        TouchArea { }
+        dialog-focus := FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    if !root.report-submitting { root.close-report(); }
+                    return accept;
+                }
+                return reject;
+            }
+            VerticalLayout {
+                padding: 20px; spacing: 12px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "Report Message"; color: Theme.text; font-size: 18px; font-weight: 700;
+                        vertical-alignment: center; horizontal-stretch: 1;
+                    }
+                    Middle {
+                        IconButton {
+                            icon: @image-url("icons/x.svg"); label: "Close"; size: 28px; glyph: 18px;
+                            enabled: !root.report-submitting;
+                            clicked => { if !root.report-submitting { root.close-report(); } }
+                        }
+                    }
+                }
+                // Safe target message snapshot: author, timestamp, spoiler-redacted snippet, and attachment count.
+                Rectangle {
+                    border-radius: 8px; background: Theme.sunken; border-width: 1px; border-color: Theme.line;
+                    VerticalLayout {
+                        padding: 12px; spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: root.report-author != "" ? root.report-author : "Message";
+                                color: Theme.text; font-size: 14px; font-weight: 700; overflow: elide; horizontal-stretch: 1;
+                            }
+                            if root.report-time != "": Text {
+                                text: root.report-time; color: Theme.muted; font-size: 12px; vertical-alignment: center;
+                            }
+                        }
+                        if root.report-preview != "": Text {
+                            text: root.report-preview; color: Theme.secondary; font-size: 14px;
+                            wrap: word-wrap; max-lines: 3; overflow: elide;
+                        }
+                        if root.report-preview == "" && root.report-attachments == "": Text {
+                            text: "(no text)"; color: Theme.muted; font-size: 13px; font-italic: true;
+                        }
+                        if root.report-attachments != "": Text {
+                            text: root.report-attachments; color: Theme.muted; font-size: 12px; overflow: elide;
+                        }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 10px; alignment: start;
+                        if root.report-loading: VerticalLayout {
+                            padding-top: 24px; padding-bottom: 24px; spacing: 6px;
+                            Text {
+                                text: "Loading report options…"; color: Theme.secondary; font-size: 15px;
+                                horizontal-alignment: center; wrap: word-wrap;
+                            }
+                        }
+                        if !root.report-loading && root.report-blocked != "": VerticalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                border-radius: 8px; background: Theme.danger.with-alpha(0.14); border-width: 1px; border-color: Theme.danger.with-alpha(0.45);
+                                VerticalLayout {
+                                    padding: 12px; spacing: 6px;
+                                    Text { text: root.report-blocked; color: Theme.danger-text; font-size: 14px; wrap: word-wrap; }
+                                }
+                            }
+                            if root.report-message-link != "": HorizontalLayout {
+                                alignment: start;
+                                ActionButton {
+                                    text: "Copy Message Link"; icon: @image-url("icons/copy.svg"); small: true;
+                                    clicked => { root.copy-report-link(root.report-message-link); }
+                                }
+                            }
+                        }
+                        if !root.report-loading && root.report-blocked == "" && root.report-menu-error != "": VerticalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                border-radius: 8px; background: Theme.danger.with-alpha(0.14); border-width: 1px; border-color: Theme.danger.with-alpha(0.45);
+                                VerticalLayout {
+                                    padding: 12px; spacing: 6px;
+                                    Text { text: "Couldn't load report options"; color: Theme.text; font-size: 14px; font-weight: 700; }
+                                    Text { text: root.report-menu-error; color: Theme.danger-text; font-size: 14px; wrap: word-wrap; }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px; alignment: start;
+                                ActionButton {
+                                    text: "Try Again"; primary: true; small: true;
+                                    clicked => { root.report-retry-menu(); }
+                                }
+                                if root.report-message-link != "": ActionButton {
+                                    text: "Copy Message Link"; icon: @image-url("icons/copy.svg"); small: true;
+                                    clicked => { root.copy-report-link(root.report-message-link); }
+                                }
+                            }
+                        }
+                        if !root.report-loading && root.report-blocked == "" && root.report-menu-error == "" && root.report-submitted: VerticalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                border-radius: 8px; background: Theme.live.with-alpha(0.14); border-width: 1px; border-color: Theme.live.with-alpha(0.45);
+                                VerticalLayout {
+                                    padding: 14px; spacing: 6px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Middle { Image { source: @image-url("icons/check.svg"); width: 18px; height: 18px; colorize: Theme.live; } }
+                                        Text { text: "Report submitted"; color: Theme.text; font-size: 16px; font-weight: 700; vertical-alignment: center; horizontal-stretch: 1; }
+                                    }
+                                    Text {
+                                        text: "Thank you for helping keep Discord safe. Sending a report does not delete the message or block its author.";
+                                        color: Theme.secondary; font-size: 14px; wrap: word-wrap;
+                                    }
+                                    if root.report-summary != "": Text {
+                                        text: "Category: " + root.report-summary;
+                                        color: Theme.secondary; font-size: 13px; wrap: word-wrap;
+                                    }
+                                    if root.report-id != "": Text {
+                                        text: "Report ID: " + root.report-id;
+                                        color: Theme.muted; font-size: 12px; wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                        if !root.report-loading && root.report-blocked == "" && root.report-menu-error == "" && !root.report-submitted: VerticalLayout {
+                            spacing: 10px;
+                            if root.report-header != "": Text {
+                                text: root.report-header; color: Theme.text; font-size: 16px; font-weight: 700; wrap: word-wrap;
+                            }
+                            if root.report-subheader != "": Text {
+                                text: root.report-subheader; color: Theme.secondary; font-size: 14px; wrap: word-wrap;
+                            }
+                            if root.report-summary != "": Text {
+                                text: "Selected: " + root.report-summary; color: Theme.accent; font-size: 13px; font-weight: 600; wrap: word-wrap;
+                            }
+                            for option in root.report-options: Rectangle {
+                                min-height: max(42px, option-label.preferred-height + 16px);
+                                border-radius: 8px;
+                                background: option-touch.has-hover && !root.report-submitting ? Theme.hover : Theme.sunken;
+                                border-width: option-focus.has-focus ? 2px : 1px;
+                                border-color: option-focus.has-focus ? Theme.accent : Theme.line;
+                                opacity: root.report-submitting ? 0.6 : 1;
+                                accessible-role: button;
+                                accessible-label: option.label;
+                                accessible-enabled: !root.report-submitting;
+                                accessible-action-default => { if !root.report-submitting { root.report-choose(option.id); } }
+                                HorizontalLayout {
+                                    padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 8px;
+                                    option-label := Text {
+                                        text: option.label; color: Theme.text; font-size: 14px; font-weight: 500;
+                                        wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1;
+                                    }
+                                    Middle {
+                                        Image { source: @image-url("icons/chevron-right.svg"); width: 16px; height: 16px; colorize: Theme.muted; }
+                                    }
+                                }
+                                option-focus := FocusScope {
+                                    enabled: !root.report-submitting;
+                                    key-pressed(event) => {
+                                        if !root.report-submitting && (event.text == "\n" || event.text == " ") {
+                                            root.report-choose(option.id); return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    option-touch := TouchArea {
+                                        enabled: !root.report-submitting;
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => { root.report-choose(option.id); }
+                                    }
+                                }
+                            }
+                            for item in root.report-checks: Rectangle {
+                                min-height: max(38px, check-label.preferred-height + 14px);
+                                border-radius: 8px;
+                                background: check-touch.has-hover && !root.report-submitting ? Theme.hover : Theme.sunken;
+                                border-width: check-focus.has-focus ? 2px : 1px;
+                                border-color: check-focus.has-focus ? Theme.accent : Theme.line;
+                                accessible-role: checkbox;
+                                accessible-checked: item.checked;
+                                accessible-label: item.label;
+                                accessible-enabled: !root.report-submitting;
+                                accessible-action-default => { if !root.report-submitting { root.report-toggle-option(item.element, item.value); } }
+                                HorizontalLayout {
+                                    padding-left: 12px; padding-right: 12px; padding-top: 7px; padding-bottom: 7px; spacing: 10px;
+                                    Middle {
+                                        Rectangle {
+                                            width: 20px; height: 20px; border-radius: 5px;
+                                            background: item.checked ? Theme.accent : transparent;
+                                            border-width: item.checked ? 0px : 2px; border-color: Theme.faint;
+                                            if item.checked: Image { source: @image-url("icons/check.svg"); width: 14px; height: 14px; colorize: Theme.on-accent; }
+                                        }
+                                    }
+                                    check-label := Text {
+                                        text: item.label; color: Theme.text; font-size: 14px;
+                                        wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1;
+                                    }
+                                }
+                                check-focus := FocusScope {
+                                    enabled: !root.report-submitting;
+                                    key-pressed(event) => {
+                                        if !root.report-submitting && (event.text == "\n" || event.text == " ") {
+                                            root.report-toggle-option(item.element, item.value); return accept;
+                                        }
+                                        return reject;
+                                    }
+                                    check-touch := TouchArea {
+                                        enabled: !root.report-submitting;
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => { root.report-toggle-option(item.element, item.value); }
+                                    }
+                                }
+                            }
+                            if root.report-info != "": Text {
+                                text: root.report-info; color: Theme.muted; font-size: 13px; wrap: word-wrap;
+                            }
+                            if root.report-submit-error != "": Rectangle {
+                                border-radius: 8px;
+                                background: Theme.danger.with-alpha(0.14); border-width: 1px; border-color: Theme.danger.with-alpha(0.45);
+                                VerticalLayout {
+                                    padding: 10px; spacing: 4px;
+                                    if root.report-timeout-unknown: Text {
+                                        text: "Submission status unknown"; color: Theme.text; font-size: 14px; font-weight: 700;
+                                    }
+                                    Text {
+                                        text: root.report-submit-error; color: Theme.danger-text; font-size: 13px; wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    if root.report-can-back && !root.report-submitted && root.report-blocked == "" && root.report-menu-error == "": ActionButton {
+                        text: "Back"; icon: @image-url("icons/arrow-left.svg");
+                        enabled: !root.report-submitting;
+                        clicked => { root.report-back(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton {
+                        text: root.report-submitted || root.report-blocked != "" ? "Done" : "Cancel";
+                        ghost: !root.report-submitted && root.report-blocked == "";
+                        primary: root.report-submitted;
+                        enabled: !root.report-submitting;
+                        clicked => { if !root.report-submitting { root.close-report(); } }
+                    }
+                    if root.report-can-submit && !root.report-submitted && root.report-blocked == "" && root.report-menu-error == "": ActionButton {
+                        text: root.report-submitting ? "Submitting…" : root.report-timeout-unknown ? "Submit Again" : "Submit Report";
+                        danger: true;
+                        enabled: root.report-can-submit-now && !root.report-submitting;
+                        clicked => { root.submit-report(); }
+                    }
+                }
+            }
+        }
+    }
+}

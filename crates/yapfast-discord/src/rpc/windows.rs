@@ -20,6 +20,16 @@ use crate::{
     service::Snapshot,
 };
 
+fn pipe_options(first: bool) -> ServerOptions {
+    let mut options = ServerOptions::new();
+    // Each connected client keeps an instance while one more listens.
+    options
+        .first_pipe_instance(first)
+        .max_instances(MAX_CLIENTS + 1)
+        .reject_remote_clients(true);
+    options
+}
+
 /// Selects a free named pipe slot from 0 to 9 without interfering with
 /// existing servers (such as the official Discord client).
 fn select_pipe_slot(prefix: &str) -> Result<(String, NamedPipeServer)> {
@@ -28,11 +38,7 @@ fn select_pipe_slot(prefix: &str) -> Result<(String, NamedPipeServer)> {
         // first_pipe_instance(true) ensures that if another process (like official Discord)
         // has already created this pipe, Windows rejects the call with an error.
         // We do not hijack or replace it; we gracefully proceed to the next slot.
-        let server = match ServerOptions::new()
-            .first_pipe_instance(true)
-            .max_instances(MAX_CLIENTS)
-            .create(&pipe_name)
-        {
+        let server = match pipe_options(true).create(&pipe_name) {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -64,7 +70,7 @@ async fn serve_windows(
             connected_client = current_server.connect(), if clients.len() < MAX_CLIENTS => {
                 if connected_client.is_ok() {
                     // Client connected. Create next pipe instance to accept subsequent clients.
-                    let next_server = match ServerOptions::new().create(pipe_name) {
+                    let next_server = match pipe_options(false).create(pipe_name) {
                         Ok(s) => s,
                         Err(error) => {
                             tracing::warn!(%error, "could not create next named pipe instance");

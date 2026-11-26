@@ -26,7 +26,8 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
 - Plugins page: `PluginsSettings` (`ui/settings.slint:1540`) groups behavioral
   plugins and extensions: Better Animations, Read All Notifications Button,
   Role Colours Everywhere, Message Logger (with Clear Log), Show Hidden Channels,
-  and Don't Show When You're Typing.
+  Don't Show When You're Typing, and an **Experimental** section containing Fake
+  Deafen (`fake_deafen_plugin` in `Layout`, off by default).
 - Read All button: `ReadAllButton` (`ui/rail.slint:845`) is placed in `ServerRail`
   below the DM item and above the server list separator. Enabled when
   `read_all_notifications_button` is on. Dispatches `Action::ReadAllNotifications`
@@ -134,10 +135,12 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
   `GET /channels/{id}/messages/search` (`search.rs` module docs).
 - Core state: `Search` (`application.rs:254`) with `place`, `query`, `total`,
   `results: Vec<chat::SearchHit>`, `next`, `loading`, `error`;
-  `search_place` (`:1323`), `search_shown` (`:1332`), actions
+  `search_place` (`:1323`), `search_shown` (`:1332`), actions `SearchHere`,
   `SearchForward` (`:1520`) and `SearchSwitcher` (`:1527`).
 - UI: `FoundRow` (`ui/header.slint:9`), search box `HeaderSearch` (`:65`),
-  results `SearchPanel` (`:609`); message rows use the same `FoundRow`.
+  results `SearchPanel` (`:609`, including the "Search here" action that re-runs
+  the saved query and bindings in the current room/server); message rows use the
+  same `FoundRow`.
 - Fake: `testing/fake_discord.ts:110` documents per-channel and per-server
   search, 25 at a time, with content, `has`, `min_id`, `max_id`, `pinned`;
   `searchFilter` (`:1696`) implements it. Filters are Discord names only,
@@ -176,7 +179,9 @@ The UI crate is `crates/yapfast-ui`; it compiles `ui/yapfast.slint` from
   not moving people: no voice-person drag exists.
 - Participant rows: `PersonRow` struct (`ui/voice.slint:6`),
   `ParticipantGrid` (`:742`), `VoiceDock` (`:334`),
-  `CallControls` (`:989`), `IncomingCall` (`:1069`), `StreamPip` (`:581`).
+  `CallControls` (`:989`, including the Discord-only experimental Fake Deafen
+  toggle between Mute and Deafen when enabled in Plugins settings), `IncomingCall`
+  (`:1069`), `StreamPip` (`:581`).
   Voices also appear in the rail and in `ui/people.slint`.
 - Menus: `src/ui/menus.rs::menu` (`:78`), `voice_target` (`:518`),
   `move_rows` (`:524`), `choose` (`:810`); bindings

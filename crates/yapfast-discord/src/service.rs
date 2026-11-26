@@ -26,6 +26,7 @@ use crate::{
     profile::{self, Badge, Profile},
     profile_effect,
     ready::{self, PRIVATE, Server},
+    report,
     scheduled_event, search, server_settings,
     settings::{self, CustomStatus},
     soundboard,
@@ -153,6 +154,9 @@ pub struct Conversation {
     pub spam: bool,
     /// The other person in a DM; none in a group.
     pub person: Option<String>,
+    /// All other participants' user ids in a DM or group DM.
+    #[serde(default)]
+    pub recipients: Vec<String>,
     pub unread: bool,
     /// Unread messages, as every message in a DM counts as a mention.
     pub mentions: u64,
@@ -179,6 +183,15 @@ pub struct Conversation {
     /// A message request's latest message, as the requests list shows it.
     #[serde(default)]
     pub preview: Option<Preview>,
+}
+
+/// Pre-resolved user IDs bound by picking suggestions in the search box.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchBindings {
+    /// `(normalized_filter_text, user_id)` pairs for `from:` terms.
+    pub from: Vec<(String, String)>,
+    /// `(normalized_filter_text, user_id)` pairs for `mentions:` terms.
+    pub mentions: Vec<(String, String)>,
 }
 
 /// A message request's latest message, in short.
@@ -305,6 +318,9 @@ const INDEX_NOT_READY: u64 = 110000;
 pub struct Snapshot {
     #[serde(skip)]
     pub status: Status,
+    /// Bumped whenever persisted fields saved in `discord-account.json` change.
+    #[serde(skip)]
+    pub persistent_version: u64,
     pub user_id: Option<String>,
     pub account: Option<Account>,
     /// Each server and this account's marks in it, each shared between
@@ -1342,15 +1358,29 @@ impl Discord {
 
     /// A page of the messages a search finds, the newest first, from the
     /// `offset`th: in the DM `channel` with [`PRIVATE`], or across a server.
-    /// `text` is what the search box took, filters and all; see
-    /// [`search::Query`]. Discord indexes a DM or a server the first time
-    /// it's searched, and asks to be asked again until it has.
+    /// Look up messages in a server or DM (`text` with filters); see [`Self::search_with_bindings`].
     pub async fn search(
         &self,
         guild: &str,
         channel: Option<&str>,
         text: &str,
         offset: u32,
+    ) -> Result<Found> {
+        self.search_with_bindings(guild, channel, text, offset, &SearchBindings::default())
+            .await
+    }
+
+    /// `text` is what the search box took, filters and all; see
+    /// [`search::Query`]. `bindings` resolves exact user IDs picked from suggestions.
+    /// Discord indexes a DM or a server the first time it's searched, and asks
+    /// to be asked again until it has.
+    pub async fn search_with_bindings(
+        &self,
+        guild: &str,
+        channel: Option<&str>,
+        text: &str,
+        offset: u32,
+        bindings: &SearchBindings,
     ) -> Result<Found> {
         let query = search::Query::parse(text).map_err(|why| anyhow!(why))?;
         if query.is_empty() {
@@ -1372,11 +1402,34 @@ impl Discord {
                 .ok_or_else(|| anyhow!("This server has no channel called #{name}."))?;
             params.push(("channel_id", id));
         }
-        for name in &query.from {
-            params.push(("author_id", self.person_named(guild, name).await?));
+        let take_bound = |bindings: &mut Vec<(String, String)>, term: &search::PersonTerm| {
+            let needle = term.text.trim().trim_start_matches('@').to_lowercase();
+            bindings
+                .iter()
+                .position(|(tok, uid)| {
+                    !uid.is_empty() && tok.trim().trim_start_matches('@').to_lowercase() == needle
+                })
+                .map(|pos| bindings.remove(pos).1)
+        };
+        let mut from_bindings = bindings.from.clone();
+        for term in &query.from {
+            let id = if let Some(bound) = take_bound(&mut from_bindings, term) {
+                bound
+            } else {
+                self.person_named(guild, (!channel.is_empty()).then_some(channel), term)
+                    .await?
+            };
+            params.push(("author_id", id));
         }
-        for name in &query.mentions {
-            params.push(("mentions", self.person_named(guild, name).await?));
+        let mut mention_bindings = bindings.mentions.clone();
+        for term in &query.mentions {
+            let id = if let Some(bound) = take_bound(&mut mention_bindings, term) {
+                bound
+            } else {
+                self.person_named(guild, (!channel.is_empty()).then_some(channel), term)
+                    .await?
+            };
+            params.push(("mentions", id));
         }
         let mut waited = Duration::ZERO;
         loop {
@@ -1426,29 +1479,181 @@ impl Discord {
             .map(|channel| channel.id.clone())
     }
 
-    /// The id of someone a search's `from:` or `mentions:` names: in a
-    /// server, the member Discord finds by it, as its search box asks; in
-    /// DMs, someone Yapfast knows by it. One called exactly that comes first.
-    async fn person_named(&self, guild: &str, name: &str) -> Result<String> {
+    /// The id of someone a search's `from:` or `mentions:` names:
+    /// exact `@username` takes priority; if a display name matches multiple
+    /// accounts and no unique username was given, refuses to guess and names
+    /// the accounts with `@username`.
+    async fn person_named(
+        &self,
+        guild: &str,
+        channel: Option<&str>,
+        term: &search::PersonTerm,
+    ) -> Result<String> {
+        let name = term.text.trim();
         if name.chars().all(|c| c.is_ascii_digit()) && name.len() >= 17 {
             return Ok(name.to_string());
         }
-        let found = match server(guild) {
-            Some(guild) => self.search_members(guild, name).await?,
-            None => self.read_names().find_users(name),
+        let mut candidates: Vec<String> = Vec::new();
+        let mut push_unique = |id: String| {
+            if !id.is_empty() && !candidates.contains(&id) {
+                candidates.push(id);
+            }
         };
-        let called = |id: &String| {
-            [self.name(guild, id), self.username(id)]
+        let in_server = server(guild);
+        match in_server {
+            Some(guild_id) => {
+                if let Ok(found) = self.search_members(guild_id, name).await {
+                    for id in found {
+                        push_unique(id);
+                    }
+                }
+                for id in self.read_names().search_people(Some(guild_id), name) {
+                    push_unique(id);
+                }
+            }
+            None => {
+                let scope_people = {
+                    let snapshot = self.snapshots.borrow();
+                    let mut ids = Vec::new();
+                    if let Some(me) = &snapshot.user_id {
+                        ids.push(me.clone());
+                    }
+                    if let Some(ch) = channel
+                        && let Some(conv) = snapshot.conversations.iter().find(|c| c.id == ch)
+                    {
+                        ids.extend(conv.recipients.iter().cloned());
+                    }
+                    ids
+                };
+                for id in scope_people {
+                    push_unique(id);
+                }
+                for id in self.read_names().search_people(None, name) {
+                    push_unique(id);
+                }
+            }
+        }
+
+        let describe = |id: &str| -> String {
+            let display = self.name(guild, id);
+            let uname = self.username(id);
+            match (display, uname) {
+                (Some(d), Some(u)) if !d.eq_ignore_ascii_case(&u) => format!("{d} (@{u})"),
+                (_, Some(u)) => format!("@{u}"),
+                (Some(d), None) => d,
+                (None, None) => id.to_owned(),
+            }
+        };
+        let ambiguity_error = |ids: &[String]| -> anyhow::Error {
+            let list: Vec<String> = ids.iter().take(5).map(|id| describe(id)).collect();
+            anyhow!(
+                "Multiple accounts match \"{name}\": {}. Choose one from suggestions or specify @username.",
+                list.join(", ")
+            )
+        };
+
+        let needle_lower = name.to_lowercase();
+        if term.explicit_username {
+            let exact_user: Vec<String> = candidates
+                .iter()
+                .filter(|id| {
+                    self.username(id)
+                        .is_some_and(|u| u.eq_ignore_ascii_case(name))
+                })
+                .cloned()
+                .collect();
+            if exact_user.len() == 1 {
+                return Ok(exact_user.into_iter().next().unwrap());
+            }
+            if exact_user.len() > 1 {
+                return Err(ambiguity_error(&exact_user));
+            }
+            let pref_user: Vec<String> = candidates
+                .iter()
+                .filter(|id| {
+                    self.username(id)
+                        .is_some_and(|u| u.to_lowercase().starts_with(&needle_lower))
+                })
+                .cloned()
+                .collect();
+            if pref_user.len() == 1 {
+                return Ok(pref_user.into_iter().next().unwrap());
+            }
+            if pref_user.len() > 1 {
+                return Err(ambiguity_error(&pref_user));
+            }
+            bail!("Yapfast can't find anyone with @{name} here.");
+        }
+
+        // Exact `@username` without `@` takes precedence when unique.
+        let exact_user: Vec<String> = candidates
+            .iter()
+            .filter(|id| {
+                self.username(id)
+                    .is_some_and(|u| u.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+            .collect();
+        if exact_user.len() == 1 {
+            return Ok(exact_user.into_iter().next().unwrap());
+        }
+        if exact_user.len() > 1 {
+            return Err(ambiguity_error(&exact_user));
+        }
+
+        // Exact display name or server nickname.
+        let names = self.read_names();
+        let exact_name: Vec<String> = candidates
+            .iter()
+            .filter(|id| {
+                self.name(guild, id)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                    || names
+                        .user_name(id)
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+            .collect();
+        if exact_name.len() == 1 {
+            return Ok(exact_name.into_iter().next().unwrap());
+        }
+        if exact_name.len() > 1 {
+            return Err(ambiguity_error(&exact_name));
+        }
+
+        // Partial / prefix fallback.
+        let matches: Vec<String> = candidates
+            .iter()
+            .filter(|id| {
+                [
+                    self.name(guild, id),
+                    names.user_name(id).map(str::to_owned),
+                    self.username(id),
+                ]
                 .into_iter()
                 .flatten()
-                .any(|known| known.eq_ignore_ascii_case(name))
-        };
-        found
-            .iter()
-            .find(|id| called(id))
-            .or(found.first())
+                .any(|known| {
+                    let lower = known.to_lowercase();
+                    lower.starts_with(&needle_lower)
+                        || lower
+                            .split_whitespace()
+                            .skip(1)
+                            .any(|w| w.starts_with(&needle_lower))
+                })
+            })
             .cloned()
-            .ok_or_else(|| anyhow!("Yapfast can't find anyone called {name} here."))
+            .collect();
+        if matches.len() == 1 {
+            return Ok(matches.into_iter().next().unwrap());
+        }
+        if matches.len() > 1 {
+            return Err(ambiguity_error(&matches));
+        }
+        if candidates.len() == 1 && in_server.is_some() {
+            // Gateway OP 8 returned a single authoritative match for the server query.
+            return Ok(candidates.into_iter().next().unwrap());
+        }
+        bail!("Yapfast can't find anyone called {name} here.")
     }
 
     /// Makes a group DM with `users`; returns its channel id. The DM list
@@ -1626,6 +1831,24 @@ impl Discord {
     /// Pins a message, or unpins it. The gateway's MESSAGE_UPDATE says so too.
     pub async fn pin(&self, channel: &str, id: &str, pinned: bool) -> Result<()> {
         self.api.pin(channel, id, pinned).await
+    }
+
+    /// Overrides the timeout for in-app message reporting requests (used by tests).
+    pub fn set_report_timeout(&self, timeout: Duration) {
+        self.api.set_report_timeout(timeout);
+    }
+
+    /// Fetches Discord's V3 in-app message report menu tree.
+    pub async fn message_report_menu(&self) -> Result<report::ReportMenu> {
+        self.api.message_report_menu().await
+    }
+
+    /// Submits a completed V3 in-app message report for a bound channel and message id.
+    pub async fn submit_message_report(
+        &self,
+        submission: &report::ReportSubmission,
+    ) -> Result<Option<String>> {
+        self.api.submit_message_report(submission).await
     }
 
     /// A user's profile, in a server or with [`PRIVATE`] outside any. One

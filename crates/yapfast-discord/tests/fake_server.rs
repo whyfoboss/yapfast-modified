@@ -14,7 +14,7 @@ use yapfast_discord::{
     ready::{Access, Deletes, PRIVATE},
     remote_auth::{self, Step},
     rtp::Codec,
-    service::{Discord, Live, Snapshot, Status},
+    service::{Discord, Live, SearchBindings, Snapshot, Status},
     settings::CustomStatus,
     stream,
     stream_connection::{Frame, Link, SEND_CODEC, Sound, StreamReceiver, StreamSender},
@@ -1076,6 +1076,14 @@ async fn plays_through_rpc(discord: &Discord, server: &str, directory: &std::pat
         .await;
         assert_eq!(receive(&mut stream).await["evt"], "READY");
         stream
+    }
+    #[cfg(windows)]
+    {
+        let mut clients = Vec::new();
+        for _ in 0..16 {
+            clients.push(connect(directory).await);
+        }
+        drop(clients);
     }
     let mut first = connect(directory).await;
     // PING is an opaque IPC payload and must be echoed as PONG.
@@ -3211,6 +3219,120 @@ async fn opens_dms_and_searches_pins() {
     assert_eq!(said[0], "The welcome has the plan");
     assert!(said[1].starts_with("Welcome to **Yapfast**"));
     assert_eq!(discord.name(&guild, &bob).as_deref(), Some("Bob"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn group_dm_search_scopes_participants_and_resolves_duplicate_names() {
+    let Fixture {
+        _fake,
+        discord,
+        server,
+        ..
+    } = Fixture::start("group_dm_search_scopes_participants_and_resolves_duplicate_names").await;
+    let created: serde_json::Value =
+        serde_json::from_str(&control(server, "POST", "/_control/duplicate-group-dm", "")).unwrap();
+    let channel_id = created["channel_id"].as_str().unwrap().to_owned();
+    let alex_old_id = created["alex_old_id"].as_str().unwrap().to_owned();
+    let alex_new_id = created["alex_new_id"].as_str().unwrap().to_owned();
+    let ex_author_id = created["ex_author_id"].as_str().unwrap().to_owned();
+    let ext_friend_id = created["ext_friend_id"].as_str().unwrap().to_owned();
+
+    let snapshot = snapshot_where(&discord, |snapshot| {
+        snapshot
+            .conversations
+            .iter()
+            .any(|conv| conv.id == channel_id && conv.recipients.len() == 2)
+            && snapshot.friends.iter().any(|id| id == &ext_friend_id)
+    })
+    .await;
+    let conv = snapshot
+        .conversations
+        .iter()
+        .find(|conv| conv.id == channel_id)
+        .unwrap();
+    assert!(conv.recipients.contains(&alex_old_id));
+    assert!(conv.recipients.contains(&alex_new_id));
+    assert!(!conv.recipients.contains(&ex_author_id));
+    assert!(!conv.recipients.contains(&ext_friend_id));
+
+    let history = discord
+        .history(PRIVATE, &channel_id, Span::Latest)
+        .await
+        .unwrap();
+    assert!(history.messages.len() >= 5);
+
+    // Exact @username resolves unambiguously without dropdown bindings.
+    let found_new = discord
+        .search_with_bindings(
+            PRIVATE,
+            Some(&channel_id),
+            "from:alex.new deploy",
+            0,
+            &SearchBindings::default(),
+        )
+        .await
+        .unwrap();
+    let said_new: Vec<_> = found_new.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(said_new, ["Deploy check from new alex"]);
+
+    let found_old = discord
+        .search_with_bindings(
+            PRIVATE,
+            Some(&channel_id),
+            "from:@alex.old deploy",
+            0,
+            &SearchBindings::default(),
+        )
+        .await
+        .unwrap();
+    let said_old: Vec<_> = found_old.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(said_old, ["Deploy check from old alex"]);
+
+    // Bound user_id resolves duplicate display name "Alex" cleanly.
+    let bind_old = SearchBindings {
+        from: vec![("alex".to_owned(), alex_old_id.clone())],
+        mentions: Vec::new(),
+    };
+    let bound_from = discord
+        .search_with_bindings(PRIVATE, Some(&channel_id), "from:Alex deploy", 0, &bind_old)
+        .await
+        .unwrap();
+    let said_bound_from: Vec<_> = bound_from
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(said_bound_from, ["Deploy check from old alex"]);
+
+    let bind_mention_new = SearchBindings {
+        from: Vec::new(),
+        mentions: vec![("alex".to_owned(), alex_new_id.clone())],
+    };
+    let bound_mentions = discord
+        .search_with_bindings(
+            PRIVATE,
+            Some(&channel_id),
+            "mentions:Alex",
+            0,
+            &bind_mention_new,
+        )
+        .await
+        .unwrap();
+    assert_eq!(bound_mentions.messages.len(), 1);
+    assert!(bound_mentions.messages[0].content.contains("about deploy check"));
+
+    // Unbound ambiguous display name refuses to guess and names @username choices.
+    let Err(err) = discord
+        .search(PRIVATE, Some(&channel_id), "from:Alex deploy", 0)
+        .await
+    else {
+        panic!("expected ambiguity error for unbound duplicate display name");
+    };
+    let err = err.to_string();
+    assert!(err.contains("Multiple accounts match"), "got: {err}");
+    assert!(err.contains("@alex.old"), "got: {err}");
+    assert!(err.contains("@alex.new"), "got: {err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -7932,4 +8054,270 @@ fn sending<'a>(nonce: &'a str, reply: Option<&'a str>) -> yapfast_discord::api::
         ping_reply: true,
         silent: false,
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn report_message_menu_and_submit_succeeds() {
+    use std::collections::BTreeMap;
+    use yapfast_discord::report::ReportSubmission;
+
+    let fixture = Fixture::start("report_message_menu_and_submit_succeeds").await;
+    let discord = &fixture.discord;
+    let server = fixture.server;
+    let guild = fixture.guild.as_str();
+    let general = fixture.general.as_str();
+
+    let menu = discord.message_report_menu().await.unwrap();
+    assert_eq!(menu.root_node_id, 1);
+    assert_eq!(menu.postback_path, "/reporting/message");
+    assert!(!menu.nodes[&1].children.is_empty());
+
+    // Opening/fetching the menu alone must not submit a report.
+    let before_submit: serde_json::Value =
+        serde_json::from_str(&control(server, "GET", "/_control/reports", "")).unwrap();
+    assert_eq!(before_submit["attempts"], 0);
+    assert!(before_submit["reports"].as_array().unwrap().is_empty());
+
+    // Pick a message by Bob in #general.
+    let history = discord.history(guild, general, Span::Latest).await.unwrap();
+    let bob_msg = history
+        .messages
+        .iter()
+        .find(|m| m.author_id == fixture.bob)
+        .expect("Bob has a message in #general");
+
+    let mut elements = BTreeMap::new();
+    elements.insert(
+        "additional_context".to_owned(),
+        vec!["repeated".to_owned()],
+    );
+    let submission = ReportSubmission {
+        version: menu.version.clone(),
+        variant: menu.variant.clone(),
+        language: menu.language.clone(),
+        name: menu.name.clone(),
+        postback_path: menu.postback_path.clone(),
+        breadcrumbs: vec![1, 20],
+        elements,
+        channel_id: general.to_owned(),
+        message_id: bob_msg.id.clone(),
+    };
+    let report_id = discord.submit_message_report(&submission).await.unwrap();
+    assert!(report_id.is_some());
+
+    // Also verify submitting against a side thread uses the thread's channel id.
+    let thread_id: String =
+        serde_json::from_str(&control(server, "POST", "/_control/thread-start", "")).unwrap();
+    let thread_history = discord
+        .history(guild, &thread_id, Span::Latest)
+        .await
+        .unwrap();
+    let thread_msg = thread_history
+        .messages
+        .iter()
+        .find(|m| m.author_id == fixture.bob)
+        .expect("Bob posted in the started thread");
+    let thread_submission = ReportSubmission {
+        version: menu.version.clone(),
+        variant: menu.variant.clone(),
+        language: menu.language.clone(),
+        name: menu.name.clone(),
+        postback_path: menu.postback_path.clone(),
+        breadcrumbs: vec![1, 10, 101],
+        elements: BTreeMap::new(),
+        channel_id: thread_id.clone(),
+        message_id: thread_msg.id.clone(),
+    };
+    let thread_report_id = discord
+        .submit_message_report(&thread_submission)
+        .await
+        .unwrap();
+    assert!(thread_report_id.is_some());
+
+    let recorded: serde_json::Value =
+        serde_json::from_str(&control(server, "GET", "/_control/reports", "")).unwrap();
+    let reports = recorded["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0]["channel_id"], general);
+    assert_eq!(reports[0]["message_id"], bob_msg.id);
+    assert_eq!(reports[0]["breadcrumbs"], serde_json::json!([1, 20]));
+    assert_eq!(
+        reports[0]["elements"],
+        serde_json::json!({"additional_context": ["repeated"]})
+    );
+    assert_eq!(reports[1]["channel_id"], thread_id);
+    assert_eq!(reports[1]["message_id"], thread_msg.id);
+    assert_eq!(reports[1]["breadcrumbs"], serde_json::json!([1, 10, 101]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "starts testing/fake_discord.ts with bun; run scripts/test-fake-discord"]
+async fn report_message_errors_and_timeout() {
+    use std::collections::BTreeMap;
+    use yapfast_discord::{
+        api::{Refused, code},
+        report::{ReportSubmission, ReportTimeout},
+    };
+
+    let fixture = Fixture::start("report_message_errors_and_timeout").await;
+    let discord = &fixture.discord;
+    let server = fixture.server;
+    let guild = fixture.guild.as_str();
+    let general = fixture.general.as_str();
+
+    let history = discord.history(guild, general, Span::Latest).await.unwrap();
+    let bob_msg = history
+        .messages
+        .iter()
+        .find(|m| m.author_id == fixture.bob)
+        .expect("Bob message");
+
+    let base_submission = || ReportSubmission {
+        version: "1.0".into(),
+        variant: "1".into(),
+        language: "en".into(),
+        name: "message".into(),
+        postback_path: "/reporting/message".into(),
+        breadcrumbs: vec![1, 10, 101],
+        elements: BTreeMap::new(),
+        channel_id: general.to_owned(),
+        message_id: bob_msg.id.clone(),
+    };
+
+    // 403 Missing Access.
+    post_control(
+        server,
+        "/_control/report-config",
+        r#"{"submit_status":403,"submit_code":50001,"submit_message":"Missing Access"}"#,
+    );
+    let err = discord
+        .submit_message_report(&base_submission())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<Refused>().map(|r| r.0.as_u16()),
+        Some(403)
+    );
+    assert_eq!(code(&err), Some(50001));
+
+    // 404 Unknown Message (e.g. deleted before submit).
+    post_control(server, "/_control/reports/clear", "");
+    let mut missing = base_submission();
+    missing.message_id = "1499999999999999999".to_owned();
+    let err = discord.submit_message_report(&missing).await.unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<Refused>().map(|r| r.0.as_u16()),
+        Some(404)
+    );
+    assert_eq!(code(&err), Some(10008));
+
+    // 429 Rate limit must NOT silently retry POST.
+    post_control(server, "/_control/reports/clear", "");
+    post_control(
+        server,
+        "/_control/report-config",
+        r#"{"submit_status":429,"retry_after":0.05}"#,
+    );
+    let err = discord
+        .submit_message_report(&base_submission())
+        .await
+        .unwrap_err();
+    assert!(
+        err.downcast_ref::<Refused>()
+            .is_some_and(Refused::rate_limited)
+    );
+    let recorded: serde_json::Value =
+        serde_json::from_str(&control(server, "GET", "/_control/reports", "")).unwrap();
+    assert_eq!(recorded["attempts"], 1, "POST report must not auto-retry on 429");
+
+    // Empty menu is rejected as unusable.
+    post_control(server, "/_control/report-config", r#"{"menu_empty":true}"#);
+    assert!(discord.message_report_menu().await.is_err());
+
+    // Slow submit past report timeout surfaces ReportTimeout (unknown outcome).
+    post_control(server, "/_control/reports/clear", "");
+    post_control(
+        server,
+        "/_control/report-config",
+        r#"{"submit_delay_ms":600}"#,
+    );
+    discord.set_report_timeout(Duration::from_millis(120));
+    let err = discord
+        .submit_message_report(&base_submission())
+        .await
+        .unwrap_err();
+    assert!(
+        err.downcast_ref::<ReportTimeout>().is_some(),
+        "expected ReportTimeout, got: {err:#}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs testing/fake_discord.ts; run scripts/test-fake-discord"]
+async fn report_message_thread_starter_targets_parent_message() {
+    use std::collections::BTreeMap;
+    use yapfast_discord::report::ReportSubmission;
+
+    let fixture = Fixture::start("report_message_thread_starter_targets_parent_message").await;
+    let discord = &fixture.discord;
+    let server = fixture.server;
+    let guild = fixture.guild.as_str();
+    let general = fixture.general.as_str();
+
+    let snapshot = snapshot_where(discord, |s| !s.servers.is_empty()).await;
+    let plans = snapshot
+        .servers
+        .iter()
+        .flat_map(|s| s.server.threads.iter())
+        .find(|t| t.name == "Plans")
+        .expect("Plans thread seeded from welcome")
+        .id
+        .clone();
+
+    let pinned = discord.pins(guild, general).await.unwrap();
+    let welcome = pinned
+        .iter()
+        .find(|m| m.content.starts_with("Welcome to **Yapfast**"))
+        .expect("welcome message in #general pins");
+
+    let plans_history = discord.history(guild, &plans, Span::Latest).await.unwrap();
+    let starter = plans_history
+        .messages
+        .first()
+        .expect("thread starter message in Plans");
+    assert_eq!(starter.channel_id, plans);
+    let (target_channel, target_message) = starter
+        .starter_target
+        .as_deref()
+        .expect("type 21 starter_target must preserve parent channel and message");
+    assert_eq!(target_channel, general);
+    assert_eq!(target_message, &welcome.id);
+    assert_ne!(target_message, &starter.id);
+
+    post_control(server, "/_control/reports/clear", "");
+    let submission = ReportSubmission {
+        version: "1.0".into(),
+        variant: "1".into(),
+        language: "en".into(),
+        name: "message".into(),
+        postback_path: "/reporting/message".into(),
+        breadcrumbs: vec![1, 10, 101],
+        elements: BTreeMap::new(),
+        channel_id: target_channel.clone(),
+        message_id: target_message.clone(),
+    };
+    let report_id = discord
+        .submit_message_report(&submission)
+        .await
+        .unwrap()
+        .expect("report_id");
+    assert!(!report_id.is_empty());
+
+    let recorded: serde_json::Value =
+        serde_json::from_str(&control(server, "GET", "/_control/reports", "")).unwrap();
+    assert_eq!(recorded["attempts"], 1);
+    let entry = &recorded["reports"][0];
+    assert_eq!(entry["channel_id"], general);
+    assert_eq!(entry["message_id"], welcome.id);
 }

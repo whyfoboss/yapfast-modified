@@ -41,6 +41,7 @@ pub mod profile;
 pub mod profile_effect;
 pub mod ready;
 pub mod remote_auth;
+pub mod report;
 #[cfg(any(target_os = "linux", windows, test))]
 pub(crate) mod rpc;
 pub mod rtp;

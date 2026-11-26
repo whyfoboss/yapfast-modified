@@ -43,3 +43,14 @@ src/video_track.cpp and include/livekit/video_track.h.
 
 Otherwise the Rust API, media code, dependency versions and libwebrtc archive
 stay pinned.
+
+## Windows cursor visibility on screen capture
+
+`src/desktop_capturer.cpp` and `include/livekit/desktop_capturer.h` wrap
+Windows screen/window capture in `CursorAwareDesktopCapturer` (backed by
+`DesktopAndCursorComposer::CreateWithoutMouseCursorMonitor`) so frames only
+receive a composed cursor while `GetCursorInfo` reports `CURSOR_SHOWING` with a
+non-null `HCURSOR`, non-zero alpha pixels (ignoring fully transparent game
+cursors), and—when capturing a single window—the cursor lies within that
+window's bounds. `src/desktop_capturer.rs` exposes the pure visibility helpers
+for unit tests.

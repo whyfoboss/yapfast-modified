@@ -363,6 +363,14 @@ mod tests {
             route(&Method::GET, "/users/56/profile"),
             "GET /users/:id/profile"
         );
+        assert_eq!(
+            route(&Method::GET, "/api/v9/reporting/menu/message"),
+            "GET /reporting/menu/message"
+        );
+        assert_eq!(
+            route(&Method::POST, "/api/v9/reporting/message"),
+            "POST /reporting/message"
+        );
     }
 
     #[test]

@@ -634,10 +634,33 @@ The window follows Discord's arrangement:
   mute and notification level, and shows slashed while it's muted. A server
   channel's search looks through the whole server, takes Discord's filters
   such as `from:`, `mentions:`, `in:`, `has:`, `before:`, `during:`, `after:`, and `pinned:`, heads its results with their channels
-  and stays open in them. Focusing or typing into the search field opens an
-  interactive filter dropdown with filter categories, live member suggestions
-  with role colours and avatars, channel suggestions, media types, dates, and
-  pin states, navigable with keyboard arrows, Enter/Tab, or mouse clicks.
+  and persists across channel, DM, and server switches with an explicit scope
+  badge (`Scope · ...` or `Saved search · ...` with a shortcut to search the
+  current chat) until closed or cleared on logout, account change, or scope
+  access loss; moving to another scope clears the new chat's header input
+  without wiping the saved results. `Ctrl+F` (matching physical key F across
+  non-Latin layouts, ignoring key repeat, and yielding to settings, modals,
+  keybind recording, or rooms without search) focuses and selects the header
+  search field while preserving active results. Focusing or typing into the
+  search field opens an interactive filter dropdown with filter categories,
+  live member suggestions with role colours and avatars (strictly scoped to
+  current participants when empty in a group DM, deduplicated by user ID so
+  accounts sharing a display name stay distinct with `@username`, and surfacing
+  labeled external users only while typing), channel suggestions, media types,
+  dates, and pin states, navigable with keyboard arrows, Enter/Tab, or mouse
+  clicks; picking a person binds their user ID (or typing `@username`
+  manually), while unbound ambiguous display names error with matching
+  `@username` choices. The search results list is virtualized (`ListView`),
+  incrementally renders newly appended or updated rows, and loads thumbnail
+  previews lazily around the visible viewport while evicting off-screen
+  previews. Clicking a thumbnail in search results or pins reveals a spoiler or
+  opens the image viewer (including for unopened channels) without triggering
+  a jump, while clicking the card or its Jump button jumps to the message;
+  clicking outside Go to result clears its focus and ring while keeping Go,
+  cards, and chat working.
+  Go to result takes a 1-based number in display order, loads pages as needed,
+  and scrolls to the matching card with a temporary highlight. Repeating a
+  search only shows pages requested by the new search.
   Found messages highlight search terms and exact phrases in bold. Messages from one person within seven
   minutes are grouped under one avatar and name. Hovering a grouped message
   shows its time in the gutter. Replies draw a spine to the quoted message, and
@@ -676,6 +699,10 @@ The window follows Discord's arrangement:
   doesn't read.
 - A voice stage with participant tiles, a green border while someone speaks,
   and round mute, deafen and leave controls.
+- Eligible Discord messages from other users (in channels, side threads, DMs,
+  and group DMs) offer "Report Message" in the message context menu (`MessageMenu`),
+  opening a multi-step `ReportDialog` that requires an explicit Submit click; see
+  [Reporting messages](discord/messages.md#reporting-messages).
 
 Atkinson Hyperlegible Next (SIL Open Font License, embedded in the binary; see
 `ui/fonts/README.md`) sets all text in four weights. Satoshi, the second choice,

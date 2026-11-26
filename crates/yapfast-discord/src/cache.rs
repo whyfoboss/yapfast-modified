@@ -67,7 +67,7 @@ use crate::{
 };
 
 /// Changes within this long go to disk together.
-const SAVE_DELAY: Duration = Duration::from_secs(20);
+const SAVE_DELAY: Duration = Duration::from_secs(180);
 /// Where on Discord's CDN the pictures Yapfast keeps live.
 const PICTURE_PATHS: [&str; 11] = [
     "/assets/",
@@ -107,8 +107,9 @@ static FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 static LOGIN: Mutex<Option<String>> = Mutex::new(None);
 /// The key they're encrypted with, while the credential store gives one.
 static KEY: Mutex<Option<Key>> = Mutex::new(None);
-/// The member lists to save with the account, as the service last kept them.
-static LISTS: Mutex<Vec<MemberList>> = Mutex::new(Vec::new());
+/// The member lists to save with the account, as the service last kept them,
+/// with a monotonic version so [`keep`] skips writes when nothing persistent changed.
+static LISTS: Mutex<(Option<Arc<[MemberList]>>, u64)> = Mutex::new((None, 0));
 
 #[derive(Deserialize)]
 struct Saved {
@@ -735,30 +736,110 @@ fn write_sealed_with(
 
 /// The member lists to save with the account from now on.
 pub(crate) fn keep_lists(lists: Vec<MemberList>) {
-    *lock(&LISTS) = lists;
+    let mut state = lock(&LISTS);
+    state.0 = if lists.is_empty() {
+        None
+    } else {
+        Some(Arc::from(lists))
+    };
+    state.1 = state.1.wrapping_add(1);
 }
 
-/// Saves the account while connected, a while after it changes, until the
-/// service ends.
-pub(crate) async fn keep(mut snapshots: watch::Receiver<Arc<Snapshot>>, names: Arc<RwLock<Names>>) {
-    let mut ended = false;
-    while !ended {
-        ended = snapshots.changed().await.is_err();
-        if !ended {
-            tokio::time::sleep(SAVE_DELAY).await;
+fn current_lists() -> (Option<Arc<[MemberList]>>, u64) {
+    let state = lock(&LISTS);
+    (state.0.clone(), state.1)
+}
+
+fn names_saved_version(names: &RwLock<Names>) -> u64 {
+    names
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .saved_version()
+}
+
+fn dirty_version(snapshot: &Snapshot, names: &RwLock<Names>, lists_version: u64) -> (u64, u64, u64) {
+    (
+        snapshot.persistent_version,
+        names_saved_version(names),
+        lists_version,
+    )
+}
+
+async fn flush_dirty(
+    snapshot: Arc<Snapshot>,
+    names: &Arc<RwLock<Names>>,
+    last_saved: &mut Option<(u64, u64, u64)>,
+) {
+    if snapshot.status != Status::Online {
+        return;
+    }
+    let (lists, lists_version) = current_lists();
+    let version = dirty_version(&snapshot, names, lists_version);
+    if *last_saved == Some(version) {
+        return;
+    }
+    let Some(file) = file() else {
+        return;
+    };
+    let names = names.clone();
+    let written = tokio::task::spawn_blocking(move || {
+        save(&file, &snapshot, &names, lists.as_deref().unwrap_or(&[]))
+    })
+    .await;
+    match written {
+        Ok(Ok(())) => *last_saved = Some(version),
+        Ok(Err(error)) => tracing::warn!(%error, "could not save the Discord account"),
+        Err(_) => {}
+    }
+}
+
+/// Saves the account while connected, a while after persistent state changes,
+/// until the service ends. Ephemeral updates such as voice state, playing
+/// status, and presence alone do not schedule disk writes.
+pub(crate) async fn keep(snapshots: watch::Receiver<Arc<Snapshot>>, names: Arc<RwLock<Names>>) {
+    keep_with_delay(snapshots, names, SAVE_DELAY).await;
+}
+
+async fn keep_with_delay(
+    mut snapshots: watch::Receiver<Arc<Snapshot>>,
+    names: Arc<RwLock<Names>>,
+    delay: Duration,
+) {
+    let mut last_saved: Option<(u64, u64, u64)> = None;
+    loop {
+        if snapshots.changed().await.is_err() {
+            let snapshot = snapshots.borrow_and_update().clone();
+            flush_dirty(snapshot, &names, &mut last_saved).await;
+            break;
         }
         let snapshot = snapshots.borrow_and_update().clone();
         if snapshot.status != Status::Online {
             continue;
         }
-        let Some(file) = file() else {
+        let (_, lists_version) = current_lists();
+        if last_saved == Some(dirty_version(&snapshot, &names, lists_version)) {
             continue;
-        };
-        let (names, lists) = (names.clone(), lock(&LISTS).clone());
-        let written =
-            tokio::task::spawn_blocking(move || save(&file, &snapshot, &names, &lists)).await;
-        if let Ok(Err(error)) = written {
-            tracing::warn!(%error, "could not save the Discord account");
+        }
+        // Coalesce further changes for `delay`, waking early only on shutdown
+        // so pending persistent changes still flush cleanly.
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        let mut ended = false;
+        loop {
+            tokio::select! {
+                () = &mut sleep => break,
+                changed = snapshots.changed() => {
+                    if changed.is_err() {
+                        ended = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let snapshot = snapshots.borrow_and_update().clone();
+        flush_dirty(snapshot, &names, &mut last_saved).await;
+        if ended {
+            break;
         }
     }
 }
@@ -1078,7 +1159,11 @@ pub fn forget() {
             Err(error) => tracing::warn!(%error, "could not delete kept Discord files"),
         }
     }
-    lock(&LISTS).clear();
+    {
+        let mut lists = lock(&LISTS);
+        lists.0 = None;
+        lists.1 = lists.1.wrapping_add(1);
+    }
     *lock(&KEY) = None;
 }
 
@@ -1154,9 +1239,12 @@ mod tests {
 
     const KEY: Key = [1; 32];
 
-    // One test, since the files' place and the login are the process's.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    // Serialized because the cache path, login and encryption key are process globals.
     #[test]
     fn keeps_the_account_messages_and_pictures_for_their_login() {
+        let _guard = lock(&TEST_LOCK);
         let directory =
             std::env::temp_dir().join(format!("yapfast-discord-cache-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -1509,5 +1597,100 @@ mod tests {
             "one from over a day ago is stale"
         );
         std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn ephemeral_updates_do_not_rewrite_account_cache_while_persistent_ones_do() {
+        let _guard = lock(&TEST_LOCK);
+        let directory = std::env::temp_dir().join(format!(
+            "yapfast-discord-cache-throttle-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let account_file = directory.join("discord-account.json");
+        keep_in(account_file.clone());
+        load("token-throttle", Some(KEY));
+        keep_lists(Vec::new());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let names = Arc::new(RwLock::new(Names::default()));
+            let mut snapshot = Snapshot {
+                status: Status::Online,
+                user_id: Some("1".into()),
+                persistent_version: 1,
+                ..Default::default()
+            };
+            let (tx, rx) = watch::channel(Arc::new(snapshot.clone()));
+            let keeper = tokio::spawn(keep_with_delay(
+                rx,
+                names.clone(),
+                Duration::from_millis(25),
+            ));
+            tokio::task::yield_now().await;
+
+            // 1. Initial Online state writes once.
+            tx.send(Arc::new(snapshot.clone())).unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !account_file.is_file() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "initial Online snapshot should write discord-account.json"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            std::fs::remove_file(&account_file).unwrap();
+
+            // 2. Repeated ephemeral updates leave persistent_version unchanged -> zero writes.
+            for step in 0..5u32 {
+                snapshot.playing = Some(Arc::new(crate::own_activity::Playing {
+                    name: format!("Game {step}"),
+                    started_ms: None,
+                    activity: None,
+                }));
+                tx.send(Arc::new(snapshot.clone())).unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            assert!(
+                !account_file.exists(),
+                "ephemeral Snapshot updates must not rewrite discord-account.json"
+            );
+
+            // 3. A name change triggers a write even without persistent_version changing.
+            {
+                let mut locked = names.write().unwrap();
+                locked.learn_user(&json!({"id": "2", "username": "bob"}));
+            }
+            tx.send(Arc::new(snapshot.clone())).unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !account_file.is_file() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Names mutation should write discord-account.json"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            std::fs::remove_file(&account_file).unwrap();
+
+            // 4. Clean shutdown flushes pending persistent changes immediately without extra
+            //    ephemeral-only writes.
+            snapshot.persistent_version += 1;
+            tx.send(Arc::new(snapshot.clone())).unwrap();
+            tokio::task::yield_now().await;
+            drop(tx);
+            keeper.await.unwrap();
+            assert!(
+                account_file.is_file(),
+                "shutdown should flush pending persistent changes"
+            );
+        });
+
+        forget();
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

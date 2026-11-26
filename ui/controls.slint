@@ -52,7 +52,7 @@ export component ActionButton inherits Rectangle {
     focus := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => {
-            if event.text == "\n" || event.text == " " {
+            if !FocusRing.suppress-activate && (event.text == "\n" || event.text == " ") {
                 root.clicked(); return accept;
             }
             return reject;
@@ -129,7 +129,7 @@ export component IconButton inherits Rectangle {
     focus := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => {
-            if event.text == "\n" || event.text == " " {
+            if !FocusRing.suppress-activate && (event.text == "\n" || event.text == " ") {
                 root.clicked(); return accept;
             }
             return reject;
@@ -815,6 +815,7 @@ export component TextField inherits Rectangle {
     callback edited(string);
     callback accepted;
     public function focus-input() { input.focus(); }
+    public function blur-input() { input.clear-focus(); }
     min-height: 40px; vertical-stretch: 0; horizontal-stretch: 1;
     border-radius: 6px;
     background: root.fill;
@@ -1012,7 +1013,7 @@ export component MenuItem inherits Rectangle {
     }
     focus := FocusScope {
         key-pressed(event) => {
-            if event.text == "\n" || event.text == " " {
+            if !FocusRing.suppress-activate && (event.text == "\n" || event.text == " ") {
                 root.clicked(); return accept;
             }
             return reject;
@@ -1459,7 +1460,7 @@ export component HeaderToggle inherits Rectangle {
     }
     focus := FocusScope {
         key-pressed(event) => {
-            if event.text == "\n" || event.text == " " {
+            if !FocusRing.suppress-activate && (event.text == "\n" || event.text == " ") {
                 root.clicked(); return accept;
             }
             return reject;

@@ -11,8 +11,19 @@ pub(super) struct PreviewCache {
     bytes: usize,
 }
 
-pub(super) const PREVIEW_CACHE_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const PREVIEW_CACHE_BYTES: usize = 5 * 1024 * 1024;
 pub(super) type SharedPreviews = Arc<Mutex<PreviewCache>>;
+
+/// Attachment metadata retained for currently displayed search results and pins
+/// so opening thumbnails or saving files works even from unopened channels.
+#[derive(Default)]
+pub(super) struct FoundAttachments {
+    pub(super) search_request: u64,
+    pub(super) search: HashMap<(String, String), Vec<yapfast_discord::message::Attachment>>,
+    pub(super) pins: HashMap<(String, String), Vec<yapfast_discord::message::Attachment>>,
+}
+
+pub(super) type SharedFoundAttachments = Arc<Mutex<FoundAttachments>>;
 
 impl PreviewCache {
     pub(super) fn get(&mut self, url: &str) -> Option<Arc<Picture>> {
@@ -50,6 +61,7 @@ pub struct Channels {
     /// Newest last.
     pub(super) recent: Vec<OpenChannel>,
     pub(super) previews: SharedPreviews,
+    pub(super) found_attachments: SharedFoundAttachments,
     /// Who is typing in each channel, by user id, with their name and until when.
     pub(super) typing: HashMap<String, HashMap<String, (String, Instant)>>,
     /// Where this account last told Discord it's typing, and when.
@@ -181,6 +193,36 @@ impl Channels {
             .iter()
             .chain(&self.aside)
             .any(|channel| channel.room == room)
+    }
+
+    /// Finds an attachment metadata record across active/recent channels, search results, or pins.
+    pub(super) fn find_attachment(
+        &self,
+        room: &str,
+        item: &str,
+        index: usize,
+    ) -> Option<yapfast_discord::message::Attachment> {
+        if let Some(att) = self
+            .open
+            .iter()
+            .chain(&self.aside)
+            .chain(&self.recent)
+            .filter(|ch| ch.room == room)
+            .find_map(|ch| ch.attachment(item, index).cloned())
+        {
+            return Some(att);
+        }
+        let guard = self
+            .found_attachments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (room.to_owned(), item.to_owned());
+        guard
+            .search
+            .get(&key)
+            .or_else(|| guard.pins.get(&key))
+            .and_then(|atts| atts.get(index))
+            .cloned()
     }
 }
 

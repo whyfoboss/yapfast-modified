@@ -719,8 +719,6 @@ async fn send_once(
                 if let Some((op, data)) = connection.handle(message?).await?
                     && !matches!(op, 2 | 4 | 6)
                 {
-                    let mut text = data.to_string();
-                    text.truncate(400);
                     tracing::debug!(op, "the stream server said");
                     // Session update: a viewer can't decode the codec, or the
                     // one who couldn't left.
@@ -1157,6 +1155,9 @@ async fn receive_stream_once(
     let mut asked = Instant::now() - KEYFRAME_REQUESTS;
     let mut selected_since = Instant::now();
     let mut last_selected_packet: Option<Instant> = None;
+    let mut last_video: Option<Instant> = None;
+    let mut last_audio: Option<Instant> = None;
+    let mut last_sink_wants = Instant::now();
     let mut last_decoded = shared.decoded.load(Ordering::Relaxed);
     let interval = connection.interval;
     let mut heartbeat = tokio::time::interval_at(Instant::now() + interval, interval);
@@ -1190,8 +1191,6 @@ async fn receive_stream_once(
             message = receive(&mut connection.ws, &mut connection.seq) => {
                 if let Some((op, data)) = connection.handle(message?).await? {
                     if !matches!(op, 2 | 4 | 6) {
-                        let mut text = data.to_string();
-                        text.truncate(400);
                         tracing::debug!(op, "the stream server said");
                     }
                     let previous = streamer.video;
@@ -1206,12 +1205,36 @@ async fn receive_stream_once(
                         selected_since = Instant::now();
                         last_selected_packet = None;
                         stalled_video = None;
+                        last_sink_wants = Instant::now();
                         send_json(&mut connection.ws, 15, streamer.media_sink_wants()).await?;
                     }
                 }
             }
             _ = repairs.tick() => {}
             _ = reports.tick() => {
+                if last_audio.is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+                    && last_video.is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+                    && last_sink_wants.elapsed() >= Duration::from_secs(5)
+                {
+                    last_sink_wants = Instant::now();
+                    recovering = true;
+                    tracing::info!(
+                        target: "yapfast_stream",
+                        audio_silent_ms = last_audio.map(|at| at.elapsed().as_millis() as u64),
+                        video_silent_ms = last_video.map(|at| at.elapsed().as_millis() as u64),
+                        video_ssrc = ?streamer.video,
+                        codec = ?streamer.codec,
+                        "audio arriving without stream video packets; reasserting media sink wants"
+                    );
+                    send_json(&mut connection.ws, 15, streamer.media_sink_wants()).await?;
+                    if let Some(media) = streamer.video {
+                        asked = Instant::now();
+                        received.keyframe_requests += 1;
+                        let mut request = rtp::picture_loss(connection.ssrc, media);
+                        connection.transport.seal(&mut request, rtp::RTCP_CLEAR)?;
+                        connection.udp.send(&request).await?;
+                    }
+                }
                 let Some(media) = streamer.video else { continue };
                 let (highest, lost_count, fraction) = if let Some(video) = incoming.get_mut(&media) {
                     if let Some((highest, lost)) = video.reorder.counts() {
@@ -1248,8 +1271,13 @@ async fn receive_stream_once(
                     payload_types = ?received.payload_types, "stream transport");
                 tracing::debug!(?received, "stream received");
                 if received.decoded == flowing {
+                    let resyncs: u64 = incoming.values().map(|v| v.reorder.resyncs()).sum();
                     tracing::info!(
+                        target: "yapfast_stream",
                         ?received,
+                        resyncs,
+                        video_silent_ms = last_video.map(|at| at.elapsed().as_millis() as u64),
+                        audio_silent_ms = last_audio.map(|at| at.elapsed().as_millis() as u64),
                         dave = connection.dave.status(),
                         unreadable = connection.dave.unreadable.as_deref(),
                         streamer_video = ?streamer.video,
@@ -1292,6 +1320,7 @@ async fn receive_stream_once(
                 }
                 if packet.payload_type == rtp::OPUS {
                     received.sounds += 1;
+                    last_audio = Some(Instant::now());
                     match connection.dave.decrypt_opus(streamer_id, packet.payload.to_vec()) {
                         // A full queue drops sound the player can't keep up with.
                         Some(data) => drop(sounds.try_send(ReceivedSound {
@@ -1349,6 +1378,7 @@ async fn receive_stream_once(
                             codec = ?codec,
                             "switched stream video SSRC after active layer went silent"
                         );
+                        last_sink_wants = Instant::now();
                         send_json(&mut connection.ws, 15, streamer.media_sink_wants()).await?;
                     } else {
                         received.other += 1;
@@ -1361,6 +1391,7 @@ async fn receive_stream_once(
                     }
                     last_selected_packet = Some(arrived);
                 }
+                last_video = Some(arrived);
                 if can_fallback && !resent {
                     match codec {
                         Codec::Av1 | Codec::H265 => {

@@ -1813,6 +1813,8 @@ export component PluginsSettings inherits VerticalLayout {
     callback clear-logger;
     in property <bool> show-hidden-channels;
     callback show-hidden-channels-toggled(bool);
+    in property <bool> fake-deafen-plugin;
+    callback fake-deafen-plugin-toggled(bool);
     callback preferences-changed;
     private property <bool> confirm-clear-logger: false;
 
@@ -1891,5 +1893,16 @@ export component PluginsSettings inherits VerticalLayout {
         description: "Prevent Discord from showing \"typing...\" to others while you write. Others still show here when they type.";
         checked <=> root.dont-show-typing;
         toggled => { root.preferences-changed(); }
+    }
+
+    Rectangle { height: 1px; background: Theme.line; }
+    SettingsHeading { text: "Experimental"; }
+
+    // 7. Fake Deafen (Experimental)
+    SettingsSwitch {
+        text: "Fake Deafen";
+        description: "Experimental. Adds a Fake Deafen toggle to Discord call controls that shows you as deafened to everyone while keeping your audio and microphone active.";
+        checked: root.fake-deafen-plugin;
+        toggled(on) => { root.fake-deafen-plugin-toggled(on); }
     }
 }

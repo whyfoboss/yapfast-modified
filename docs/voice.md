@@ -15,7 +15,13 @@ voice view shows the participants and their mute, deafen and speaking state; a
 deafened person shows crossed-out
 microphone and headphones in the channel list, and only the red crossed-out
 headphones on their tile in the call. MatrixRTC doesn't share deafening, so in
-Yapfast calls only your own shows. Clicking a voice channel joins it and leaves
+Yapfast calls only your own shows. An experimental **Fake Deafen** toggle in
+Settings › Plugins (Discord-only, off by default) adds a button between Mute and
+Deafen in `CallControls`: when turned on, Discord Gateway receives
+`self_mute: true, self_deaf: true` so other participants and the sidebar see you
+as deafened, while your local speakers and microphone toggles stay real and
+active; disabling the plugin while active clears Fake Deafen immediately.
+Clicking a voice channel joins it and leaves
 what's on screen as it was, as Discord's client does: the call shows in the
 dock, and clicking the channel again, or the channel's line in the dock, opens
 it. A voice channel whose chat mentions you opens on its chat as it joins, as
@@ -25,9 +31,12 @@ intermediate navigation. Clicking another one during a call opens a dialog that
 asks before leaving the current one, and confirming joins it the same way. Coming
 back to a server that had a voice channel selected shows it without joining.
 
-On Windows, the desktop client gives the allocator a few seconds to release
-the call's resources, then asks Windows to decommit unused heap pages off the
-UI thread. Starting another call cancels the pending wait.
+On Windows, the desktop client gives the allocator a couple of seconds to
+release resources (or three seconds after leaving a call), drops Skia caches,
+and asks Windows to decommit unused heap pages off the UI thread after stopping a
+watched stream, ending a screen share, closing search or a profile card, or
+leaving a call. Starting a call, watch, share, search, or profile cancels the
+pending wait.
 
 The native LiveKit audio engine captures and plays audio through system
 devices. Settings › Voice & video selects the microphone and speakers too.

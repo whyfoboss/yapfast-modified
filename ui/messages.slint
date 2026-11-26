@@ -805,7 +805,7 @@ export struct MessageRow {
     /// Says a card is hidden, for a message that is only one, with link previews off.
     hidden-card: string,
     delivery: string, delivery-sending: bool, delivery-failed: bool, can-retry: bool, can-cancel: bool,
-    can-reply: bool, can-edit: bool, can-delete: bool, can-react: bool, can-forward: bool,
+    can-reply: bool, can-edit: bool, can-delete: bool, can-react: bool, can-forward: bool, can-report: bool,
     /// Among the conversation's pinned messages, and whether this account
     /// may pin it or unpin it.
     pinned: bool, can-pin: bool,
@@ -1389,6 +1389,7 @@ export component MessageMenu inherits Rectangle {
     callback edit(string);
     callback reply(string);
     callback start-forward(string);
+    callback report-message(string);
     callback copy-text(string);
     callback pin-message(string);
     callback request-delete(string);
@@ -1514,10 +1515,14 @@ export component MessageMenu inherits Rectangle {
             text: "Open Link"; icon: @image-url("icons/external-link.svg");
             clicked => { root.open-link(root.link); }
         }
-        if !root.menu-message.deleted && root.menu-message.can-delete && root.composer-enabled: Rectangle { height: 1px; background: Theme.line; }
+        if !root.menu-message.deleted && ((root.menu-message.can-delete && root.composer-enabled) || root.menu-message.can-report): Rectangle { height: 1px; background: Theme.line; }
         if !root.menu-message.deleted && root.menu-message.can-delete && root.composer-enabled: MenuItem {
             text: "Delete message"; icon: @image-url("icons/trash-2.svg"); danger: true;
             clicked => { root.request-delete(root.menu-message.item); }
+        }
+        if !root.menu-message.deleted && root.menu-message.can-report: MenuItem {
+            text: "Report Message"; icon: @image-url("icons/triangle-alert.svg"); danger: true;
+            clicked => { root.report-message(root.menu-message.item); }
         }
     }
     }

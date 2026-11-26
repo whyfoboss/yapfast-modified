@@ -106,6 +106,8 @@ struct VoiceEntry {
 /// The account's servers and voice channels, kept current from gateway events.
 pub(super) struct Tracker {
     pub(super) me: String,
+    /// Bumped when persisted fields saved in `discord-account.json` change.
+    persistent_version: u64,
     /// This gateway session, from READY; a voice state of this account with
     /// another is on another client.
     pub(super) session: Option<String>,
@@ -194,6 +196,7 @@ impl Tracker {
     pub(super) fn from_ready(me: String, ready: &Value, names: Arc<RwLock<Names>>) -> Self {
         let mut tracker = Self {
             me,
+            persistent_version: 1,
             session: ready["session_id"].as_str().map(str::to_owned),
             premium: premium_type(&ready["user"]),
             mfa: ready["user"]["mfa_enabled"].as_bool().unwrap_or_default(),
@@ -247,12 +250,34 @@ impl Tracker {
             tracker.put_private(channel);
         }
         tracker.learn_members(&ready["guilds"], &ready["merged_members"]);
+        tracker.servers.shrink_to_fit();
+        tracker.private.shrink_to_fit();
+        tracker.friends.shrink_to_fit();
+        tracker.blocked.shrink_to_fit();
+        tracker.ignored.shrink_to_fit();
+        tracker.nicknames.shrink_to_fit();
+        tracker.order.shrink_to_fit();
+        tracker.folders.shrink_to_fit();
+        tracker.requests.shrink_to_fit();
+        tracker.my_roles.shrink_to_fit();
+        tracker.voice.shrink_to_fit();
+        tracker.presences.shrink_to_fit();
         tracker
+            .names
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shrink_maps();
+        tracker
+    }
+
+    pub(super) fn mark_persistent(&mut self) {
+        self.persistent_version = self.persistent_version.wrapping_add(1);
     }
 
     /// Keeps what `earlier` knew of servers READY gave as unavailable, as it
     /// gives only their ids.
     pub(super) fn keep_unavailable(&mut self, earlier: &[MarkedServer]) {
+        let mut changed = false;
         for server in self.servers.iter_mut().filter(|server| server.unavailable) {
             if let Some(known) = earlier.iter().find(|known| known.id == server.id) {
                 let mut known = Server::clone(&known.server);
@@ -260,7 +285,11 @@ impl Tracker {
                 // The snapshot's copy of a server carries a timeout.
                 known.my_timeout = None;
                 *server = Arc::new(known);
+                changed = true;
             }
+        }
+        if changed {
+            self.mark_persistent();
         }
         self.sort_servers();
     }
@@ -287,6 +316,7 @@ impl Tracker {
             server
                 .threads
                 .sort_by_key(|thread| std::cmp::Reverse(thread.id.parse::<u64>().unwrap_or(0)));
+            self.mark_persistent();
         }
     }
 
@@ -295,6 +325,7 @@ impl Tracker {
         self.unreads.learn_thread(thread);
         if let Some(server) = self.server_mut(guild) {
             server.put_thread(thread);
+            self.mark_persistent();
         }
     }
 
@@ -305,20 +336,28 @@ impl Tracker {
         guild: &str,
         placements: &[ready::Placement],
     ) -> Vec<ready::Placement> {
-        self.server_mut(guild)
-            .map(|server| server.place(placements))
-            .unwrap_or_default()
+        let placed = self
+            .server_mut(guild)
+            .map(|server| server.place(placements));
+        if placed.is_some() {
+            self.mark_persistent();
+        }
+        placed.unwrap_or_default()
     }
 
     /// Applies one dispatched event; returns whether anything visible changed.
     pub(super) fn apply(&mut self, event: &Event, data: &Value) -> bool {
         let unreads = self.unreads.apply(event, data, &self.me, &self.my_roles);
+        if unreads {
+            self.mark_persistent();
+        }
         self.apply_servers(event, data) || unreads
     }
 
     fn apply_servers(&mut self, event: &Event, data: &Value) -> bool {
         match event {
             Event::ReadySupplemental => {
+                let mut persistent = false;
                 // The DMs left out of READY to make it smaller.
                 for channel in data["lazy_private_channels"]
                     .as_array()
@@ -327,6 +366,7 @@ impl Tracker {
                 {
                     self.unreads.learn_channel(channel);
                     self.put_private(channel);
+                    persistent = true;
                 }
                 for presence in data["merged_presences"]["friends"]
                     .as_array()
@@ -358,6 +398,9 @@ impl Tracker {
                     }
                 }
                 self.learn_members(&data["guilds"], &data["merged_members"]);
+                if persistent {
+                    self.mark_persistent();
+                }
                 true
             }
             Event::VoiceStateUpdate => {
@@ -408,6 +451,7 @@ impl Tracker {
                     && let Some(known) = self.server_mut(&server.id)
                 {
                     known.unavailable = true;
+                    self.mark_persistent();
                     return true;
                 }
                 for state in data["voice_states"].as_array().into_iter().flatten() {
@@ -419,10 +463,12 @@ impl Tracker {
                 self.servers.retain(|known| known.id != server.id);
                 self.servers.push(Arc::new(server));
                 self.sort_servers();
+                self.mark_persistent();
                 true
             }
             Event::RelationshipAdd | Event::RelationshipUpdate => {
                 self.relationship(data);
+                self.mark_persistent();
                 true
             }
             Event::RelationshipRemove => {
@@ -434,6 +480,7 @@ impl Tracker {
                     self.requests.remove(id);
                     self.nicknames.remove(id);
                 }
+                self.mark_persistent();
                 true
             }
             Event::GuildMemberUpdate => {
@@ -467,6 +514,7 @@ impl Tracker {
                 } else {
                     server.put_role(&data["role"]);
                 }
+                self.mark_persistent();
                 true
             }
             // The settings of type 1 hold the status.
@@ -474,7 +522,9 @@ impl Tracker {
                 let Some(encoded) = data["settings"]["proto"].as_str() else {
                     return false;
                 };
-                self.settings(encoded);
+                if self.settings(encoded) {
+                    self.mark_persistent();
+                }
                 true
             }
             Event::GuildScheduledEventCreate
@@ -489,6 +539,7 @@ impl Tracker {
                     return false;
                 };
                 server.put_event(scheduled, *event == Event::GuildScheduledEventDelete);
+                self.mark_persistent();
                 true
             }
             Event::GuildEmojisUpdate => {
@@ -499,6 +550,7 @@ impl Tracker {
                     return false;
                 };
                 server.emojis = std::sync::Arc::new(ready::emojis(&data["emojis"]));
+                self.mark_persistent();
                 true
             }
             // The sticker picker lists the server's own stickers from here.
@@ -511,6 +563,7 @@ impl Tracker {
                 };
                 server.stickers =
                     std::sync::Arc::new(crate::stickers::parse_all(&data["stickers"]));
+                self.mark_persistent();
                 true
             }
             // Carries the server's own fields, without its channels or members.
@@ -538,6 +591,7 @@ impl Tracker {
                 known.community = update.community;
                 known.rules_channel = update.rules_channel;
                 self.sort_servers();
+                self.mark_persistent();
                 true
             }
             // This account's Nitro, name and avatar can change while
@@ -569,6 +623,9 @@ impl Tracker {
                 self.mfa = mfa;
                 self.email = email;
                 self.nsfw_allowed = nsfw;
+                if changed {
+                    self.mark_persistent();
+                }
                 changed
             }
             // An outage, with `unavailable`, keeps the server as last known
@@ -585,6 +642,7 @@ impl Tracker {
                     self.servers.retain(|server| server.id != id);
                 }
                 self.voice.retain(|(guild, _), _| guild != id);
+                self.mark_persistent();
                 true
             }
             Event::ChannelCreate | Event::ChannelUpdate | Event::ChannelDelete
@@ -597,6 +655,7 @@ impl Tracker {
                 if *event != Event::ChannelDelete {
                     self.put_private(data);
                 }
+                self.mark_persistent();
                 true
             }
             Event::ChannelRecipientAdd | Event::ChannelRecipientRemove => {
@@ -617,12 +676,17 @@ impl Tracker {
                 if *event == Event::ChannelRecipientAdd {
                     private.recipients.push(user.to_owned());
                 }
+                self.mark_persistent();
                 true
             }
             // A DM moves to the top of the list with each new message.
             Event::MessageCreate if data["guild_id"].is_null() => {
                 let channel = data["channel_id"].as_str().unwrap_or_default();
-                self.private.iter().any(|private| private.id == channel)
+                let hits = self.private.iter().any(|private| private.id == channel);
+                if hits {
+                    self.mark_persistent();
+                }
+                hits
             }
             // Friends' presences, and a server's for the people of DMs; the
             // member list takes servers' presences too.
@@ -674,6 +738,7 @@ impl Tracker {
                     ready::trace_channel_payload(stage, data);
                     server.put_channel(data);
                 }
+                self.mark_persistent();
                 true
             }
             Event::ThreadCreate | Event::ThreadUpdate | Event::ThreadDelete => {
@@ -689,6 +754,7 @@ impl Tracker {
                 } else {
                     server.put_thread(data);
                 }
+                self.mark_persistent();
                 true
             }
             Event::ThreadListSync => {
@@ -726,6 +792,8 @@ impl Tracker {
                 for message in recent.into_iter().flatten() {
                     names.learn_message(guild, message);
                 }
+                drop(names);
+                self.mark_persistent();
                 true
             }
             Event::ThreadMemberUpdate => {
@@ -740,6 +808,7 @@ impl Tracker {
                     return false;
                 };
                 thread.join(data);
+                self.mark_persistent();
                 true
             }
             // Whether this account joined or left; others' only change
@@ -801,6 +870,7 @@ impl Tracker {
                     None if removed => thread.leave(),
                     None => {}
                 }
+                self.mark_persistent();
                 true
             }
             // A thread counts its messages, which its first message in its
@@ -840,6 +910,7 @@ impl Tracker {
                 } else if counted {
                     thread.messages = thread.messages.saturating_sub(1);
                 }
+                self.mark_persistent();
                 true
             }
             // Large servers report voice in these until subscribed.
@@ -1100,7 +1171,11 @@ impl Tracker {
             text,
             files: message.attachments.len(),
         };
-        self.previews.insert(channel.clone(), preview.clone()) != Some(preview)
+        let inserted = self.previews.insert(channel.clone(), preview.clone()) != Some(preview);
+        if inserted {
+            self.mark_persistent();
+        }
+        inserted
     }
 
     /// A message request's preview was deleted: it's asked for again.
@@ -1114,6 +1189,7 @@ impl Tracker {
         }
         self.previews.remove(channel);
         self.previews_asked.remove(channel);
+        self.mark_persistent();
         true
     }
 
@@ -1211,23 +1287,37 @@ impl Tracker {
                 .notifies(message, &self.me, &self.my_roles, place, category, thread)
     }
 
-    /// Learns the status from settings, all or some of them, in base64.
-    fn settings(&mut self, encoded: &str) {
+    /// Learns the status from settings, all or some of them, in base64;
+    /// returns whether any persisted setting changed.
+    fn settings(&mut self, encoded: &str) -> bool {
         let read = settings::read(encoded);
-        if let Some(status) = read.status.filter(|status| !status.is_empty()) {
+        let mut persistent = false;
+        if let Some(status) = read.status.filter(|status| !status.is_empty())
+            && self.status != status
+        {
             self.status = status;
+            persistent = true;
         }
-        if let Some(custom) = read.custom {
+        if let Some(custom) = read.custom
+            && self.custom_status != custom
+        {
             self.custom_status = custom;
+            persistent = true;
         }
         if let Some(timeout) = read.afk_timeout {
             self.afk_timeout = timeout;
         }
-        if let Some(shown) = read.show_game {
+        if let Some(shown) = read.show_game
+            && self.show_game != shown
+        {
             self.show_game = shown;
+            persistent = true;
         }
-        if let Some(offered) = read.nsfw_commands_in_dms {
+        if let Some(offered) = read.nsfw_commands_in_dms
+            && self.nsfw_commands_in_dms != offered
+        {
             self.nsfw_commands_in_dms = offered;
+            persistent = true;
         }
         let soundboard = crate::soundboard::read_settings(encoded);
         if let Some(volume) = soundboard.volume {
@@ -1237,10 +1327,14 @@ impl Tracker {
             self.join_sounds = join_sounds.into();
         }
         if let Some(list) = settings::server_list(encoded) {
+            if self.order != list.order || self.folders != list.folders {
+                persistent = true;
+            }
             self.order = list.order;
             self.folders = list.folders;
             self.sort_servers();
         }
+        persistent
     }
 
     /// A server to change, copied first if a snapshot shares it.
@@ -1659,6 +1753,7 @@ impl Tracker {
             person: (!private.group)
                 .then(|| private.recipients.first().cloned())
                 .flatten(),
+            recipients: private.recipients.clone(),
             unread: unread && !private.spam,
             mentions: if private.request { 0 } else { mentions },
             last_read,
@@ -1853,6 +1948,7 @@ impl Tracker {
         self.kept = kept;
         Snapshot {
             status: Status::Online,
+            persistent_version: self.persistent_version,
             user_id: Some(self.me.clone()),
             account: names.user_name(&self.me).map(|name| Account {
                 name: name.to_owned(),
@@ -3370,5 +3466,41 @@ mod tests {
             &json!({"channel_id": "11", "message_id": "900", "mention_count": 0}),
         );
         assert_eq!(marks(&mut tracker), (false, 0, 900));
+    }
+
+    #[test]
+    fn ephemeral_gateway_events_keep_persistent_version_unchanged() {
+        let ready = json!({
+            "user": {"id": "1"},
+            "guilds": [{
+                "id": "10",
+                "properties": {"name": "One"},
+                "channels": [{"id": "11", "name": "Lounge", "type": 2, "position": 0}],
+                "members": [{"user": {"id": "2", "username": "bob"}, "roles": []}],
+            }],
+        });
+        let mut tracker = Tracker::from_ready("1".into(), &ready, Default::default());
+        let initial = tracker.snapshot().persistent_version;
+
+        tracker.apply(
+            &Event::VoiceStateUpdate,
+            &json!({"guild_id": "10", "channel_id": "11", "user_id": "2", "session_id": "s"}),
+        );
+        assert_eq!(tracker.snapshot().persistent_version, initial);
+
+        tracker.apply(
+            &Event::PresenceUpdate,
+            &json!({"user": {"id": "2"}, "status": "dnd", "activities": []}),
+        );
+        assert_eq!(tracker.snapshot().persistent_version, initial);
+
+        tracker.apply(
+            &Event::MessageCreate,
+            &json!({"id": "900", "channel_id": "11", "guild_id": "10", "author": {"id": "2"}}),
+        );
+        assert!(
+            tracker.snapshot().persistent_version > initial,
+            "unread state updates must bump persistent_version"
+        );
     }
 }

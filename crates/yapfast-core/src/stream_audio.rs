@@ -32,6 +32,9 @@ const PRIMED: usize = FRAME * 2;
 /// The most kept for an application; older sound is dropped, so clock
 /// drift never grows into delay.
 const BACKLOG: usize = FRAME * 10;
+/// Source slot reserved for Yapfast's own internal playback worker on platforms
+/// that exclude Yapfast's process tree by default.
+const INCLUDED_SOURCE: u32 = 1;
 /// What Discord's client gives a stream's sound.
 const BITRATE: i32 = 64_000;
 
@@ -95,57 +98,78 @@ fn mix(inputs: &mut HashMap<u32, Input>, out: &mut [f32]) -> bool {
     heard
 }
 
+fn record_heard(inputs: &Inputs, heard: Heard<'_>) {
+    let mut inputs = inputs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match heard {
+        Heard::Started { source, process } => {
+            inputs.insert(
+                source,
+                Input {
+                    process,
+                    ..Input::default()
+                },
+            );
+        }
+        Heard::Samples { source, samples } => {
+            if let Some(input) = inputs.get_mut(&source) {
+                input.push(samples.iter().copied());
+            }
+        }
+        Heard::Stopped { source } => {
+            if let Some(forgotten) = inputs.remove(&source) {
+                tracing::debug!(
+                    process = ?forgotten.process,
+                    "stopped capturing an application's sound"
+                );
+            }
+        }
+    }
+}
+
 /// Hears the other applications into `inputs` until `stop`.
 fn listen(inputs: Inputs, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>> {
     crate::audio_io::others(
         is_discord_client,
-        move |heard| {
-            let mut inputs = inputs
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match heard {
-                Heard::Started { source, process } => {
-                    inputs.insert(
-                        source,
-                        Input {
-                            process,
-                            ..Input::default()
-                        },
-                    );
-                }
-                Heard::Samples { source, samples } => {
-                    if let Some(input) = inputs.get_mut(&source) {
-                        input.push(samples.iter().copied());
-                    }
-                }
-                Heard::Stopped { source } => {
-                    if let Some(forgotten) = inputs.remove(&source) {
-                        tracing::debug!(
-                            process = ?forgotten.process,
-                            "stopped capturing an application's sound"
-                        );
-                    }
-                }
-            }
-        },
+        move |heard| record_heard(&inputs, heard),
         stop,
     )
+}
+
+struct IncludedProcess {
+    pid: u32,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for IncludedProcess {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Captures and sends the stream's sound until dropped.
 pub struct Capture {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    inputs: Inputs,
+    included: Option<IncludedProcess>,
 }
 
 impl Capture {
-    /// Starts capturing other applications' sound and sending it as Opus.
-    pub fn start(sound: SoundSender) -> Result<Self> {
+    /// Starts capturing other applications' sound and optional internal playback
+    /// process `include_pid`, mixing and sending them as Opus.
+    pub fn start(sound: SoundSender, include_pid: Option<u32>) -> Result<Self> {
         let inputs = Inputs::default();
         let stop = Arc::new(AtomicBool::new(false));
         let capture = listen(inputs.clone(), stop.clone())?;
         let mut encoder = opus::Encoder::new(2, opus::Application::Audio, BITRATE)?;
         let stopping = stop.clone();
+        let mixing = inputs.clone();
         let mixer = std::thread::Builder::new()
             .name("yapfast-stream-sound".into())
             .spawn(move || {
@@ -161,7 +185,7 @@ impl Capture {
                         std::thread::sleep(wait);
                     }
                     let heard = mix(
-                        &mut inputs
+                        &mut mixing
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner()),
                         &mut frame,
@@ -181,16 +205,62 @@ impl Capture {
                 }
             })
             .context("could not start mixing the stream's sound")?;
-        Ok(Self {
+        let mut started = Self {
             stop,
             threads: vec![capture, mixer],
-        })
+            inputs,
+            included: None,
+        };
+        started.set_include_pid(include_pid);
+        Ok(started)
+    }
+
+    /// Starts or updates capturing sound from Yapfast's own `Worker::play` PID.
+    pub fn set_include_pid(&mut self, pid: Option<u32>) {
+        if self.included.as_ref().map(|active| active.pid) == pid {
+            return;
+        }
+        drop(self.included.take());
+        self.inputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&INCLUDED_SOURCE);
+        let Some(pid) = pid else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let into = self.inputs.clone();
+        match crate::audio_io::process_loopback(
+            pid,
+            INCLUDED_SOURCE,
+            move |heard| record_heard(&into, heard),
+            stop.clone(),
+        ) {
+            Ok(thread) => {
+                self.included = Some(IncludedProcess {
+                    pid,
+                    stop,
+                    thread: Some(thread),
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pid,
+                    error = format!("{error:#}"),
+                    "sharing without internal player sound"
+                );
+            }
+        }
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(included) = &self.included {
+            included.stop.store(true, Ordering::Relaxed);
+        }
+        self.included = None;
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
@@ -575,5 +645,50 @@ mod tests {
         let mut input = Input::default();
         input.push(std::iter::repeat_n(0.1, BACKLOG * 3));
         assert_eq!(input.samples.len(), BACKLOG);
+    }
+
+    #[test]
+    fn records_and_removes_internal_player_source() {
+        let inputs = Inputs::default();
+        let mut out = vec![0.0; FRAME];
+        record_heard(
+            &inputs,
+            Heard::Started {
+                source: 0,
+                process: None,
+            },
+        );
+        record_heard(
+            &inputs,
+            Heard::Started {
+                source: INCLUDED_SOURCE,
+                process: Some(4242),
+            },
+        );
+        let a = vec![0.25; PRIMED];
+        let b = vec![0.5; PRIMED];
+        record_heard(
+            &inputs,
+            Heard::Samples {
+                source: 0,
+                samples: &a,
+            },
+        );
+        record_heard(
+            &inputs,
+            Heard::Samples {
+                source: INCLUDED_SOURCE,
+                samples: &b,
+            },
+        );
+        assert!(mix(&mut inputs.lock().unwrap(), &mut out));
+        assert_eq!(out[0], 0.75);
+        record_heard(
+            &inputs,
+            Heard::Stopped {
+                source: INCLUDED_SOURCE,
+            },
+        );
+        assert!(!inputs.lock().unwrap().contains_key(&INCLUDED_SOURCE));
     }
 }

@@ -52,6 +52,7 @@ mod own_profile;
 mod ownership;
 mod people;
 mod render;
+mod report;
 mod roles;
 mod server_settings;
 mod stickers;
@@ -222,6 +223,13 @@ impl Chat {
 
     pub(crate) fn service(&self) -> Discord {
         self.discord.clone()
+    }
+
+    /// Process id of the active in-chat video or voice-message playback worker.
+    pub(crate) fn play_audio_pid(&self) -> Option<u32> {
+        self.video
+            .as_ref()
+            .and_then(crate::playback::Playback::audio_pid)
     }
 
     pub(crate) fn command(&mut self, command: Command, events: &UnboundedSender<Event>) {

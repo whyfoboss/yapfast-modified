@@ -201,6 +201,9 @@ fn refuse(request: Request, shared: &mut Shared) {
             shared.show_game.send_replace(shown);
             shared.snapshots.send_modify(|snapshot| {
                 let snapshot = Arc::make_mut(snapshot);
+                if snapshot.show_game != shown {
+                    snapshot.persistent_version = snapshot.persistent_version.wrapping_add(1);
+                }
                 snapshot.show_game = shown;
                 snapshot.playing = None;
                 if !shown {
@@ -305,8 +308,9 @@ async fn connected_session(
     session.run(requests, &mut presence_preview).await
 }
 
-/// glibc otherwise holds freed READY allocations for the entire session.
-/// Trim once after parsing, before the session starts handling requests.
+/// glibc and Windows heaps otherwise hold freed READY allocations for the
+/// session. Trim once after parsing, before the session starts handling
+/// requests.
 fn trim_startup_heap() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -315,6 +319,39 @@ fn trim_startup_heap() {
         }
         // SAFETY: malloc_trim only returns unused allocator pages to the OS.
         unsafe { malloc_trim(0) };
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct OptimizeResources {
+            version: u32,
+            flags: u32,
+        }
+        const HEAP_OPTIMIZE_RESOURCES: i32 = 3;
+        const CURRENT_VERSION: u32 = 1;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn HeapSetInformation(
+                heap_handle: *mut std::ffi::c_void,
+                heap_information_class: i32,
+                heap_information: *const std::ffi::c_void,
+                heap_information_length: usize,
+            ) -> i32;
+        }
+        let info = OptimizeResources {
+            version: CURRENT_VERSION,
+            flags: 0,
+        };
+        // SAFETY: `HeapOptimizeResources` (3) with a null handle asks Windows to
+        // decommit freed pages across all process heaps without touching cold blocks.
+        unsafe {
+            HeapSetInformation(
+                std::ptr::null_mut(),
+                HEAP_OPTIMIZE_RESOURCES,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of::<OptimizeResources>(),
+            );
+        }
     }
 }
 
@@ -392,6 +429,7 @@ impl Session<'_> {
                 },
                 () = self.status_ends.as_mut(), if self.tracker.custom_status.as_ref().is_some_and(|custom| custom.expires_at_ms.is_some()) => {
                     self.tracker.custom_status = None;
+                    self.tracker.mark_persistent();
                     self.publisher.changed();
                     self.show_presence().await
                 }
@@ -547,6 +585,7 @@ impl Session<'_> {
                     Ok(())
                 }
                 () = self.mutes_end.as_mut(), if self.mute_end.is_some() => {
+                    self.tracker.mark_persistent();
                     self.publisher.changed();
                     self.mutes_changed();
                     Ok(())
@@ -662,6 +701,7 @@ impl Session<'_> {
                 sync,
             } => {
                 if let Some(message) = self.tracker.unreads.mark_read(&guild, &channel) {
+                    self.tracker.mark_persistent();
                     self.publisher.changed();
                     if sync {
                         self.acks.read(channel, message);
@@ -690,7 +730,10 @@ impl Session<'_> {
             Request::CustomStatus(custom) => {
                 // The settings update that follows says the same; this
                 // shows it without waiting.
-                self.tracker.custom_status = custom;
+                if self.tracker.custom_status != custom {
+                    self.tracker.custom_status = custom;
+                    self.tracker.mark_persistent();
+                }
                 self.publisher.changed();
                 self.custom_status_changed();
                 self.show_presence().await
@@ -708,7 +751,10 @@ impl Session<'_> {
                 Ok(())
             }
             Request::Status(status) => {
-                self.tracker.status = status;
+                if self.tracker.status != status {
+                    self.tracker.status = status;
+                    self.tracker.mark_persistent();
+                }
                 self.publisher.changed();
                 self.show_presence().await
             }
@@ -766,7 +812,10 @@ impl Session<'_> {
             }
             Request::ShowGame(shown) => {
                 // As with the status, the settings update that follows agrees.
-                self.tracker.show_game = shown;
+                if self.tracker.show_game != shown {
+                    self.tracker.show_game = shown;
+                    self.tracker.mark_persistent();
+                }
                 if !shown {
                     self.waiting_for_rpc = false;
                     self.waiting_for_smtc_pause = false;

@@ -5,6 +5,30 @@
 
 use chrono::{Local, NaiveDate, TimeZone};
 
+/// A person token parsed from `from:` or `mentions:`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PersonTerm {
+    pub text: String,
+    /// True when the user prefixed the value with `@` (e.g. `from:@alice`).
+    pub explicit_username: bool,
+}
+
+impl PersonTerm {
+    pub fn display(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            explicit_username: false,
+        }
+    }
+
+    pub fn username(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            explicit_username: true,
+        }
+    }
+}
+
 /// What a search's text asks for. Names are as typed; the service finds
 /// the people and channels they name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -12,9 +36,9 @@ pub struct Query {
     /// The words to find, without the filters.
     pub content: String,
     /// `from:`, who wrote it.
-    pub from: Vec<String>,
+    pub from: Vec<PersonTerm>,
     /// `mentions:`, whom it mentions.
-    pub mentions: Vec<String>,
+    pub mentions: Vec<PersonTerm>,
     /// `in:`, the server's channels it's in, without their `#`.
     pub channels: Vec<String>,
     /// `has:`, what it carries, as Discord's `has` names it.
@@ -60,10 +84,16 @@ impl Query {
             };
             let value = value.trim_matches('"');
             match key.to_lowercase().as_str() {
-                "from" => query.from.push(value.trim_start_matches('@').to_owned()),
-                "mentions" => query
-                    .mentions
-                    .push(value.trim_start_matches('@').to_owned()),
+                "from" => {
+                    if let Some(term) = parse_person_term(value) {
+                        query.from.push(term);
+                    }
+                }
+                "mentions" => {
+                    if let Some(term) = parse_person_term(value) {
+                        query.mentions.push(term);
+                    }
+                }
                 "in" => query
                     .channels
                     .push(value.trim_start_matches('#').to_owned()),
@@ -116,6 +146,20 @@ impl Query {
         params.extend(self.pinned.map(|pinned| ("pinned", pinned.to_string())));
         params
     }
+}
+
+fn parse_person_term(value: &str) -> Option<PersonTerm> {
+    let trimmed = value.trim().trim_matches('"').trim();
+    let explicit_username = trimmed.starts_with('@');
+    let text = trimmed
+        .trim_start_matches('@')
+        .trim()
+        .trim_matches('"')
+        .trim();
+    (!text.is_empty()).then(|| PersonTerm {
+        text: text.to_owned(),
+        explicit_username,
+    })
 }
 
 const FILTERS: [&str; 8] = [
@@ -180,14 +224,22 @@ mod tests {
             Query::parse(r#"trip from:@bob in:#general has:Image mentions:"Carol M" notes"#)
                 .unwrap();
         assert_eq!(query.content, "trip notes");
-        assert_eq!(query.from, ["bob"]);
+        assert_eq!(query.from, [PersonTerm::username("bob")]);
         assert_eq!(query.channels, ["general"]);
         assert_eq!(query.has, ["image"]);
-        assert_eq!(query.mentions, ["Carol M"]);
+        assert_eq!(query.mentions, [PersonTerm::display("Carol M")]);
         assert_eq!(
             query.params(),
             [("content", "trip notes".into()), ("has", "image".into())]
         );
+        let quoted_handle =
+            Query::parse(r#"from:@"alex.new" mentions:"Alex (@alex.new)" pinned:false"#).unwrap();
+        assert_eq!(quoted_handle.from, [PersonTerm::username("alex.new")]);
+        assert_eq!(
+            quoted_handle.mentions,
+            [PersonTerm::display("Alex (@alex.new)")]
+        );
+        assert_eq!(quoted_handle.pinned, Some(false));
         let forwarded = Query::parse("has:forward pinned:true").unwrap();
         assert_eq!(forwarded.has, ["snapshot"]);
         assert_eq!(forwarded.pinned, Some(true));

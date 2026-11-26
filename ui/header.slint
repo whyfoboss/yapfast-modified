@@ -73,6 +73,8 @@ export struct SearchFilterItem {
     color: color,
     has-color: bool,
     heading: string,
+    user-id: string,
+    external: bool,
 }
 
 // The conversation's search, in its header: Enter searches, and the cross,
@@ -83,6 +85,12 @@ export component HeaderSearch inherits Rectangle {
     /// Takes the keyboard as it shows.
     in property <bool> autofocus;
     out property <bool> has-focus: input.has-focus;
+    in property <int> focus-tick;
+    changed focus-tick => {
+        if self.focus-tick > 0 {
+            root.focus-and-select();
+        }
+    }
     in-out property <bool> dropdown-open: false;
     in-out property <int> selected-suggestion: -1;
     in property <int> suggestion-count: 0;
@@ -102,6 +110,10 @@ export component HeaderSearch inherits Rectangle {
     callback close-dropdown;
 
     public function focus-input() { input.focus(); }
+    public function focus-and-select() {
+        input.focus();
+        input.select-all();
+    }
 
     init => { if root.autofocus { input.focus(); } }
     changed has-focus => {
@@ -328,12 +340,15 @@ export component SearchFilterDropdown inherits Rectangle {
 // Jump button, shows it in the conversation.
 export component FoundCard inherits Rectangle {
     in property <FoundRow> found;
+    in property <bool> highlighted;
     callback jump;
+    callback view-image(int);
+    callback reveal-attachment(int);
     callback open-link(string);
     min-height: content.preferred-height;
     border-radius: 8px;
     background: pointer.has-hover ? Theme.hover : Theme.chat;
-    border-width: 1px; border-color: Theme.line;
+    border-width: root.highlighted ? 2px : 1px; border-color: root.highlighted ? Theme.accent : Theme.line;
     accessible-role: button;
     accessible-label: root.found.author + ", " + root.found.when + ", jump to the message";
     accessible-action-default => { root.jump(); }
@@ -385,6 +400,14 @@ export component FoundCard inherits Rectangle {
                             if cell.video && !cell.spoiler && !cell.loading: Rectangle {
                                 width: 40px; height: 40px; border-radius: 20px; background: #000000b3;
                                 Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #ffffff; }
+                            }
+                            TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    if cell.spoiler { root.reveal-attachment(cell.index); }
+                                    else if !cell.video { root.view-image(cell.index); }
+                                    else { root.jump(); }
+                                }
                             }
                         }
                     }
@@ -448,6 +471,8 @@ export component PinsPopover inherits Rectangle {
     /// there are no pins.
     in property <string> note;
     callback jump(string);
+    callback view-image(string, int);
+    callback reveal-attachment(string, int);
     callback open-link(string);
     callback close;
     /// How tall it would be to show every pin.
@@ -472,6 +497,8 @@ export component PinsPopover inherits Rectangle {
                 for pin in root.pins: FoundCard {
                     found: pin;
                     jump => { root.jump(pin.item); }
+                    view-image(index) => { root.view-image(pin.item, index); }
+                    reveal-attachment(index) => { root.reveal-attachment(pin.item, index); }
                     open-link(link) => { root.open-link(link); }
                 }
             }
@@ -806,15 +833,81 @@ export component AddPeoplePopover inherits Rectangle {
     }
 }
 
-// What a search of the DM found, beside the conversation: the newest first,
-// a page at a time.
+// What a search found, beside the conversation: newest first,
+// virtualized in a ListView with explicit scope tracking and lazy previews.
 export component SearchPanel inherits Rectangle {
     in property <[FoundRow]> results;
     in property <int> total;
-    in property <int> first: 1;
+    in property <int> search-generation;
+    in property <string> scope-label;
+    in property <bool> scope-differs;
+    in property <string> current-place-label;
+    in property <int> jump-index: -1;
+    in property <int> jump-revision;
+    in property <int> jump-settle-tick;
+    in property <string> jump-hint;
+    in property <int> blur-jump-tick;
+    changed blur-jump-tick => {
+        if self.blur-jump-tick > 0 { jump-field.blur-input(); }
+    }
     callback start-at(string);
+    callback viewport-changed(int, int);
+    callback search-here;
     property <string> position;
-    changed first => { root.position = ""; results-scroll.content-y = 0px; }
+    property <int> highlighted-index: -1;
+    property <bool> jump-active: false;
+    property <int> local-jump-tick: 0;
+    property <int> top-index: 0;
+    property <int> bottom-index: 0;
+    property <int> view-tick: 0;
+    in-out property <bool> jump-focused;
+    in-out property <length> jump-x;
+    in-out property <length> jump-y;
+    in-out property <length> jump-width;
+    in-out property <length> jump-height;
+    changed search-generation => {
+        root.position = "";
+        root.highlighted-index = -1;
+        root.jump-active = false;
+        root.top-index = 0;
+        root.bottom-index = 0;
+        results-list.content-y = 0px;
+    }
+    changed jump-index => { root.begin-jump(); }
+    changed jump-revision => { root.begin-jump(); }
+    changed top-index => { root.viewport-changed(root.top-index, root.bottom-index); }
+    changed bottom-index => { root.viewport-changed(root.top-index, root.bottom-index); }
+    function sync-jump-bounds() {
+        root.jump-x = jump-field.absolute-position.x;
+        root.jump-y = jump-field.absolute-position.y;
+        root.jump-width = jump-field.width;
+        root.jump-height = jump-field.height;
+    }
+    changed width => { root.sync-jump-bounds(); }
+    changed height => { root.sync-jump-bounds(); }
+    changed total => { root.sync-jump-bounds(); }
+    function begin-jump() {
+        root.highlighted-index = -1;
+        if root.jump-index >= 0 {
+            root.jump-active = true;
+            root.local-jump-tick += 1;
+            let count = max(1, root.results.length);
+            let est-height = results-list.content-height > 0px ? results-list.content-height : count * 120px;
+            let est-y = est-height * root.jump-index / count;
+            results-list.content-y = max(min(0px, results-list.visible-height - est-height), min(0px, 8px - est-y));
+            root.view-tick += 1;
+        } else {
+            root.jump-active = false;
+        }
+    }
+    Timer {
+        interval: 600ms; running: root.jump-active;
+        triggered => { root.jump-active = false; }
+    }
+    Timer {
+        interval: 1200ms; running: root.highlighted-index >= 0;
+        triggered => { root.highlighted-index = -1; }
+    }
     /// How many it found, or that it's searching, or why it couldn't.
     in property <string> heading;
     in property <string> note;
@@ -822,6 +915,8 @@ export component SearchPanel inherits Rectangle {
     in property <bool> loading;
     /// Show a result: its room and its item.
     callback jump(string, string);
+    callback view-image(string, string, int);
+    callback reveal-attachment(string, int);
     callback open-link(string);
     callback more-results;
     callback close;
@@ -831,50 +926,127 @@ export component SearchPanel inherits Rectangle {
     Rectangle { x: 0; width: 1px; background: Theme.edge; }
     VerticalLayout {
         Rectangle {
-            height: 48px;
-            HorizontalLayout {
-                padding-left: 16px; padding-right: 10px; spacing: 10px;
-                Text { text: root.heading; color: Theme.text; font-size: 15px; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                Middle { IconButton { icon: @image-url("icons/x.svg"); label: "Close search"; size: 28px; glyph: 18px; tip-side: 2; clicked => { root.close(); } } }
+            min-height: header-col.preferred-height;
+            header-col := VerticalLayout {
+                padding-left: 16px; padding-right: 10px; padding-top: 8px; padding-bottom: 8px; spacing: 4px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text { text: root.heading; color: Theme.text; font-size: 15px; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    Middle { IconButton { icon: @image-url("icons/x.svg"); label: "Close search"; size: 28px; glyph: 18px; tip-side: 2; clicked => { root.close(); } } }
+                }
+                if root.scope-label != "": HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: (root.scope-differs ? "Saved search · " : "Scope · ") + root.scope-label;
+                        color: root.scope-differs ? Theme.accent : Theme.muted;
+                        font-size: 12px; font-weight: root.scope-differs ? 600 : 500;
+                        vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+                    }
+                    if root.scope-differs && root.current-place-label != "": ActionButton {
+                        text: "Search here"; small: true;
+                        clicked => { root.search-here(); }
+                    }
+                }
             }
             Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
         }
         if root.note != "": HorizontalLayout { padding: 16px; Label { text: root.note; } }
-        if root.total > 25: HorizontalLayout {
-            padding-left: 12px; padding-right: 12px; padding-top: 6px; spacing: 6px;
-            TextField {
-                text <=> root.position;
-                placeholder: "Result " + root.first + " of " + root.total;
-                label: "Start at result (1 is oldest)"; text-size: 13px;
-                accepted => { root.start-at(root.position); }
-            }
-            ActionButton { text: "Go"; small: true; clicked => { root.start-at(root.position); } }
-        }
-        results-scroll := ScrollView {
-            vertical-stretch: 1;
-            expand-scrollbars: false;
-            VerticalLayout {
-                padding: 12px; spacing: 8px; alignment: start;
-                for found in root.results: VerticalLayout {
-                    spacing: 6px;
-                    // The channel a run of results is in, as Discord heads them.
-                    if found.heading != "": HorizontalLayout {
-                        padding-top: 6px; spacing: 4px;
-                        Middle { Image { source: @image-url("icons/hash.svg"); width: 14px; height: 14px; colorize: Theme.muted; } }
-                        Text { text: found.heading; color: Theme.secondary; font-size: 13px; font-weight: 700; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+        Rectangle {
+            clip: true;
+            visible: root.total > 0;
+            height: root.total > 0 ? jump-bar.preferred-height : 0px;
+            jump-bar := HorizontalLayout {
+                padding-left: 12px; padding-right: 12px; padding-top: 6px; spacing: 6px;
+                jump-field := TextField {
+                    property <bool> field-focused: self.focused;
+                    changed field-focused => {
+                        root.jump-focused = self.field-focused && root.total > 0;
+                        root.sync-jump-bounds();
                     }
-                    FoundCard {
-                        found: found;
-                        jump => { root.jump(found.room, found.item); }
-                        open-link(link) => { root.open-link(link); }
+                    enabled: root.total > 0;
+                    text <=> root.position;
+                    placeholder: "Go to result";
+                    label: "Go to result"; text-size: 13px;
+                    accepted => { root.start-at(root.position); }
+                }
+                ActionButton { text: "Go"; small: true; enabled: root.total > 0; clicked => { root.start-at(root.position); } }
+            }
+        }
+        if root.jump-hint != "": HorizontalLayout {
+            padding-left: 12px; padding-right: 12px; padding-top: 4px;
+            Label { text: root.jump-hint; }
+        }
+        Rectangle {
+            vertical-stretch: 1; clip: true;
+            results-list := ListView {
+                width: parent.width; height: parent.height;
+                scrolled => {
+                    root.view-tick += 1;
+                    root.viewport-changed(root.top-index, root.bottom-index);
+                }
+                for found[index] in root.results: result-row := Rectangle {
+                    height: row-col.preferred-height;
+                    property <bool> is-jump-target: root.jump-active && root.jump-index == index;
+                    property <int> local-jump: root.local-jump-tick;
+                    property <int> settle: root.jump-settle-tick;
+                    property <length> view-y: self.y + results-list.content-y;
+                    property <int> view-tick: root.view-tick;
+                    property <int> row-index: index;
+                    function snap-to-target() {
+                        if self.is-jump-target {
+                            results-list.content-y = max(min(0px, results-list.visible-height - results-list.content-height), min(0px, 8px - self.y));
+                            root.highlighted-index = index;
+                        }
+                    }
+                    function report-view() {
+                        if self.view-y <= 0px && self.view-y + self.height > 0px {
+                            root.top-index = index;
+                        }
+                        if self.view-y < results-list.height && (self.view-y + self.height >= results-list.height || index == root.results.length - 1) {
+                            root.bottom-index = index;
+                        }
+                    }
+                    init => {
+                        root.view-tick += 1;
+                        self.snap-to-target();
+                        self.report-view();
+                    }
+                    changed is-jump-target => { self.snap-to-target(); }
+                    changed local-jump => { self.snap-to-target(); }
+                    changed settle => { self.snap-to-target(); }
+                    changed y => { self.snap-to-target(); }
+                    changed height => { self.snap-to-target(); self.report-view(); }
+                    changed view-y => { self.report-view(); }
+                    changed view-tick => { self.report-view(); }
+                    changed row-index => { self.snap-to-target(); self.report-view(); }
+                    row-col := VerticalLayout {
+                        padding-left: 12px; padding-right: 12px; padding-top: 4px; padding-bottom: 4px; spacing: 6px;
+                        // The channel a run of results is in, as Discord heads them.
+                        if found.heading != "": HorizontalLayout {
+                            padding-top: 6px; spacing: 4px;
+                            Middle { Image { source: @image-url("icons/hash.svg"); width: 14px; height: 14px; colorize: Theme.muted; } }
+                            Text { text: found.heading; color: Theme.secondary; font-size: 13px; font-weight: 700; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                        }
+                        FoundCard {
+                            found: found;
+                            highlighted: root.highlighted-index == index;
+                            jump => { root.jump(found.room, found.item); }
+                            view-image(att-index) => { root.view-image(found.room, found.item, att-index); }
+                            reveal-attachment(att-index) => { root.reveal-attachment(found.item, att-index); }
+                            open-link(link) => { root.open-link(link); }
+                        }
                     }
                 }
-                if root.more: HorizontalLayout {
-                    alignment: center; padding-top: 4px;
-                    ActionButton {
-                        text: root.loading ? "Loading..." : "Show more"; small: true; enabled: !root.loading;
-                        clicked => { root.more-results(); }
-                    }
+            }
+        }
+        if root.more: Rectangle {
+            min-height: more-row.preferred-height;
+            Rectangle { y: 0px; height: 1px; background: Theme.line; }
+            more-row := HorizontalLayout {
+                alignment: center; padding: 10px;
+                ActionButton {
+                    text: root.loading ? "Loading..." : "Show more"; small: true; enabled: !root.loading;
+                    clicked => { root.more-results(); }
                 }
             }
         }

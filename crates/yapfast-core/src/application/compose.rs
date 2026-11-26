@@ -24,8 +24,25 @@ impl Application {
 
     pub(super) fn mention_query(&mut self, query: Option<(char, String)>) -> Vec<Effect> {
         self.state.mention_query = query.clone();
-        // Discord servers list only some members; ask for the rest by name.
-        let (Some(room), Some(('@', query))) = (self.state.selected.clone(), query) else {
+        let Some(('@', query)) = query else {
+            return vec![];
+        };
+        if self
+            .state
+            .mention_suggestions()
+            .iter()
+            .filter(|candidate| !candidate.group)
+            .count()
+            >= MENTION_SUGGESTIONS
+        {
+            return vec![];
+        }
+        self.request_server_members(&query)
+    }
+
+    pub(super) fn request_server_members(&mut self, query: &str) -> Vec<Effect> {
+        let query = query.trim();
+        let Some(room) = self.state.selected.clone() else {
             return vec![];
         };
         let in_server =
@@ -33,19 +50,15 @@ impl Application {
         if self.state.preview
             || !in_server
             || query.is_empty()
-            || self
-                .state
-                .mention_suggestions()
-                .iter()
-                .filter(|candidate| !candidate.group)
-                .count()
-                >= MENTION_SUGGESTIONS
             || !self.searched.insert(query.to_lowercase())
         {
             return vec![];
         }
         vec![Effect::Backend(Command::Discord(
-            DiscordCommand::SearchMembers { room, query },
+            DiscordCommand::SearchMembers {
+                room,
+                query: query.to_owned(),
+            },
         ))]
     }
 

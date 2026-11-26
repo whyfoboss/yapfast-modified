@@ -2,8 +2,13 @@
 
 use chrono::Local;
 use slint::SharedString;
-use std::collections::HashMap;
-use yapfast_core::{application::AppState, discord};
+use std::collections::{HashMap, HashSet};
+use yapfast_core::{
+    application::AppState,
+    chat::{SearchUserBinding, SearchUserFilter},
+    discord,
+    yapfast_discord::ready::PRIVATE,
+};
 use yapfast_ui::SearchFilterItem;
 
 use super::{cached_picture, initial, role_color, tint};
@@ -32,10 +37,433 @@ const HAS_OPTIONS: &[(&str, &str)] = &[
 ];
 
 struct UserCandidate {
+    id: String,
     name: String,
     username: Option<String>,
     avatar: Option<String>,
     color: Option<u32>,
+    external: bool,
+    friend: bool,
+}
+
+enum SearchScope<'a> {
+    Server(&'a str),
+    GroupDm(&'a yapfast_core::chat::ChatRoom),
+    OneToOneDm(&'a yapfast_core::chat::ChatRoom),
+    Unknown,
+}
+
+fn active_scope(state: &AppState) -> SearchScope<'_> {
+    let Some(room) = state.conversation_that(|can| can.search) else {
+        return SearchScope::Unknown;
+    };
+    if !room.direct
+        && let Some((guild, _)) = discord::parse_room(&room.id)
+    {
+        return SearchScope::Server(guild);
+    }
+    if room.direct {
+        if room.participants.len() > 2 || (room.person.is_none() && room.members > 2) {
+            SearchScope::GroupDm(room)
+        } else {
+            SearchScope::OneToOneDm(room)
+        }
+    } else {
+        SearchScope::Unknown
+    }
+}
+
+/// Resolves the active trailing `from:` or `mentions:` query prefix while typing.
+pub(super) fn active_person_filter_query(text: &str) -> Option<(SearchUserFilter, &str)> {
+    if text.is_empty() || text.ends_with(char::is_whitespace) {
+        return None;
+    }
+    let last_token = text.split_whitespace().last()?;
+    let (key, value) = last_token.split_once(':')?;
+    let filter = match key.to_ascii_lowercase().as_str() {
+        "from" => SearchUserFilter::From,
+        "mentions" => SearchUserFilter::Mentions,
+        _ => return None,
+    };
+    let clean = value.trim_start_matches('"').trim_start_matches('@').trim();
+    Some((filter, clean))
+}
+
+/// Keeps only bound user IDs whose `from:` or `mentions:` token still exists verbatim
+/// in `query`; editing or removing a token drops its stale ID binding immediately.
+pub(super) fn prune_search_bindings(query: &str, bindings: &mut Vec<SearchUserBinding>) {
+    if bindings.is_empty() {
+        return;
+    }
+    if let Ok(parsed) = yapfast_core::yapfast_discord::search::Query::parse(query) {
+        let has_term = |filter: SearchUserFilter, token: &str| {
+            let needle = token.trim().trim_start_matches('@').to_lowercase();
+            let list = match filter {
+                SearchUserFilter::From => &parsed.from,
+                SearchUserFilter::Mentions => &parsed.mentions,
+            };
+            list.iter()
+                .any(|t| t.text.trim_start_matches('@').eq_ignore_ascii_case(&needle))
+        };
+        bindings.retain(|b| has_term(b.filter, &b.token));
+        return;
+    }
+    let lower = query.to_lowercase();
+    bindings.retain(|b| {
+        let prefix = match b.filter {
+            SearchUserFilter::From => "from:",
+            SearchUserFilter::Mentions => "mentions:",
+        };
+        let norm = b.token.trim().trim_start_matches('@').to_lowercase();
+        !norm.is_empty()
+            && (lower.contains(&format!("{prefix}{norm}"))
+                || lower.contains(&format!("{prefix}@{norm}"))
+                || lower.contains(&format!("{prefix}\"{norm}\""))
+                || lower.contains(&format!("{prefix}@\"{norm}\"")))
+    });
+}
+
+/// Extracts the normalized value from a suggestion token such as `from:@alex.new ` -> `alex.new`.
+pub(super) fn normalized_binding_token(token: &str, label: &str) -> String {
+    let raw = token
+        .split_once(':')
+        .map_or(label, |(_, value)| value)
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches('@')
+        .trim()
+        .trim_matches('"')
+        .trim();
+    raw.to_lowercase()
+}
+
+fn resolve_discord_user(
+    state: &AppState,
+    guild: Option<&str>,
+    uid: &str,
+) -> (String, Option<String>, Option<String>, Option<u32>) {
+    if state.discord_user.as_deref() == Some(uid) {
+        let name = state
+            .discord_names
+            .as_ref()
+            .and_then(|names| {
+                let n = names.read();
+                guild
+                    .and_then(|g| n.name(g, uid).map(str::to_owned))
+                    .or_else(|| n.user_name(uid).map(str::to_owned))
+            })
+            .or_else(|| state.account_name.clone())
+            .unwrap_or_else(|| "You".to_owned());
+        let username = state.account_username.clone().or_else(|| {
+            state
+                .discord_names
+                .as_ref()
+                .and_then(|names| names.read().username(uid).map(str::to_owned))
+        });
+        let avatar = state
+            .discord_names
+            .as_ref()
+            .map(|names| names.read().avatar(guild, uid))
+            .or_else(|| state.account_avatar.clone());
+        let color = state
+            .members
+            .iter()
+            .flatten()
+            .flatten()
+            .find(|m| m.id == uid)
+            .and_then(|m| m.color);
+        return (name, username, avatar, color);
+    }
+
+    if let Some(member) = state
+        .members
+        .iter()
+        .flatten()
+        .flatten()
+        .chain(&state.found_members)
+        .find(|m| m.id == uid)
+    {
+        return (
+            member.name.clone(),
+            member.username.clone(),
+            member.avatar.clone(),
+            member.color,
+        );
+    }
+
+    if let Some(names_lock) = &state.discord_names {
+        let names = names_lock.read();
+        let display = guild
+            .and_then(|g| names.name(g, uid))
+            .or_else(|| names.user_name(uid))
+            .map(str::to_owned);
+        let username = names.username(uid).map(str::to_owned);
+        if display.is_some() || username.is_some() {
+            let name = display.unwrap_or_else(|| username.clone().unwrap_or_default());
+            let avatar = Some(names.avatar(guild, uid));
+            return (name, username, avatar, None);
+        }
+    }
+
+    if let Some(friend) = state.friends.iter().find(|f| f.id == uid) {
+        return (friend.name.clone(), None, friend.avatar.clone(), None);
+    }
+
+    (uid.to_owned(), None, None, None)
+}
+
+fn collect_person_candidates(state: &AppState, filter_value: &str) -> Vec<UserCandidate> {
+    let scope = active_scope(state);
+    let guild = match scope {
+        SearchScope::Server(g) => Some(g),
+        _ => None,
+    };
+    let val_lower = filter_value.to_lowercase();
+    let friend_ids: HashSet<&str> = state
+        .friends
+        .iter()
+        .map(|f| f.id.as_str())
+        .chain(state.discord_friends.iter().map(String::as_str))
+        .collect();
+
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut local: Vec<UserCandidate> = Vec::new();
+
+    let push_unique = |list: &mut Vec<UserCandidate>,
+                       seen: &mut HashSet<String>,
+                       id: String,
+                       name: String,
+                       username: Option<String>,
+                       avatar: Option<String>,
+                       color: Option<u32>,
+                       external: bool| {
+        if id.is_empty() || (name.is_empty() && username.is_none()) || !seen.insert(id.clone()) {
+            return;
+        }
+        let friend = friend_ids.contains(id.as_str());
+        list.push(UserCandidate {
+            name: if name.is_empty() {
+                username.clone().unwrap_or_default()
+            } else {
+                name
+            },
+            id,
+            username,
+            avatar,
+            color,
+            external,
+            friend,
+        });
+    };
+
+    match scope {
+        SearchScope::GroupDm(room) => {
+            if !room.participants.is_empty() {
+                for uid in &room.participants {
+                    let (name, username, avatar, color) =
+                        resolve_discord_user(state, Some(PRIVATE), uid);
+                    push_unique(
+                        &mut local,
+                        &mut seen_ids,
+                        uid.clone(),
+                        name,
+                        username,
+                        avatar,
+                        color,
+                        false,
+                    );
+                }
+            } else {
+                for uid in state.discord_user.iter().chain(room.person.iter()) {
+                    let (name, username, avatar, color) =
+                        resolve_discord_user(state, Some(PRIVATE), uid);
+                    push_unique(
+                        &mut local,
+                        &mut seen_ids,
+                        uid.clone(),
+                        name,
+                        username,
+                        avatar,
+                        color,
+                        false,
+                    );
+                }
+            }
+        }
+        SearchScope::OneToOneDm(room) => {
+            for uid in room
+                .participants
+                .iter()
+                .chain(state.discord_user.iter())
+                .chain(room.person.iter())
+            {
+                let (name, username, avatar, color) =
+                    resolve_discord_user(state, Some(PRIVATE), uid);
+                push_unique(
+                    &mut local,
+                    &mut seen_ids,
+                    uid.clone(),
+                    name,
+                    username,
+                    avatar,
+                    color,
+                    false,
+                );
+            }
+        }
+        SearchScope::Server(guild_id) => {
+            for m in state
+                .members
+                .iter()
+                .flatten()
+                .flatten()
+                .chain(&state.found_members)
+            {
+                let mut username = m.username.clone();
+                if username.is_none()
+                    && let Some(names) = &state.discord_names
+                {
+                    username = names.read().username(&m.id).map(str::to_owned);
+                }
+                push_unique(
+                    &mut local,
+                    &mut seen_ids,
+                    m.id.clone(),
+                    m.name.clone(),
+                    username,
+                    m.avatar.clone(),
+                    m.color,
+                    false,
+                );
+            }
+            if let Some(names_lock) = &state.discord_names {
+                let ids = names_lock.read().guild_members(guild_id);
+                for uid in ids {
+                    let (name, username, avatar, color) =
+                        resolve_discord_user(state, Some(guild_id), &uid);
+                    push_unique(
+                        &mut local,
+                        &mut seen_ids,
+                        uid,
+                        name,
+                        username,
+                        avatar,
+                        color,
+                        false,
+                    );
+                }
+            }
+            if let Some(me) = state.discord_user.as_deref() {
+                let (name, username, avatar, color) =
+                    resolve_discord_user(state, Some(guild_id), me);
+                push_unique(
+                    &mut local,
+                    &mut seen_ids,
+                    me.to_owned(),
+                    name,
+                    username,
+                    avatar,
+                    color,
+                    false,
+                );
+            }
+        }
+        SearchScope::Unknown => {
+            for c in state.mention_candidates().into_iter().filter(|c| !c.group && !c.channel) {
+                let id = c
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| c.name.clone());
+                push_unique(
+                    &mut local,
+                    &mut seen_ids,
+                    id,
+                    c.name,
+                    c.username,
+                    c.avatar,
+                    c.color,
+                    false,
+                );
+            }
+        }
+    }
+
+    let matches_query = |u: &UserCandidate| -> bool {
+        if val_lower.is_empty() {
+            return true;
+        }
+        u.name.to_lowercase().contains(&val_lower)
+            || u.username
+                .as_deref()
+                .is_some_and(|un| un.to_lowercase().contains(&val_lower))
+    };
+
+    local.retain(matches_query);
+    local.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.username.cmp(&b.username))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    if val_lower.is_empty() {
+        local.truncate(20);
+        return local;
+    }
+
+    // Typed queries include clearly labeled external known users/friends below scope members.
+    let mut external: Vec<UserCandidate> = Vec::new();
+    for f in &state.friends {
+        if seen_ids.contains(&f.id) {
+            continue;
+        }
+        let (_, username, avatar, _) = resolve_discord_user(state, None, &f.id);
+        push_unique(
+            &mut external,
+            &mut seen_ids,
+            f.id.clone(),
+            f.name.clone(),
+            username,
+            avatar.or_else(|| f.avatar.clone()),
+            None,
+            true,
+        );
+    }
+    if let Some(names_lock) = &state.discord_names {
+        let extra_ids = names_lock.read().search_people(None, filter_value);
+        for uid in extra_ids {
+            if seen_ids.contains(&uid) {
+                continue;
+            }
+            let (name, username, avatar, _) = resolve_discord_user(state, None, &uid);
+            push_unique(
+                &mut external,
+                &mut seen_ids,
+                uid,
+                name,
+                username,
+                avatar,
+                None,
+                true,
+            );
+        }
+    }
+    let _ = guild;
+    external.retain(matches_query);
+    external.sort_by(|a, b| {
+        b.friend
+            .cmp(&a.friend)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.username.cmp(&b.username))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    local.truncate(15);
+    let remaining = 20usize.saturating_sub(local.len()).max(5);
+    external.truncate(remaining);
+    local.extend(external);
+    local
 }
 
 /// Computes the search filter suggestions based on the current search text.
@@ -61,27 +489,31 @@ pub(super) fn compute_search_suggestions(
         text.split_whitespace().last().unwrap_or("")
     };
 
+    let make_category_item = |idx: usize, (cat, desc): &(&str, &str)| SearchFilterItem {
+        kind: 0,
+        token: (*cat).into(),
+        label: (*cat).into(),
+        detail: (*desc).into(),
+        avatar: Default::default(),
+        initial: Default::default(),
+        tint: Default::default(),
+        color: Default::default(),
+        has_color: false,
+        heading: if idx == 0 {
+            "SEARCH OPTIONS".into()
+        } else {
+            SharedString::default()
+        },
+        user_id: SharedString::default(),
+        external: false,
+    };
+
     if last_token.is_empty() {
         return CATEGORIES
             .iter()
             .filter(|(cat, _)| in_server || *cat != "in:")
             .enumerate()
-            .map(|(idx, (cat, desc))| SearchFilterItem {
-                kind: 0,
-                token: (*cat).into(),
-                label: (*cat).into(),
-                detail: (*desc).into(),
-                avatar: Default::default(),
-                initial: Default::default(),
-                tint: Default::default(),
-                color: Default::default(),
-                has_color: false,
-                heading: if idx == 0 {
-                    "SEARCH OPTIONS".into()
-                } else {
-                    SharedString::default()
-                },
-            })
+            .map(|(idx, pair)| make_category_item(idx, pair))
             .collect();
     }
 
@@ -95,58 +527,56 @@ pub(super) fn compute_search_suggestions(
 
         match key_lower.as_str() {
             "from" | "mentions" => {
-                let candidates = state.mention_candidates();
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let mut users: Vec<UserCandidate> = Vec::new();
-                for c in candidates.into_iter().filter(|c| !c.group && !c.channel) {
-                    if seen.insert(c.name.clone()) {
-                        users.push(UserCandidate {
-                            name: c.name,
-                            username: c.username,
-                            avatar: c.avatar,
-                            color: c.color,
-                        });
-                    }
-                }
-                for f in &state.friends {
-                    if seen.insert(f.name.clone()) {
-                        users.push(UserCandidate {
-                            name: f.name.clone(),
-                            username: None,
-                            avatar: f.avatar.clone(),
-                            color: None,
-                        });
-                    }
-                }
+                let external_tag = match active_scope(state) {
+                    SearchScope::Server(_) => "Not in server",
+                    SearchScope::GroupDm(_) => "Not in group",
+                    SearchScope::OneToOneDm(_) => "Not in DM",
+                    SearchScope::Unknown => "External",
+                };
+                let users = collect_person_candidates(state, val_filter);
+                let mut seen_external_header = false;
                 return users
                     .into_iter()
-                    .filter(|u| {
-                        val_lower.is_empty()
-                            || u.name.to_lowercase().contains(&val_lower)
-                            || u.username
-                                .as_deref()
-                                .unwrap_or("")
-                                .to_lowercase()
-                                .contains(&val_lower)
-                    })
-                    .take(20)
                     .enumerate()
                     .map(|(idx, u)| {
-                        let token = if u.name.contains(' ') {
+                        let token = if let Some(un) = &u.username {
+                            if un.contains(' ') {
+                                format!("{key_lower}:@\"{un}\" ")
+                            } else {
+                                format!("{key_lower}:@{un} ")
+                            }
+                        } else if u.name.contains(' ') {
                             format!("{key_lower}:\"{}\" ", u.name)
                         } else {
                             format!("{key_lower}:{} ", u.name)
+                        };
+                        let detail = match (u.username.as_deref(), u.external, u.friend) {
+                            (Some(un), false, _) => format!("@{un}"),
+                            (None, false, _) => String::new(),
+                            (Some(un), true, true) => {
+                                format!("@{un} · Friend · {external_tag}")
+                            }
+                            (Some(un), true, false) => format!("@{un} · {external_tag}"),
+                            (None, true, true) => format!("Friend · {external_tag}"),
+                            (None, true, false) => external_tag.to_owned(),
+                        };
+                        let heading = if idx == 0 {
+                            if key_lower == "from" {
+                                "FROM USERS".into()
+                            } else {
+                                "MENTIONS".into()
+                            }
+                        } else if u.external && !seen_external_header {
+                            seen_external_header = true;
+                            "OTHER KNOWN USERS".into()
+                        } else {
+                            SharedString::default()
                         };
                         SearchFilterItem {
                             kind: 1,
                             token: token.into(),
                             label: u.name.as_str().into(),
-                            detail: u
-                                .username
-                                .as_deref()
-                                .map(|un| format!("@{un}"))
-                                .unwrap_or_default()
-                                .into(),
+                            detail: detail.into(),
                             avatar: cached_picture(pictures, state, u.avatar.as_deref()),
                             initial: initial(&u.name),
                             tint: tint(&u.name),
@@ -156,15 +586,9 @@ pub(super) fn compute_search_suggestions(
                                 Default::default()
                             },
                             has_color: role_colors && u.color.is_some(),
-                            heading: if idx == 0 {
-                                if key_lower == "from" {
-                                    "FROM USERS".into()
-                                } else {
-                                    "MENTIONS".into()
-                                }
-                            } else {
-                                SharedString::default()
-                            },
+                            heading,
+                            user_id: u.id.into(),
+                            external: u.external,
                         }
                     })
                     .collect();
@@ -197,6 +621,8 @@ pub(super) fn compute_search_suggestions(
                             } else {
                                 SharedString::default()
                             },
+                            user_id: SharedString::default(),
+                            external: false,
                         }
                     })
                     .collect();
@@ -225,6 +651,8 @@ pub(super) fn compute_search_suggestions(
                             } else {
                                 SharedString::default()
                             },
+                            user_id: SharedString::default(),
+                            external: false,
                         }
                     })
                     .collect();
@@ -261,6 +689,8 @@ pub(super) fn compute_search_suggestions(
                         } else {
                             SharedString::default()
                         },
+                        user_id: SharedString::default(),
+                        external: false,
                     })
                     .collect();
             }
@@ -288,6 +718,8 @@ pub(super) fn compute_search_suggestions(
                         } else {
                             SharedString::default()
                         },
+                        user_id: SharedString::default(),
+                        external: false,
                     })
                     .collect();
             }
@@ -302,22 +734,7 @@ pub(super) fn compute_search_suggestions(
         .filter(|(cat, _)| in_server || *cat != "in:")
         .filter(|(cat, _)| cat.starts_with(&token_lower) || cat.contains(&token_lower))
         .enumerate()
-        .map(|(idx, (cat, desc))| SearchFilterItem {
-            kind: 0,
-            token: (*cat).into(),
-            label: (*cat).into(),
-            detail: (*desc).into(),
-            avatar: Default::default(),
-            initial: Default::default(),
-            tint: Default::default(),
-            color: Default::default(),
-            has_color: false,
-            heading: if idx == 0 {
-                "SEARCH OPTIONS".into()
-            } else {
-                SharedString::default()
-            },
-        })
+        .map(|(idx, pair)| make_category_item(idx, pair))
         .collect();
 
     if !matching.is_empty() {
@@ -327,22 +744,7 @@ pub(super) fn compute_search_suggestions(
             .iter()
             .filter(|(cat, _)| in_server || *cat != "in:")
             .enumerate()
-            .map(|(idx, (cat, desc))| SearchFilterItem {
-                kind: 0,
-                token: (*cat).into(),
-                label: (*cat).into(),
-                detail: (*desc).into(),
-                avatar: Default::default(),
-                initial: Default::default(),
-                tint: Default::default(),
-                color: Default::default(),
-                has_color: false,
-                heading: if idx == 0 {
-                    "SEARCH OPTIONS".into()
-                } else {
-                    SharedString::default()
-                },
-            })
+            .map(|(idx, pair)| make_category_item(idx, pair))
             .collect()
     }
 }
@@ -369,19 +771,23 @@ pub(super) fn apply_search_suggestion(
         }
         1 => {
             // Member for from: or mentions:
-            let val = if label.contains(' ') {
-                format!("\"{label}\" ")
-            } else {
-                format!("{label} ")
-            };
             let op = ["mentions:", "from:"]
                 .into_iter()
                 .filter_map(|op| current_query.rfind(op).map(|index| (index, op)))
                 .max_by_key(|(index, _)| *index);
             if let Some((idx, op_str)) = op {
-                format!("{}{op_str}{val}", &current_query[..idx])
+                if token.to_ascii_lowercase().starts_with(op_str) {
+                    format!("{}{token}", &current_query[..idx])
+                } else {
+                    let val = if label.contains(' ') {
+                        format!("\"{label}\" ")
+                    } else {
+                        format!("{label} ")
+                    };
+                    format!("{}{op_str}{val}", &current_query[..idx])
+                }
             } else {
-                format!("{current_query}{val}")
+                format!("{current_query}{token}")
             }
         }
         2 => {

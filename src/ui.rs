@@ -121,6 +121,10 @@ pub fn run(
             layout.gpu_rendering = false;
             layout.write(&root);
         }
+        let default_theme = crate::ui::yapfast::enabled().then_some("bonfire");
+        let (_, chosen) =
+            theme::chosen(layout.theme.as_deref().or(default_theme), &layout.custom_themes);
+        crate::icon::set_initial_theme(chosen.accent, chosen.on_accent);
         title_bar::choose(layout.system_title_bar);
         (plan, layout.window, layout.system_title_bar, instance)
     };
@@ -314,6 +318,19 @@ const EVENT_BATCH: usize = 256;
 /// How long the zoom level shows after it changes.
 const ZOOM_NOTE: Duration = Duration::from_millis(1200);
 
+fn is_f_key(
+    logical: &slint::winit_030::winit::keyboard::Key,
+    physical: slint::winit_030::winit::keyboard::PhysicalKey,
+) -> bool {
+    use slint::winit_030::winit::keyboard::{Key, KeyCode, PhysicalKey};
+    match logical {
+        Key::Character(text) if text.chars().all(|letter| letter.is_ascii_alphabetic()) => {
+            text.eq_ignore_ascii_case("f")
+        }
+        _ => physical == PhysicalKey::Code(KeyCode::KeyF),
+    }
+}
+
 /// What the mouse's back and forward buttons do, as Alt+Left and Alt+Right
 /// do.
 fn side_button_action(button: slint::winit_030::winit::event::MouseButton) -> Option<Action> {
@@ -360,6 +377,11 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
             }
             _ => key.physical_key == PhysicalKey::Code(KeyCode::KeyK),
         }
+    }
+    /// The F key: the letter F in the keyboard's layout, or in a non-Latin
+    /// layout (such as Russian), the physical key in its place.
+    fn is_f(key: &KeyEvent) -> bool {
+        is_f_key(&key.logical_key, key.physical_key)
     }
     let saved = zoom::saved(adapter.borrow().layout.zoom);
     let adapter = Rc::downgrade(adapter);
@@ -427,6 +449,7 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                             base.set(scale);
                         }
                         zoom::apply(window.window(), base.get(), level.get());
+                        crate::icon::reapply_window_icon(&window);
                     });
                 }
                 #[cfg(target_os = "linux")]
@@ -572,7 +595,15 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                         }
                     });
                 }
-                crate::keybinds::window_event(event);
+                let keybind = crate::keybinds::window_event(event);
+                if let WindowEvent::KeyboardInput { .. } = event
+                    && let Some(window) = weak.upgrade()
+                {
+                    let ring = window.global::<FocusRing>();
+                    if ring.get_suppress_activate() != keybind.pressed {
+                        ring.set_suppress_activate(keybind.pressed);
+                    }
+                }
                 // While a keybind records, only the recorder sees its keys.
                 if let Some(window) = weak.upgrade()
                     && keybinds::record(&window, &adapter, event)
@@ -584,6 +615,7 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                 // that asks before it opens, which the window keeps. Those
                 // the application keeps, it checks itself.
                 if let WindowEvent::KeyboardInput { event: key, .. } = event
+                    && !keybind.matched
                     && key.state == ElementState::Pressed
                     && keys.control_only()
                     && is_k(key)
@@ -599,6 +631,31 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                                 (adapter.upgrade(), weak.upgrade())
                             {
                                 adapter.borrow_mut().action(&window, Action::ToggleSwitcher);
+                            }
+                        });
+                    }
+                    return EventResult::PreventDefault;
+                }
+                // Ctrl+F focuses and selects the header search field when the
+                // active chat supports search and no modal or recorder covers it.
+                if let WindowEvent::KeyboardInput { event: key, .. } = event
+                    && !keybind.matched
+                    && key.state == ElementState::Pressed
+                    && keys.control_only()
+                    && is_f(key)
+                    && let Some(window) = weak.upgrade()
+                    && window.get_workspace()
+                    && !window.get_settings_open()
+                    && !window.get_modal_open()
+                    && !window.get_bot_modal_open()
+                    && window.get_leaving_link().is_empty()
+                    && window.get_can_search()
+                {
+                    if !key.repeat {
+                        let weak = weak.clone();
+                        slint::Timer::single_shot(Duration::ZERO, move || {
+                            if let Some(window) = weak.upgrade() {
+                                window.invoke_focus_search();
                             }
                         });
                     }
@@ -658,6 +715,7 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                 // Alt+Left and Alt+Right go back and forward through the
                 // conversations visited, as in Discord.
                 if let WindowEvent::KeyboardInput { event: key, .. } = event
+                    && !keybind.matched
                     && key.state == ElementState::Pressed
                     && keys.alt_only()
                     && let Key::Named(named @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) =
@@ -679,6 +737,33 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                     }
                     return EventResult::PreventDefault;
                 }
+                // Clicking outside the Go-to-result input clears its focus and
+                // focus ring while still delivering the click to its target.
+                if let WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: slint::winit_030::winit::event::MouseButton::Left,
+                    ..
+                } = event
+                    && let Some(position) = cursor
+                    && let Some(window) = weak.upgrade()
+                    && window.get_search_jump_focused()
+                {
+                    let scale = slint_window.scale_factor();
+                    let logical = position.to_logical::<f32>(f64::from(scale));
+                    let (x, y, w, h) = (
+                        window.get_search_jump_x(),
+                        window.get_search_jump_y(),
+                        window.get_search_jump_width(),
+                        window.get_search_jump_height(),
+                    );
+                    let inside = logical.x >= x
+                        && logical.x <= x + w
+                        && logical.y >= y
+                        && logical.y <= y + h;
+                    if !inside {
+                        window.invoke_blur_search_jump();
+                    }
+                }
                 // So do the mouse's back and forward buttons. The release is
                 // kept from the window too, so that it isn't taken for a click.
                 if let WindowEvent::MouseInput { state, button, .. } = event
@@ -694,7 +779,7 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                             && adapter
                                 .keybinds
                                 .as_ref()
-                                .is_some_and(|watcher| watcher.reserves_mouse_for_talk(*button))
+                                .is_some_and(|watcher| watcher.reserves_mouse(*button))
                         {
                             return EventResult::PreventDefault;
                         }
@@ -703,6 +788,7 @@ fn watch_window(window: &YapfastWindow, adapter: &Rc<RefCell<Adapter>>) {
                     return EventResult::PreventDefault;
                 }
                 let step = match outcome {
+                    _ if keybind.matched => return EventResult::Propagate,
                     zoom::Outcome::Pass => return EventResult::Propagate,
                     zoom::Outcome::Taken => return EventResult::PreventDefault,
                     zoom::Outcome::Step(step) => step,
@@ -813,8 +899,12 @@ fn type_anywhere(window: &YapfastWindow) {
         if window.get_browsing() && !text.chars().all(|c| c.is_ascii_alphanumeric()) {
             return false;
         }
-        // Holding the key to talk shouldn't also write it.
-        if window.get_voice_active() && !window.get_muted() && crate::keybinds::pressed_talk_key() {
+        // Keys claimed by active user keybinds shouldn't pull focus into the composer.
+        if crate::keybinds::pressed_bound_key()
+            || (window.get_voice_active()
+                && !window.get_muted()
+                && crate::keybinds::pressed_talk_key())
+        {
             return false;
         }
         window.invoke_type_into_composer()
@@ -1004,6 +1094,82 @@ fn control(path: PathBuf, shell: Rc<shell::Shell>) -> slint::Timer {
                             }
                             _ => Ok(()),
                         }
+                    }
+                    command if command.starts_with("search ") => {
+                        let query = command["search ".len()..].to_owned();
+                        if let Some(window) = window {
+                            adapter.borrow_mut().action(&window, Action::Search(query));
+                        }
+                        Ok(())
+                    }
+                    command if command.starts_with("search-jump ") => {
+                        let position = command["search-jump ".len()..].trim().to_owned();
+                        if let Some(window) = window {
+                            adapter
+                                .borrow_mut()
+                                .action(&window, Action::SearchStartAt(position));
+                        }
+                        Ok(())
+                    }
+                    "close-search" => {
+                        if let Some(window) = window {
+                            let mut ad = adapter.borrow_mut();
+                            ad.search_bindings.clear();
+                            ad.action(&window, Action::CloseSearch);
+                        }
+                        Ok(())
+                    }
+                    "mem-stats" => {
+                        let adapter = adapter.borrow();
+                        let state = &adapter.app.state;
+                        let core_pictures = state.pictures.len();
+                        let core_picture_bytes: usize =
+                            state.pictures.values().map(|p| p.rgba.len()).sum();
+                        let search_previews: usize = state
+                            .search
+                            .as_ref()
+                            .map(|s| {
+                                s.results
+                                    .iter()
+                                    .flat_map(|h| h.message.attachments.iter())
+                                    .filter(|a| a.preview.is_some())
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        let search_preview_bytes: usize = state
+                            .search
+                            .as_ref()
+                            .map(|s| {
+                                s.results
+                                    .iter()
+                                    .flat_map(|h| h.message.attachments.iter())
+                                    .filter_map(|a| a.preview.as_ref())
+                                    .map(|p| p.rgba.len())
+                                    .sum()
+                            })
+                            .unwrap_or(0);
+                        let (preview_entries, preview_bytes) = pictures::preview_cache_stats();
+                        let ui_pictures = adapter.pictures.len();
+                        let message_rows = adapter.models.messages.row_count();
+                        let aside_rows = adapter.models.aside_messages.row_count();
+                        let search_rows = adapter.models.search_results.row_count();
+                        let pin_rows = adapter.models.pins.row_count();
+                        tracing::info!(
+                            target: "yapfast_memory",
+                            core_pictures,
+                            core_picture_bytes,
+                            search_previews,
+                            search_preview_bytes,
+                            preview_entries,
+                            preview_bytes,
+                            ui_pictures,
+                            message_rows,
+                            aside_rows,
+                            search_rows,
+                            pin_rows,
+                            "memory stats"
+                        );
+                        Ok(())
                     }
                     "quit" => slint::quit_event_loop().map_err(|error| error.to_string().into()),
                     // Exercises normal Go Live without reading a real screen.
@@ -1352,6 +1518,9 @@ struct Layout {
     /// Others do not see when this account is typing.
     #[serde(default)]
     dont_show_typing: Option<bool>,
+    /// Experimental Fake Deafen plugin toggle for Discord voice controls.
+    #[serde(default)]
+    fake_deafen_plugin: Option<bool>,
     /// Old typing setting; kept for migration when reading old layouts, not serialized.
     #[serde(default, skip_serializing)]
     share_typing: Option<bool>,
@@ -1539,6 +1708,10 @@ impl Layout {
 
     pub fn dont_show_typing(&self) -> bool {
         self.dont_show_typing.unwrap_or(false)
+    }
+
+    pub fn fake_deafen_plugin(&self) -> bool {
+        self.fake_deafen_plugin.unwrap_or(false)
     }
 
     fn read(root: &std::path::Path) -> Self {
@@ -1773,6 +1946,7 @@ impl Layout {
             yapfast_core::volume::mute_soundboard(person, true);
         }
         window.set_dont_show_typing(self.dont_show_typing());
+        window.set_fake_deafen_plugin(self.fake_deafen_plugin());
         window.set_read_all_notifications_button(self.read_all_notifications_button);
         window.set_notifications(self.notifications.unwrap_or(true));
         window.set_notification_text(self.notification_text.unwrap_or(true));
@@ -1913,6 +2087,8 @@ struct Models {
     emoji_sections: Rc<VecModel<EmojiSection>>,
     emoji_suggestions: Rc<VecModel<EmojiCell>>,
     forward_targets: Rc<VecModel<PlaceRow>>,
+    report_options: Rc<VecModel<ReportOptionRow>>,
+    report_checks: Rc<VecModel<ReportCheckRow>>,
     switcher_places: Rc<VecModel<PlaceRow>>,
     participants: Rc<VecModel<PersonRow>>,
     /// The GIF picker's tiles.
@@ -1994,6 +2170,8 @@ impl Models {
         window.set_emoji_sections(ModelRc::from(self.emoji_sections.clone()));
         window.set_emoji_suggestions(ModelRc::from(self.emoji_suggestions.clone()));
         window.set_forward_targets(ModelRc::from(self.forward_targets.clone()));
+        window.set_report_options(ModelRc::from(self.report_options.clone()));
+        window.set_report_checks(ModelRc::from(self.report_checks.clone()));
         window.set_switcher_places(ModelRc::from(self.switcher_places.clone()));
         window.set_participants(ModelRc::from(self.participants.clone()));
         window.set_gif_tiles(ModelRc::from(self.gif_tiles.clone()));
@@ -2243,8 +2421,17 @@ struct Adapter {
     /// A layout change waiting to be written; see [`Adapter::write_layout_soon`].
     layout_due: slint::Timer,
     #[cfg(windows)]
+    media_heap_due: slint::Timer,
+    #[cfg(windows)]
     voice_heap_release: Option<yapfast_core::runtime::BackgroundTask<()>>,
     layout_dirty: bool,
+    idle_trim_due: slint::Timer,
+    search_bindings: Vec<yapfast_core::chat::SearchUserBinding>,
+    search_shown_gen: u64,
+    search_row_sigs: Vec<(String, u64)>,
+    pins_row_sigs: Vec<(String, u64)>,
+    search_viewport_sent: Option<(u64, usize, usize)>,
+    search_found_members_sig: u64,
     /// Writes the layout once the window holds still after moving or resizing.
     placement_due: slint::Timer,
     /// Stream ticks without a new picture of a video that isn't playing,
@@ -2342,6 +2529,9 @@ struct Adapter {
     gate_meter: Option<yapfast_core::discord_audio::GateMeter>,
     /// Watches the keybinds while any is set, with or without the window.
     keybinds: Option<crate::keybinds::Watcher>,
+    /// Shared target updated on tray recreate so long-lived keybind hooks
+    /// never dispatch to a dropped window.
+    keybind_window: Arc<std::sync::Mutex<slint::Weak<YapfastWindow>>>,
     /// Previews of the pictures waiting in the composer, by file; `None` while
     /// one is read, or when it can't be.
     thumbnails: HashMap<PathBuf, Option<pictures::Thumbnail>>,
@@ -2608,8 +2798,17 @@ impl Adapter {
                 emoji_due: slint::Timer::default(),
                 layout_due: slint::Timer::default(),
                 #[cfg(windows)]
+                media_heap_due: slint::Timer::default(),
+                #[cfg(windows)]
                 voice_heap_release: None,
                 layout_dirty: false,
+                idle_trim_due: slint::Timer::default(),
+                search_bindings: Vec::new(),
+                search_shown_gen: 0,
+                search_row_sigs: Vec::new(),
+                pins_row_sigs: Vec::new(),
+                search_viewport_sent: None,
+                search_found_members_sig: 0,
                 placement_due: slint::Timer::default(),
                 video_quiet: Cell::new(0),
                 video_cell: Cell::new((0, 0)),
@@ -2656,6 +2855,7 @@ impl Adapter {
                 #[cfg(feature = "discord")]
                 gate_meter: None,
                 keybinds: None,
+                keybind_window: Arc::new(std::sync::Mutex::new(window.as_weak())),
                 thumbnails: HashMap::new(),
                 pasted: None,
                 drag_over: false,
@@ -2678,6 +2878,10 @@ impl Adapter {
     /// Starts, changes or stops watching the keybinds as settings say, and
     /// shows where they work.
     fn watch_keybinds(&mut self, window: &YapfastWindow) {
+        *self
+            .keybind_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = window.as_weak();
         let wanted = self.layout.watched_keybinds();
         let current = self
             .keybinds
@@ -2688,18 +2892,26 @@ impl Adapter {
             // The old one goes first, ending its portal session.
             self.keybinds = None;
             if !wanted.is_empty() {
-                let weak = window.as_weak();
+                let target = self.keybind_window.clone();
                 let toggled: crate::keybinds::Toggled = Arc::new(move |action| {
+                    let weak = target
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
                     let _ = weak.upgrade_in_event_loop(move |window| {
                         keybinds::toggled(&window, action);
                     });
                 });
-                let weak = window.as_weak();
+                let target = self.keybind_window.clone();
                 self.keybinds = Some(crate::keybinds::Watcher::start(
                     wanted,
                     &self.runtime,
                     toggled,
                     move |_| {
+                        let weak = target
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone();
                         let _ = weak.upgrade_in_event_loop(|window| {
                             window.invoke_keybind_status_changed();
                         });
@@ -2751,6 +2963,9 @@ impl Adapter {
 
     /// Present the existing models and state in a new window.
     fn attach(&mut self, window: &YapfastWindow) {
+        crate::keybinds::pause(false);
+        window.set_talk_recording(false);
+        window.set_keybind_recording(-1);
         self.models.attach(window);
         self.layout.apply(window);
         self.watch_keybinds(window);
@@ -3565,8 +3780,12 @@ impl Adapter {
                 | Action::KeepEmojiPictures(_)
                 | Action::CacheEmojiPictures
         );
+        #[cfg(windows)]
+        let previous_heap = self.media_heap_state();
         let effects = self.app.dispatch(action);
         self.execute(effects);
+        #[cfg(windows)]
+        self.update_media_heap_release(previous_heap);
         if quiet {
             return;
         }
@@ -3591,34 +3810,11 @@ impl Adapter {
     /// Applies a backend event; the caller shows what it can have changed after.
     fn apply(&mut self, event: Event) -> Reach {
         #[cfg(windows)]
-        let previous_voice = self.app.state.voice.phase;
+        let previous_heap = self.media_heap_state();
         let reach = Reach::of(&event);
         let effects = self.app.apply(event);
         #[cfg(windows)]
-        if self.app.state.voice.phase != previous_voice {
-            self.voice_heap_release = None;
-            if self.app.state.voice.phase == Phase::Disconnected
-                && matches!(
-                    previous_voice,
-                    Phase::Connected | Phase::Reconnecting | Phase::Leaving
-                )
-            {
-                // WASAPI and the microphone thread can still be releasing memory.
-                // A new call cancels the wait before the heap is optimized.
-                self.voice_heap_release = Some(self.runtime.spawn(async {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    let _ = tokio::task::spawn_blocking(|| {
-                        let started = std::time::Instant::now();
-                        trim();
-                        tracing::debug!(
-                            elapsed_us = started.elapsed().as_micros() as u64,
-                            "released idle voice heap"
-                        );
-                    })
-                    .await;
-                }));
-            }
-        }
+        self.update_media_heap_release(previous_heap);
         // What it set off, such as opening a DM that just started, can change
         // anything; a sound changes nothing on screen.
         let reach = if effects
@@ -3632,6 +3828,129 @@ impl Adapter {
         self.execute(effects);
         reach
     }
+
+    #[cfg(windows)]
+    fn media_heap_state(&self) -> MediaHeapState {
+        let state = &self.app.state;
+        MediaHeapState {
+            watching: state.voice.watching.len(),
+            sharing: state.voice.sharing.is_some(),
+            video_open: state.video.is_some(),
+            search_open: state.search.is_some(),
+            profile_open: state.profile.is_some(),
+            voice_phase: state.voice.phase,
+        }
+    }
+
+    #[cfg(windows)]
+    fn update_media_heap_release(&mut self, previous: MediaHeapState) {
+        let current = self.media_heap_state();
+        if current == previous {
+            return;
+        }
+        let voice_started = current.voice_phase != previous.voice_phase
+            && matches!(
+                current.voice_phase,
+                Phase::Joining | Phase::Connected | Phase::Reconnecting
+            );
+        if voice_started
+            || current.watching > previous.watching
+            || (current.sharing && !previous.sharing)
+            || (current.video_open && !previous.video_open)
+            || (current.search_open && !previous.search_open)
+            || (current.profile_open && !previous.profile_open)
+        {
+            self.media_heap_due.stop();
+            self.voice_heap_release = None;
+            return;
+        }
+        let voice_left = current.voice_phase == Phase::Disconnected
+            && matches!(
+                previous.voice_phase,
+                Phase::Connected | Phase::Reconnecting | Phase::Leaving
+            );
+        let media_stopped = current.watching < previous.watching
+            || (previous.sharing && !current.sharing)
+            || (previous.video_open && !current.video_open)
+            || (previous.search_open && !current.search_open)
+            || (previous.profile_open && !current.profile_open);
+        if !voice_left && !media_stopped {
+            return;
+        }
+        // Let WASAPI, closed stream surfaces, and closed UI panels settle
+        // before freeing Skia caches and returning unused Windows heap blocks.
+        let delay = Duration::from_secs(if voice_left { 3 } else { 2 });
+        self.voice_heap_release = None;
+        let weak_adapter = self.weak.clone();
+        let weak_window = self.window.clone();
+        self.media_heap_due
+            .start(slint::TimerMode::SingleShot, delay, move || {
+                i_slint_renderer_skia::yapfast_let_go_of_caches();
+                if let Some(window) = weak_window.upgrade() {
+                    window.window().request_redraw();
+                }
+                if let Some(adapter) = weak_adapter.upgrade()
+                    && let Ok(mut adapter) = adapter.try_borrow_mut()
+                {
+                    let runtime = adapter.runtime.clone();
+                    adapter.voice_heap_release = Some(runtime.spawn(async {
+                        let _ = tokio::task::spawn_blocking(|| {
+                            let started = std::time::Instant::now();
+                            trim();
+                            tracing::debug!(
+                                elapsed_us = started.elapsed().as_micros() as u64,
+                                "released idle media heap"
+                            );
+                        })
+                        .await;
+                    }));
+                }
+            });
+    }
+
+    pub(super) fn schedule_idle_trim(&mut self, window: &YapfastWindow) {
+        let weak_adapter = self.weak.clone();
+        let weak_window = window.as_weak();
+        self.idle_trim_due
+            .start(slint::TimerMode::SingleShot, Duration::from_secs(4), move || {
+                if let Some(adapter) = weak_adapter.upgrade()
+                    && let Ok(mut adapter) = adapter.try_borrow_mut()
+                {
+                    let Adapter { app, pictures, .. } = &mut *adapter;
+                    app.trim_offscreen_pictures(false);
+                    pictures.retain(|url, _| app.state.pictures.contains_key(url));
+                    if pictures.capacity() > pictures.len().saturating_mul(2) + 64 {
+                        pictures.shrink_to_fit();
+                    }
+                    pictures::prune_dead_previews();
+                    #[cfg(windows)]
+                    {
+                        let runtime = adapter.runtime.clone();
+                        adapter.voice_heap_release = Some(runtime.spawn(async {
+                            let _ = tokio::task::spawn_blocking(|| {
+                                trim();
+                            })
+                            .await;
+                        }));
+                    }
+                }
+                i_slint_renderer_skia::yapfast_let_go_of_caches();
+                if let Some(window) = weak_window.upgrade() {
+                    window.window().request_redraw();
+                }
+            });
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MediaHeapState {
+    watching: usize,
+    sharing: bool,
+    video_open: bool,
+    search_open: bool,
+    profile_open: bool,
+    voice_phase: Phase,
 }
 
 /// How long a layout change waits for the next before `layout.json` is

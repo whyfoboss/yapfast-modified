@@ -330,7 +330,7 @@ export component MemberPanel inherits Rectangle {
                         }
                         if member.activity != "" || member.activity-emoji != "": StatusText {
                             text: member.activity; emoji-url: member.activity-emoji; font-size: 12px;
-                            icon: member.activity-icon; bullet: member.activity-bullet;
+                            icon: member.activity-icon; accent-music-icon: true; bullet: member.activity-bullet;
                             opacity: member.presence == "offline" ? 0.5 : 1;
                         }
                     }

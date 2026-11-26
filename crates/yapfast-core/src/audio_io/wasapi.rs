@@ -473,7 +473,7 @@ impl Input {
 }
 
 #[cfg(feature = "discord")]
-pub use others::others;
+pub use others::{others, process_loopback};
 
 /// Other applications' sound, through process loopback: one stream of
 /// everything the system plays but Yapfast's own processes, from Windows 10's
@@ -500,6 +500,7 @@ mod others {
                 IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
                 IActivateAudioInterfaceCompletionHandler_Impl,
                 PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             },
             System::{
@@ -529,12 +530,49 @@ mod others {
 
     pub fn others(
         _skip: fn(&str) -> bool,
+        heard: Hear,
+        stop: Arc<AtomicBool>,
+    ) -> Result<JoinHandle<()>> {
+        loopback(
+            yapfast_process(),
+            false,
+            0,
+            heard,
+            stop,
+            "yapfast-stream-hear",
+            "Windows won't share other applications' sound",
+        )
+    }
+
+    pub fn process_loopback(
+        process: u32,
+        source: u32,
+        heard: Hear,
+        stop: Arc<AtomicBool>,
+    ) -> Result<JoinHandle<()>> {
+        loopback(
+            process,
+            true,
+            source,
+            heard,
+            stop,
+            "yapfast-stream-hear-player",
+            "Windows won't share Yapfast's player sound",
+        )
+    }
+
+    fn loopback(
+        process: u32,
+        include: bool,
+        source: u32,
         mut heard: Hear,
         stop: Arc<AtomicBool>,
+        thread_name: &str,
+        err_context: &'static str,
     ) -> Result<JoinHandle<()>> {
         let (opened, opening) = mpsc::channel();
         let thread = std::thread::Builder::new()
-            .name("yapfast-stream-hear".into())
+            .name(thread_name.into())
             .spawn(move || {
                 com();
                 let format = Format {
@@ -542,7 +580,7 @@ mod others {
                     channels: 2,
                     float: true,
                 };
-                let stream = activate(yapfast_process())
+                let stream = activate(process, include)
                     .and_then(|client| {
                         Stream::initialize(client, format, LISTENING, AUDCLNT_STREAMFLAGS_LOOPBACK)
                     })
@@ -563,27 +601,28 @@ mod others {
                     }
                 };
                 heard(Heard::Started {
-                    source: 0,
-                    process: None,
+                    source,
+                    process: include.then_some(process),
                 });
-                if let Err(error) = hear(&stream, &capture, &mut *heard, &stop) {
+                if let Err(error) = hear(&stream, &capture, source, &mut *heard, &stop) {
                     tracing::warn!(
                         error = format!("{error:#}"),
-                        "stopped hearing other applications"
+                        include,
+                        "stopped hearing process loopback sound"
                     );
                 }
-                heard(Heard::Stopped { source: 0 });
+                heard(Heard::Stopped { source });
             })
-            .context("could not start hearing other applications")?;
+            .context("could not start hearing process loopback sound")?;
         match opening.recv() {
             Ok(Ok(())) => Ok(thread),
             Ok(Err(error)) => {
                 let _ = thread.join();
-                Err(error.context("Windows won't share other applications' sound"))
+                Err(error.context(err_context))
             }
             Err(_) => {
                 let _ = thread.join();
-                Err(anyhow!("could not hear other applications"))
+                Err(anyhow!("could not hear process loopback sound"))
             }
         }
     }
@@ -592,6 +631,7 @@ mod others {
     fn hear(
         stream: &Stream,
         capture: &IAudioCaptureClient,
+        source: u32,
         heard: &mut dyn FnMut(Heard<'_>),
         stop: &AtomicBool,
     ) -> Result<()> {
@@ -632,7 +672,7 @@ mod others {
                             );
                             into
                         };
-                        heard(Heard::Samples { source: 0, samples });
+                        heard(Heard::Samples { source, samples });
                     }
                     capture.ReleaseBuffer(count)?;
                 }
@@ -655,15 +695,18 @@ mod others {
         }
     }
 
-    /// A loopback stream of everything but `process` and the processes it
-    /// started.
-    fn activate(process: u32) -> Result<IAudioClient> {
+    /// A loopback stream excluding or including `process` and its child processes.
+    fn activate(process: u32, include: bool) -> Result<IAudioClient> {
         let mut parameters = AUDIOCLIENT_ACTIVATION_PARAMS {
             ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
             Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                 ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
                     TargetProcessId: process,
-                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+                    ProcessLoopbackMode: if include {
+                        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                    } else {
+                        PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
+                    },
                 },
             },
         };
@@ -736,5 +779,41 @@ mod others {
             parent
         };
         parent.unwrap_or(own)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn activates_exclude_and_include_loopback_concurrently() {
+            com();
+            let format = Format {
+                rate: RATE,
+                channels: 2,
+                float: true,
+            };
+            let exclude_client = activate(std::process::id(), false)
+                .expect("exclude loopback activates on Windows");
+            let exclude_stream = Stream::initialize(
+                exclude_client,
+                format,
+                LISTENING,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+            )
+            .expect("exclude loopback stream initializes");
+
+            let include_client = activate(std::process::id(), true)
+                .expect("include loopback activates alongside exclude loopback");
+            let include_stream = Stream::initialize(
+                include_client,
+                format,
+                LISTENING,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+            )
+            .expect("include loopback stream initializes concurrently");
+
+            drop((include_stream, exclude_stream));
+        }
     }
 }

@@ -23,8 +23,10 @@ Recording takes the keys pressed together, up to four, and ends once they're
 all up again; Escape, pressed first, stops without changing anything. On
 Windows, Mouse 4 (Back) and Mouse 5 (Forward) record too. While anything
 records, keybinds don't fire, so pressing a toggle's keys to record them
-doesn't toggle it; ones held already go on until their keys come up.
-`src/ui/keybinds.rs` has the page and the recorder.
+doesn't toggle it; ones held already go on until their keys come up. Closing
+settings or leaving the Voice / Keybinds section cancels active recording and
+unpauses keybinds automatically. `src/ui/keybinds.rs` has the page and the
+recorder.
 
 ## Kept in layout.json
 
@@ -81,10 +83,16 @@ included; Toggle VAD changes the Voice page's input mode.
 
 On Windows the hook names a key as winit does, so it matches what the window
 recorded: a key with a scan code of 0, as keyboard software and remappers
-send, takes it from its virtual key in the focused window's keyboard layout,
-and every code goes through winit's own mapping. Before this the hook missed
-such keys altogether, in other apps and in Yapfast. Windows' made-up Left
-Ctrl that AltGr sends holds nothing.
+send, takes it from its virtual key in the focused window's keyboard layout
+(`MapVirtualKeyExW` with `MapVirtualKeyW` fallback), Right Shift stays normalized
+at `0x36` even when marked extended, and every code goes through winit's own
+mapping. Before this the hook missed such keys altogether, in other apps and in
+Yapfast. Windows' made-up Left Ctrl that AltGr sends holds nothing. When
+Yapfast's own window has focus, matched keybinds suppress conflicting UI
+shortcuts (`Ctrl+K`, `Ctrl+F`, `Alt+Left/Right`, zoom), Mouse 4/5 navigation
+for any bound action, `type_anywhere`, and `Space`/`Enter` activation on
+focused buttons so toggles fire once. Reopening from the tray updates the
+watcher's target window without dropping active keybinds.
 
 Windows may never send a key-up: the secure desktop (UAC, the lock screen)
 takes the keys, and Windows keeps input into a program run as administrator,

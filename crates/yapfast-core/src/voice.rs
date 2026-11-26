@@ -230,6 +230,8 @@ pub struct State {
     pub name: String,
     pub muted: bool,
     pub deafened: bool,
+    /// Reports deafened+muted to Discord Gateway while leaving local audio open.
+    pub fake_deafen: bool,
     pub participants: Vec<Participant>,
     pub microphones: Vec<Device>,
     pub speakers: Vec<Device>,
@@ -304,6 +306,7 @@ impl Default for State {
             name: String::new(),
             muted: true,
             deafened: false,
+            fake_deafen: false,
             participants: vec![],
             microphones: vec![],
             speakers: vec![],
@@ -350,6 +353,7 @@ impl State {
         self.participants.clear();
         self.muted = true;
         self.deafened = false;
+        self.fake_deafen = false;
         self.warning = None;
         self.sharing = None;
         self.watching.clear();
@@ -368,6 +372,7 @@ pub enum Command {
     Leave,
     Mute(bool),
     Deafen(bool),
+    FakeDeafen(bool),
     Devices,
     Microphone(String),
     Speaker(String),
@@ -411,6 +416,9 @@ pub(crate) struct Calls {
     /// Yapfast runs.
     #[cfg(feature = "discord")]
     pub discord: watch::Receiver<Option<Discord>>,
+    /// Active in-chat playback worker PID, mixed into outgoing Go Live audio.
+    #[cfg(feature = "discord")]
+    pub play_audio_pid: watch::Receiver<Option<u32>>,
 }
 
 pub struct Controller {
@@ -422,6 +430,8 @@ pub struct Controller {
     devices: Option<PathBuf>,
     #[cfg(all(feature = "matrix", feature = "discord"))]
     discord: watch::Receiver<Option<Discord>>,
+    #[cfg(all(feature = "matrix", feature = "discord"))]
+    play_audio_pid: watch::Receiver<Option<u32>>,
 }
 
 impl Controller {
@@ -431,6 +441,8 @@ impl Controller {
             session,
             #[cfg(feature = "discord")]
             discord: watch::channel(None).1,
+            #[cfg(feature = "discord")]
+            play_audio_pid: watch::channel(None).1,
         };
         Self::start_remembering(calls, None)
     }
@@ -440,6 +452,8 @@ impl Controller {
     pub(crate) fn start_remembering(calls: Calls, devices: Option<PathBuf>) -> Result<Self> {
         #[cfg(all(feature = "matrix", feature = "discord"))]
         let discord = calls.discord.clone();
+        #[cfg(all(feature = "matrix", feature = "discord"))]
+        let play_audio_pid = calls.play_audio_pid.clone();
         #[cfg(feature = "matrix")]
         let remembered = devices.clone();
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -480,6 +494,8 @@ impl Controller {
             devices: remembered,
             #[cfg(all(feature = "matrix", feature = "discord"))]
             discord,
+            #[cfg(all(feature = "matrix", feature = "discord"))]
+            play_audio_pid,
         })
     }
 
@@ -490,6 +506,8 @@ impl Controller {
             session,
             #[cfg(feature = "discord")]
             discord: self.discord.clone(),
+            #[cfg(feature = "discord")]
+            play_audio_pid: self.play_audio_pid.clone(),
         };
         if let Ok(controller) = Self::start_remembering(calls, self.devices.clone()) {
             *self = controller;
@@ -537,6 +555,7 @@ async fn worker(
                 state.phase = Phase::Joining;
                 state.muted = true;
                 state.deafened = false;
+                state.fake_deafen = false;
                 snapshots.send_replace(state.clone());
                 let result = join(
                     &calls,
@@ -611,7 +630,14 @@ async fn join(
         return match (discord, crate::discord::parse_room(&id)) {
             (Some(discord), Some((guild, channel))) => {
                 crate::discord_voice::call(
-                    &discord, guild, channel, state, commands, snapshots, remembered,
+                    &discord,
+                    guild,
+                    channel,
+                    state,
+                    commands,
+                    snapshots,
+                    remembered,
+                    Some(calls.play_audio_pid.clone()),
                 )
                 .await
             }
@@ -746,10 +772,13 @@ mod tests {
         };
         state.report_error(Some("Camera unavailable".into()));
         let old = state.error_id;
+        state.fake_deafen = true;
         state.leaving();
         assert!(state.error.is_none());
+        assert!(state.fake_deafen);
         state.disconnected();
         assert!(!state.active());
+        assert!(!state.fake_deafen);
         assert!(state.error.is_none());
 
         state.report_error(Some("Lost the connection".into()));

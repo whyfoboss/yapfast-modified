@@ -667,9 +667,9 @@ impl Assembler {
             self.obu.clear();
             self.obu_open = false;
             self.timestamp = Some(packet.timestamp);
-            // AV1's N bit marks a new coded sequence. If this is its first
-            // fragment, a preceding gap damaged older video, not this frame.
-            let starts_sequence = self.codec == Codec::Av1 && packet.payload[0] & 0x88 == 0x08;
+            // A preceding gap only damaged older frames when this packet
+            // cleanly starts a recovery/keyframe boundary for its codec.
+            let starts_sequence = starts_clean_keyframe(self.codec, packet.payload);
             self.damaged = gap && !starts_sequence;
             self.keyframe = false;
         } else {
@@ -937,6 +937,90 @@ impl Assembler {
     }
 }
 
+/// Whether `payload` begins an intact keyframe or parameter set boundary, so a
+/// packet gap in an earlier frame does not poison this new frame.
+fn starts_clean_keyframe(codec: Codec, payload: &[u8]) -> bool {
+    match codec {
+        // AV1: N=1 marks a new coded sequence and Z=0 means it starts at this packet.
+        Codec::Av1 => !payload.is_empty() && (payload[0] & 0x88) == 0x08,
+        Codec::H264 => {
+            let Some(&indicator) = payload.first() else {
+                return false;
+            };
+            let is_key_boundary = |nal_type: u8| matches!(nal_type, 5 | 7 | 8 | 9);
+            match indicator & 0x1f {
+                1..=23 => is_key_boundary(indicator & 0x1f),
+                // STAP-A: check the first aggregated NAL unit.
+                24 => {
+                    payload.len() >= 4
+                        && u16::from_be_bytes([payload[1], payload[2]]) >= 1
+                        && is_key_boundary(payload[3] & 0x1f)
+                }
+                // FU-A: must have the Start bit set.
+                28 => {
+                    payload.len() >= 2
+                        && (payload[1] & 0x80) != 0
+                        && is_key_boundary(payload[1] & 0x1f)
+                }
+                _ => false,
+            }
+        }
+        Codec::H265 => {
+            let Some(&[first, _]) = payload.first_chunk::<2>() else {
+                return false;
+            };
+            let is_key_boundary = |nal_type: u8| matches!(nal_type, 16..=21 | 32..=35);
+            match (first >> 1) & 0x3f {
+                kind @ 0..=47 => is_key_boundary(kind),
+                // AP: check the first aggregated NAL unit.
+                48 => {
+                    payload.len() >= 6
+                        && u16::from_be_bytes([payload[2], payload[3]]) >= 2
+                        && is_key_boundary((payload[4] >> 1) & 0x3f)
+                }
+                // FU: must have the Start bit set.
+                49 => {
+                    payload.len() >= 3
+                        && (payload[2] & 0x80) != 0
+                        && is_key_boundary(payload[2] & 0x3f)
+                }
+                _ => false,
+            }
+        }
+        Codec::Vp8 => {
+            let Some(&descriptor) = payload.first() else {
+                return false;
+            };
+            // S=1 and PID=0 required for partition 0 start.
+            if descriptor & 0x10 == 0 || descriptor & 0x07 != 0 {
+                return false;
+            }
+            let mut at = 1;
+            if descriptor & 0x80 != 0 {
+                let Some(&extended) = payload.get(1) else {
+                    return false;
+                };
+                at = 2;
+                if extended & 0x80 != 0 {
+                    at += if payload.get(2).is_some_and(|byte| byte & 0x80 != 0) {
+                        2
+                    } else {
+                        1
+                    };
+                }
+                if extended & 0x40 != 0 {
+                    at += 1;
+                }
+                if extended & 0x30 != 0 {
+                    at += 1;
+                }
+            }
+            // Bit 0 of the VP8 uncompressed data chunk is 0 for keyframes.
+            payload.get(at).is_some_and(|&tag| tag & 1 == 0)
+        }
+    }
+}
+
 /// A picture loss indication from `sender` about `media`: RTCP asking for a keyframe.
 pub fn picture_loss(sender: u32, media: u32) -> Vec<u8> {
     let mut packet = vec![0x81, 206, 0, 2];
@@ -1053,23 +1137,21 @@ impl Transport {
         }
         let (rest, counter) = packet.split_at(packet.len() - 4);
         let (sealed, tag) = rest.split_at(rest.len() - TAG);
-        let (header, body) = sealed.split_at(clear);
-        let mut plain = body.to_vec();
+        let mut whole = sealed.to_vec();
+        let (header, body) = whole.split_at_mut(clear);
         let opened = match &self.cipher {
             Cipher::Aes(cipher) => {
                 let mut nonce = aes_gcm::Nonce::default();
                 nonce[..4].copy_from_slice(counter);
-                cipher.decrypt_in_place_detached(&nonce, header, &mut plain, tag.into())
+                cipher.decrypt_in_place_detached(&nonce, header, body, tag.into())
             }
             Cipher::XChaCha(cipher) => {
                 let mut nonce = chacha20poly1305::XNonce::default();
                 nonce[..4].copy_from_slice(counter);
-                cipher.decrypt_in_place_detached(&nonce, header, &mut plain, tag.into())
+                cipher.decrypt_in_place_detached(&nonce, header, body, tag.into())
             }
         };
         opened.ok()?;
-        let mut whole = header.to_vec();
-        whole.extend_from_slice(&plain);
         Some(whole)
     }
 }
@@ -1372,6 +1454,11 @@ const HELD: usize = 1000;
 const MAX_MISSING: usize = HELD;
 const MAX_ASKED: usize = 256;
 
+/// How long a reorder buffer tolerates consecutive backward-looking packets
+/// after forward progress stops before treating the sequence space as jumped.
+const RESYNC_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+const RESYNC_PACKETS: u32 = 32;
+
 /// Puts one SSRC's packets back in sequence for the assembler, as they can
 /// arrive out of order, and asks for missing ones again (NACK), as Discord's
 /// client does, rather than losing every frame until the next keyframe.
@@ -1386,6 +1473,9 @@ pub struct Reorder {
     /// packets received since.
     first: Option<u64>,
     received: u64,
+    last_progress: Option<std::time::Instant>,
+    consecutive_late: u32,
+    resyncs: u64,
 }
 
 struct Missing {
@@ -1420,9 +1510,35 @@ impl Reorder {
         let sequence = self.extend(packet.sequence);
         let next = *self.next.get_or_insert(sequence);
         self.first.get_or_insert(sequence);
-        if sequence < next || self.held.contains_key(&sequence) {
+        if sequence < next {
+            if self.held.is_empty() {
+                self.consecutive_late = self.consecutive_late.saturating_add(1);
+                if self.consecutive_late >= RESYNC_PACKETS
+                    && self
+                        .last_progress
+                        .is_some_and(|at| now.duration_since(at) >= RESYNC_AFTER)
+                {
+                    let next_epoch = ((self.highest.unwrap_or(1 << 32) >> 16) + 1) << 16;
+                    let resynced = next_epoch + u64::from(packet.sequence);
+                    self.missing.clear();
+                    self.next = Some(resynced);
+                    self.highest = Some(resynced);
+                    self.first = Some(resynced);
+                    self.received = 1;
+                    self.consecutive_late = 0;
+                    self.last_progress = Some(now);
+                    self.resyncs += 1;
+                    self.held.insert(resynced, packet);
+                    return Arrival::New;
+                }
+            }
             return Arrival::Late;
         }
+        if self.held.contains_key(&sequence) {
+            return Arrival::Late;
+        }
+        self.consecutive_late = 0;
+        self.last_progress = Some(now);
         self.received += 1;
         let recovered = self.missing.remove(&sequence).is_some();
         match self.highest {
@@ -1505,6 +1621,12 @@ impl Reorder {
             }
         }
         asking
+    }
+
+    /// Number of times this reorder buffer had to resync after a large
+    /// forward sequence jump.
+    pub fn resyncs(&self) -> u64 {
+        self.resyncs
     }
 
     /// The highest extended sequence number received, and the packets
@@ -2513,5 +2635,113 @@ mod tests {
         assert!(!wants_keyframe(&report));
         assert!(wants_keyframe(&[&report[..], &pli[..]].concat()));
         assert!(is_rtcp(&pli) && !is_rtcp(&[0x90, VP8]));
+    }
+
+    #[test]
+    fn h264_keyframe_recovers_after_pframe_tail_loss() {
+        let mut assembler = Assembler::new(Codec::H264);
+        assert!(assembler.push(&parse(&packet(1, 90, true, &[0x65, 1])).unwrap()).frame.is_some());
+        // Unfinished delta loses its tail packet (seq 3 missing).
+        assert!(assembler.push(&parse(&packet(2, 180, false, &[0x41, 2])).unwrap()).frame.is_none());
+        // Complete H264 keyframe arrives as STAP-A (SPS + PPS) then FU-A IDR, with a gap at seq 3.
+        let stap = [24, 0, 2, 0x67, 1, 0, 2, 0x68, 2];
+        let first = [0x7c, 0x85, 10, 11];
+        let last = [0x7c, 0x45, 12];
+        assert!(assembler.push(&parse(&packet(4, 270, false, &stap)).unwrap()).frame.is_none());
+        assert!(assembler.push(&parse(&packet(5, 270, false, &first)).unwrap()).frame.is_none());
+        let recovered = assembler.push(&parse(&packet(6, 270, true, &last)).unwrap());
+        let frame = recovered.frame.expect("complete H264 keyframe must recover after preceding P-frame loss");
+        assert!(frame.keyframe);
+        // Single-NAL IDR after loss also recovers directly.
+        assert!(assembler.push(&parse(&packet(7, 360, false, &[0x41, 3])).unwrap()).frame.is_none());
+        let recovered2 = assembler.push(&parse(&packet(9, 450, true, &[0x65, 4])).unwrap());
+        assert!(recovered2.frame.is_some_and(|f| f.keyframe));
+    }
+
+    #[test]
+    fn h265_keyframe_recovers_after_pframe_tail_loss() {
+        let mut packetizer = Packetizer::new(5, Codec::H265);
+        let mut assembler = Assembler::new(Codec::H265);
+        // Initial keyframe (VPS + IDR_W_RADL).
+        let idr = [&[0, 0, 0, 1, 0x40, 1, 9][..], &[0, 0, 0, 1, 0x26, 1][..], &[7; 100]].concat();
+        for pkt in packetizer.packets(&idr, 90, true) {
+            assembler.push(&parse(&pkt).unwrap());
+        }
+        // Delta loses its last packet.
+        let delta = [&[0, 0, 0, 1, 0x02, 1][..], &[5; 2500]].concat();
+        let mut lost = packetizer.packets(&delta, 180, false);
+        assert!(lost.len() >= 2);
+        lost.pop();
+        for pkt in lost {
+            assembler.push(&parse(&pkt).unwrap());
+        }
+        // Intact H265 keyframe arrives immediately after the gap.
+        let big_idr = [&[0, 0, 0, 1, 0x26, 1][..], &[8; 2500]].concat();
+        let recovered = packetizer
+            .packets(&big_idr, 270, true)
+            .iter()
+            .find_map(|pkt| assembler.push(&parse(pkt).unwrap()).frame);
+        assert!(recovered.is_some_and(|f| f.keyframe));
+    }
+
+    #[test]
+    fn vp8_keyframe_recovers_after_pframe_tail_loss() {
+        let mut packetizer = Packetizer::new(5, Codec::Vp8);
+        let mut assembler = Assembler::new(Codec::Vp8);
+        let keyframe = vec![0x10; 500];
+        for pkt in packetizer.packets(&keyframe, 0, true) {
+            assembler.push(&parse(&pkt).unwrap());
+        }
+        // Delta loses its tail packet.
+        let delta = vec![0x11; 2500];
+        let mut lost = packetizer.packets(&delta, 3000, false);
+        lost.pop();
+        for pkt in lost {
+            assembler.push(&parse(&pkt).unwrap());
+        }
+        // Complete VP8 keyframe arrives cleanly and must not be discarded by the prior gap.
+        let recovered = packetizer
+            .packets(&keyframe, 6000, true)
+            .iter()
+            .find_map(|pkt| assembler.push(&parse(pkt).unwrap()).frame);
+        assert!(recovered.is_some_and(|f| f.keyframe));
+    }
+
+    #[test]
+    fn reorder_resyncs_after_large_sequence_jump() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let held = |sequence: u16| Held {
+            payload_type: H264,
+            marker: false,
+            sequence,
+            timestamp: 0,
+            ssrc: 9,
+            payload: vec![sequence as u8],
+        };
+        let mut reorder = Reorder::default();
+        assert_eq!(reorder.insert(held(100), at(0)), Arrival::New);
+        assert_eq!(reorder.ready(at(0)).0.len(), 1);
+
+        // Jump forward by 40_000 in 16-bit space (> 32_768 looks negative to signed wrap math)
+        // after >1s stall: must resync within RESYNC_PACKETS rather than dropping for 40k packets.
+        let jumped_start = 100u16.wrapping_add(40_000);
+        let mut accepted = false;
+        for offset in 0..RESYNC_PACKETS as u16 {
+            let arrival = reorder.insert(held(jumped_start.wrapping_add(offset)), at(1500));
+            if offset + 1 == RESYNC_PACKETS as u16 {
+                assert_eq!(arrival, Arrival::New);
+                accepted = true;
+            } else {
+                assert_eq!(arrival, Arrival::Late);
+            }
+        }
+        assert!(accepted, "reorder must resync after consecutive late packets post-stall");
+        assert_eq!(reorder.resyncs(), 1);
+        assert_eq!(reorder.ready(at(1500)).0.len(), 1);
+        assert_eq!(
+            reorder.insert(held(jumped_start.wrapping_add(RESYNC_PACKETS as u16)), at(1510)),
+            Arrival::New
+        );
     }
 }

@@ -14,6 +14,14 @@ pub struct Style {
     pub text: bool,
 }
 
+/// Updates the cached toast notification icon to match the selected theme.
+pub fn set_icon_theme(accent: slint::Color, foreground: slint::Color) {
+    #[cfg(windows)]
+    windows::set_icon_theme(accent, foreground);
+    #[cfg(not(windows))]
+    let _ = (accent, foreground);
+}
+
 /// Shows notifications from a thread of its own, so a slow notification service never
 /// holds up the window.
 pub struct Notifier {
@@ -285,7 +293,41 @@ fn xml_text(text: &str) -> String {
 
 #[cfg(windows)]
 mod windows {
-    use std::{collections::VecDeque, path::Path, sync::mpsc::Receiver};
+    use std::{
+        collections::VecDeque,
+        path::{Path, PathBuf},
+        sync::{Mutex, mpsc::Receiver},
+    };
+
+    static THEME: Mutex<(u32, u32)> = Mutex::new((0xffff_bf47, 0xff1d_1607));
+    static FOLDER: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub fn set_icon_theme(accent: slint::Color, foreground: slint::Color) {
+        *THEME.lock().unwrap_or_else(|p| p.into_inner()) =
+            (accent.as_argb_encoded(), foreground.as_argb_encoded());
+        let folder = FOLDER.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(folder) = folder {
+            let _ = sync_icon(&folder);
+        }
+    }
+
+    fn sync_icon(folder: &Path) -> anyhow::Result<PathBuf> {
+        let icon = folder.join("icon.png");
+        let (accent, foreground) = *THEME.lock().unwrap_or_else(|p| p.into_inner());
+        let rendered = crate::icon::render_png(
+            256,
+            slint::Color::from_argb_encoded(accent),
+            slint::Color::from_argb_encoded(foreground),
+        );
+        let bytes = rendered
+            .as_deref()
+            .or(super::icon_png())
+            .context("Yapfast's icon has no 256-pixel picture")?;
+        if std::fs::read(&icon).ok().as_deref() != Some(bytes) {
+            std::fs::write(&icon, bytes).context("writing the notification icon")?;
+        }
+        Ok(icon)
+    }
 
     use ::windows::{
         Data::Xml::Dom::XmlDocument,
@@ -345,11 +387,8 @@ mod windows {
     /// a portable copy hasn't got one.
     fn register(folder: &Path) -> anyhow::Result<ToastNotifier> {
         std::fs::create_dir_all(folder).context("making the notifications folder")?;
-        let icon = folder.join("icon.png");
-        let png = super::icon_png().context("Yapfast's icon has no 256-pixel picture")?;
-        if std::fs::read(&icon).ok().as_deref() != Some(png) {
-            std::fs::write(&icon, png).context("writing the notification icon")?;
-        }
+        *FOLDER.lock().unwrap_or_else(|p| p.into_inner()) = Some(folder.to_owned());
+        let icon = sync_icon(folder)?;
         let key = format!(r"Software\Classes\AppUserModelId\{}", crate::icon::APP_ID);
         crate::protocol::set_string(&key, Some("DisplayName"), "Yapfast")
             .context("registering Yapfast's name")?;

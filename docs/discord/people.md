@@ -797,13 +797,15 @@ this account saves its own.
 `scripts/ui-session do 'pick avatar PATH'` chooses a picture in the editor,
 as its file chooser would.
 
-## Linux Rich Presence
+## Local Rich Presence
 
-Games and tools on Linux tell Discord what they're doing through its local
-RPC socket, which the discord-rpc library and Discord's game SDK use. While
-the account shares its game ([game detection](#game-detection)), Yapfast
-serves that socket itself, so no bridge such as arRPC needs to run. Windows'
-named pipes and the macOS socket aren't served yet.
+Games and tools tell Discord what they're doing through the local RPC
+endpoint used by discord-rpc and Discord's game SDK. While the account shares
+its game ([game detection](#game-detection)), Yapfast serves this endpoint
+directly on Linux and Windows. On Windows it takes the first available pipe
+from `discord-ipc-0` through `discord-ipc-9` and supports up to 16 clients,
+with a separate instance waiting for the next connection. The macOS socket
+isn't served yet.
 
 The socket is the first free `discord-ipc-0` to `discord-ipc-9` in
 `XDG_RUNTIME_DIR`, or else in `TMPDIR`, `TMP`, `TEMP` or `/tmp`. A socket
@@ -901,8 +903,10 @@ threads, and drops the process list after each scan. A process seen before and u
 isn't matched again. Wine and Proton processes match by the Windows program
 in their command line, and runtime helpers, crash reporters and anti-cheat
 services don't count. The game started last shows and stays while it runs.
-One that ended clears after two scans without it, up to 30 s. Only the
-game's name, its application id and when it started go to Discord.
+Between full scans, a check of the displayed game's process runs once per
+second. Two missing checks trigger a fresh scan and clear the activity or
+replace it with another running game. Gateway presence limits still apply.
+Only the game's name, its application id and when it started go to Discord.
 
 Game and application Rich Presence comes first, then the custom games,
 Discord's list and Steam. Detected games take precedence over music.

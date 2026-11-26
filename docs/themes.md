@@ -9,10 +9,14 @@ is kept in `layout.json` as `theme`, the theme's id, and applied before the
 window's first frame, and again to a window made anew. An id Yapfast doesn't
 know, or a deleted theme's, shows Yap.
 
-On Windows, the selected theme's accent and foreground also colour the window
-and taskbar icon. Existing Yapfast shortcuts that point to the running executable
-are updated to match, including its Start menu and pinned shortcuts. Windows may
-keep a cached shortcut icon temporarily. The executable's own icon stays unchanged.
+On Windows, the selected theme's accent and foreground also colour the initial
+window and taskbar icon (resolved from `layout.json` before window creation and
+reapplied after reopening from tray), the tray icon, and Windows Toast
+notifications (`notifications/icon.png`). Existing Yapfast shortcuts that point
+to the running executable are updated with a multi-size `.ico` (32, 64 and
+256 px) when changed, avoiding redundant shortcut refreshes via `applied.txt`.
+Windows may keep a cached shortcut icon temporarily. The executable's own icon
+stays unchanged.
 
 ## Custom themes
 

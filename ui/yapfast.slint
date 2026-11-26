@@ -51,7 +51,7 @@ import { EmojiCell, EmojiRow, EmojiTile, EmojiSection, RailSection, EmojiCard, E
 import { Choices, SettingsRow, SettingsScreen, AccountSettings, AppearanceSettings, ThemeCard, ThemeColour, VoiceSettings, KeybindSettings, KeybindRow, MessageSettings, NotificationSettings, SoundSettings, AdvancedSettings, DiscordLinkSettings, DiscordSettings, BlockedRow, GameActivitySettings, GameExecutable, DetectedAppRow, PluginsSettings } from "settings.slint";
 import { MemberRow, MemberActivityRow, ProfileData, BadgeTipCard, ProfileServerRow, MemberPanel, ProfileCard, ServerCard, RoleCard, ActivityRow } from "people.slint";
 import { RequestRow, FriendRow, FriendsScreen, HeaderTab, RequestsScreen, AddFriendDialog } from "friends.slint";
-import { ContactRow, PlaceRow, ReactionPill, ReactorRow, StatusDialog, NewDmDialog, ForwardDialog, QuickSwitcher, ReactionsDialog, StatusMenu, PersonPrompt, PersonDialog, LeavingDialog, PollAnswerDraft, PollDialog } from "dialogs.slint";
+import { ContactRow, PlaceRow, ReactionPill, ReactorRow, StatusDialog, NewDmDialog, ForwardDialog, QuickSwitcher, ReactionsDialog, StatusMenu, PersonPrompt, PersonDialog, LeavingDialog, PollAnswerDraft, PollDialog, ReportOptionRow, ReportCheckRow, ReportDialog } from "dialogs.slint";
 import { InvitePrompt, InviteDialog, JoinPrompt, JoinDialog, EventPrompt, EventDialog, GiftPrompt, GiftDialog, OAuthPrompt, OAuthDialog, ChannelPrompt, ChannelDialog, ProfileEditorPrompt, ProfileEditorDialog, ProfileTabs } from "server.slint";
 import { SignInScreen, VerifyBanner } from "sign-in.slint";
 import { BoostPicture, BoostPrompt, EngagementPrompt, ServerProfilePrompt, ServerSettingsPrompt, ServerSettingsScreen } from "server_settings.slint";
@@ -838,6 +838,31 @@ export component YapfastWindow inherits Window {
     /// Messages here that can be forwarded offer it: Matrix forwards only
     /// from a verified device.
     in property <bool> forward-allowed;
+    /// Reporting a specific Discord message; see ReportDialog.
+    in property <bool> report-open;
+    in property <string> report-author;
+    in property <string> report-time;
+    in property <string> report-preview;
+    in property <string> report-attachments;
+    in property <string> report-message-link;
+    in property <bool> report-loading;
+    in property <bool> report-submitting;
+    in property <bool> report-submitted;
+    in property <string> report-id;
+    in property <string> report-blocked;
+    in property <string> report-menu-error;
+    in property <string> report-header;
+    in property <string> report-subheader;
+    in property <string> report-info;
+    in property <string> report-summary;
+    in property <[ReportOptionRow]> report-options;
+    in property <[ReportCheckRow]> report-checks;
+    in property <bool> report-can-back;
+    in property <bool> report-can-submit;
+    in property <bool> report-can-submit-now;
+    in property <string> report-submit-error;
+    in property <bool> report-timeout-unknown;
+    in property <int> report-focus-tick;
     /// A masked link that was clicked, while Yapfast asks before opening it,
     /// and the site it goes to.
     in property <string> leaving-link;
@@ -985,6 +1010,8 @@ export component YapfastWindow inherits Window {
     in property <bool> can-join;
     in property <bool> muted;
     in property <bool> deafened;
+    in property <bool> show-fake-deafen;
+    in property <bool> fake-deafened;
     in property <string> voice-status;
     in property <string> voice-time;
     in property <string> voice-name;
@@ -1291,7 +1318,9 @@ export component YapfastWindow inherits Window {
     in property <int> search-suggestion-caret: -1;
     in property <int> search-suggestion-edit;
     in property <int> search-total;
-    in property <int> search-first: 1;
+    in property <int> search-jump-index: -1;
+    in property <int> search-jump-revision;
+    in property <string> search-jump-hint;
     callback search-start-at(string);
     callback close-search-dropdown;
     /// Show a search result in its room, by room id and item.
@@ -1302,10 +1331,19 @@ export component YapfastWindow inherits Window {
     in property <string> search-note;
     in property <bool> search-more;
     in property <bool> search-loading;
+    in property <int> search-generation;
+    in property <string> search-scope-label;
+    in property <bool> search-scope-differs;
+    in property <string> search-current-place-label;
+    in property <int> search-jump-settle-tick;
+    callback close-search;
+    callback search-viewport-changed(int, int);
+    callback view-image-in-room(string, string, int);
     in property <bool> history-open;
     in property <string> history-heading;
     in property <[EditHistoryRow]> history-entries;
     callback search(string);
+    callback search-here;
     callback more-results;
     /// The friends picker under the add button: who it offers, how many
     /// more the group can take, and how many are chosen.
@@ -1348,7 +1386,11 @@ export component YapfastWindow inherits Window {
     // Closing settings stops linking Discord there.
     changed settings-open => {
         if !self.settings-open && self.link-phase != 0 { self.cancel-discord-link(); }
-        if !self.settings-open { self.camera-testing = false; }
+        if !self.settings-open {
+            self.camera-testing = false;
+            if self.talk-recording { self.record-talk-key(false); }
+            if self.keybind-recording >= 0 { self.record-keybind(self.keybind-recording, false); }
+        }
         if !self.settings-open && self.theme-editor { self.cancel-theme(); }
     }
     in-out property <int> settings-section;
@@ -1424,6 +1466,8 @@ export component YapfastWindow inherits Window {
     in-out property <int> speaker-volume: 100;
     callback call-volumes-changed();
     in-out property <bool> dont-show-typing: false;
+    in-out property <bool> fake-deafen-plugin: false;
+    callback fake-deafen-plugin-toggled(bool);
     in-out property <bool> read-all-notifications-button: false;
     callback read-all-notifications;
     in-out property <bool> notifications: true;
@@ -1488,7 +1532,11 @@ export component YapfastWindow inherits Window {
     callback save-theme();
     callback cancel-theme();
     callback delete-theme();
-    changed settings-section => { if root.theme-editor && root.settings-section != 7 { root.cancel-theme(); } }
+    changed settings-section => {
+        if root.theme-editor && root.settings-section != 7 { root.cancel-theme(); }
+        if root.talk-recording && root.settings-section != 1 { root.record-talk-key(false); }
+        if root.keybind-recording >= 0 && root.settings-section != 10 { root.record-keybind(root.keybind-recording, false); }
+    }
     out property <length> message-font-size: root.text-size == 0 ? 14px : root.text-size == 2 ? 18px : ClientStyle.text-size;
     // The sidebar keeps 180 to 380px. Dragging also leaves the conversation 420px;
     // the window width cannot enter this binding, because it depends on the layout.
@@ -1552,6 +1600,7 @@ export component YapfastWindow inherits Window {
     callback join-unmuted;
     /// Deafens as a call connects, for deafen-on-join.
     callback join-deafened;
+    callback toggle-fake-deafen;
     callback toggle-deafen;
     callback toggle-share;
     /// Share what share-screens, share-windows, then share-cameras, list at
@@ -1685,6 +1734,13 @@ export component YapfastWindow inherits Window {
     callback forward-send(string);
     callback forward-search;
     callback close-forward;
+    callback report-message(string, bool);
+    callback report-choose(int);
+    callback report-toggle-option(string, string);
+    callback report-back;
+    callback report-retry-menu;
+    callback submit-report;
+    callback close-report;
     callback switcher-search(string);
     callback switch-to(string);
     callback close-switcher;
@@ -1735,8 +1791,27 @@ export component YapfastWindow inherits Window {
         || root.join-open || root.event-open || root.gift-open || root.oauth-open
         || root.channel-open || root.move-sync-open || root.leave-open || root.person-open
         || root.status-open || root.poll-open || root.new-dm-open || root.reactions-open
-        || root.forward-open || root.leaving-link != "" || root.switch-prompt != ""
+        || root.forward-open || root.report-open || root.leaving-link != "" || root.switch-prompt != ""
         || root.confirm-delete != "" || root.incoming-open;
+    out property <bool> modal-open: root.composer-covered || root.settings-open;
+    property <int> search-focus-tick: 0;
+    property <bool> jump-field-focused;
+    property <length> jump-field-x;
+    property <length> jump-field-y;
+    property <length> jump-field-width;
+    property <length> jump-field-height;
+    property <int> blur-jump-tick: 0;
+    out property <bool> search-jump-focused: root.search-open && !root.history-open && root.jump-field-focused;
+    out property <length> search-jump-x: root.jump-field-x;
+    out property <length> search-jump-y: root.jump-field-y;
+    out property <length> search-jump-width: root.jump-field-width;
+    out property <length> search-jump-height: root.jump-field-height;
+    public function focus-search() -> bool {
+        if !root.workspace || root.modal-open || !root.can-search { return false; }
+        root.search-focus-tick += 1;
+        return true;
+    }
+    public function blur-search-jump() { root.blur-jump-tick += 1; }
     // The channel has no composer here: a call, a forum, a message request, the
     // friends list, the friend requests or Browse Channels.
     property <bool> composer-missing: !root.room-selected || root.voice-panel || root.room-forum
@@ -1765,9 +1840,13 @@ export component YapfastWindow inherits Window {
     /// beside it, then the new thread's form; whether it did anything.
     public function escape-composing() -> bool {
         if root.room-dragging-voice { root.room-dragging-voice = false; root.stop-voice-drag(); return true; }
+        if root.report-open {
+            if !root.report-submitting { root.close-report(); }
+            return true;
+        }
         if !root.workspace || root.composer-covered { return false; }
         if root.history-open { root.close-edit-history(); return true; }
-        if root.search-open { root.search-text = ""; root.search(""); return true; }
+        if root.search-open { root.close-search(); return true; }
         if root.compose-label != "" { root.cancel-compose(); return true; }
         if !root.aside-docked { return false; }
         if root.new-thread-open { root.close-new-thread(); return true; }
@@ -2664,6 +2743,7 @@ export component YapfastWindow inherits Window {
             view-edit-history(item) => { root.view-edit-history(item); message-menu.close(); }
             hide-deleted-message(item) => { root.hide-deleted-message(item); message-menu.close(); }
             hide-all-deleted-messages => { root.hide-all-deleted-messages(); message-menu.close(); }
+            report-message(item) => { root.report-message(item, root.menu-aside); message-menu.close(); }
         }
     }
 
@@ -3213,13 +3293,18 @@ export component YapfastWindow inherits Window {
                             header-search := HeaderSearch {
                                 text <=> root.search-text;
                                 placeholder: root.search-placeholder;
+                                focus-tick: root.search-focus-tick;
                                 dropdown-open <=> root.search-dropdown-open;
                                 selected-suggestion <=> root.search-suggestion-index;
                                 suggestion-count: root.search-filter-suggestions.length;
                                 suggestion-caret: root.search-suggestion-caret;
                                 suggestion-edit: root.search-suggestion-edit;
                                 search(text) => { root.search(text); }
-                                clear => { root.search-text = ""; root.search(""); root.search-dropdown-open = false; }
+                                clear => {
+                                    root.search-text = "";
+                                    root.search-dropdown-open = false;
+                                    if !root.search-scope-differs { root.close-search(); }
+                                }
                                 edited(text) => {
                                     root.search-box-x = self.absolute-position.x;
                                     root.search-box-y = self.absolute-position.y;
@@ -3330,12 +3415,15 @@ export component YapfastWindow inherits Window {
                                   }
                                 }
                                 CallControls {
-                                    muted: root.muted; deafened: root.deafened; voice-ready: root.voice-ready; voice-leaving: root.voice-leaving;
+                                    muted: root.muted; deafened: root.deafened;
+                                    show-fake-deafen: root.show-fake-deafen; fake-deafened: root.fake-deafened;
+                                    voice-ready: root.voice-ready; voice-leaving: root.voice-leaving;
                                     can-share: root.can-share; sharing: root.sharing;
                                     can-film: root.can-film; camera-on: root.camera-on; camera-starting: root.camera-starting;
                                     can-soundboard: root.can-soundboard;
                                     toggle-camera => { root.toggle-camera(); }
                                     toggle-mute => { root.toggle-mute(); }
+                                    toggle-fake-deafen => { root.toggle-fake-deafen(); }
                                     toggle-deafen => { root.toggle-deafen(); }
                                     toggle-share => { root.toggle-share(); }
                                     open-share-menu(x, y) => { root.open-share-menu(x, y); }
@@ -4027,16 +4115,31 @@ export component YapfastWindow inherits Window {
                         height: parent.height;
                     }
                 }
-                    if root.search-open: SearchPanel {
+                    if root.search-open && !root.history-open: SearchPanel {
                         width: 420px;
                         results: root.search-results; heading: root.search-heading; note: root.search-note;
-                        total: root.search-total; first: root.search-first;
+                        total: root.search-total; search-generation: root.search-generation;
+                        scope-label: root.search-scope-label; scope-differs: root.search-scope-differs;
+                        current-place-label: root.search-current-place-label;
+                        jump-index: root.search-jump-index;
+                        jump-revision: root.search-jump-revision; jump-hint: root.search-jump-hint;
+                        jump-settle-tick: root.search-jump-settle-tick;
+                        blur-jump-tick: root.blur-jump-tick;
+                        jump-focused <=> root.jump-field-focused;
+                        jump-x <=> root.jump-field-x;
+                        jump-y <=> root.jump-field-y;
+                        jump-width <=> root.jump-field-width;
+                        jump-height <=> root.jump-field-height;
                         start-at(position) => { root.search-start-at(position); }
                         more: root.search-more; loading: root.search-loading;
                         jump(room, item) => { root.jump-in-room(room, item); }
+                        view-image(room, item, idx) => { root.view-image-in-room(room, item, idx); }
+                        reveal-attachment(item, idx) => { root.reveal-attachment(item, idx); }
                         open-link(link) => { root.open-link(link); }
                         more-results => { root.more-results(); }
-                        close => { root.search-text = ""; root.search(""); }
+                        search-here => { root.search-here(); }
+                        viewport-changed(top, bottom) => { root.search-viewport-changed(top, bottom); }
+                        close => { root.close-search(); }
                     }
                     if root.history-open: EditHistoryPanel {
                         width: 420px;
@@ -4540,6 +4643,8 @@ export component YapfastWindow inherits Window {
             clear-logger => { root.clear-logger(); }
             show-hidden-channels: root.show-hidden-channels;
             show-hidden-channels-toggled(shown) => { root.show-hidden-channels = shown; root.show-hidden-channels-toggled(shown); }
+            fake-deafen-plugin: root.fake-deafen-plugin;
+            fake-deafen-plugin-toggled(on) => { root.fake-deafen-plugin = on; root.fake-deafen-plugin-toggled(on); }
             preferences-changed => { root.preferences-changed(); }
         }
     }
@@ -4620,6 +4725,8 @@ export component YapfastWindow inherits Window {
             height: min(self.fit, 560px, root.height - self.y - 16px);
             pins: root.pins; note: root.pins-note;
             jump(item) => { root.show-pins(false); root.jump-to(item); }
+            view-image(item, index) => { root.show-pins(false); root.view-image(item, index); }
+            reveal-attachment(item, index) => { root.reveal-attachment(item, index); }
             open-link(link) => { root.open-link(link); }
             close => { root.show-pins(false); }
         }
@@ -5124,6 +5231,41 @@ export component YapfastWindow inherits Window {
         forward-choose(id) => { root.forward-choose(id); }
         forward-send(note) => { root.forward-send(note); }
         close-forward => { root.close-forward(); }
+    }
+    // Reporting a specific Discord message; see ReportDialog.
+    report-motion := PopupMotion { open: root.report-open; }
+    if report-motion.shown: ReportDialog {
+        motion: report-motion.amount;
+        report-author: root.report-author;
+        report-time: root.report-time;
+        report-preview: root.report-preview;
+        report-attachments: root.report-attachments;
+        report-message-link: root.report-message-link;
+        report-loading: root.report-loading;
+        report-submitting: root.report-submitting;
+        report-submitted: root.report-submitted;
+        report-id: root.report-id;
+        report-blocked: root.report-blocked;
+        report-menu-error: root.report-menu-error;
+        report-header: root.report-header;
+        report-subheader: root.report-subheader;
+        report-info: root.report-info;
+        report-summary: root.report-summary;
+        report-options: root.report-options;
+        report-checks: root.report-checks;
+        report-can-back: root.report-can-back;
+        report-can-submit: root.report-can-submit;
+        report-can-submit-now: root.report-can-submit-now;
+        report-submit-error: root.report-submit-error;
+        report-timeout-unknown: root.report-timeout-unknown;
+        report-focus-tick: root.report-focus-tick;
+        report-choose(id) => { root.report-choose(id); }
+        report-toggle-option(element, value) => { root.report-toggle-option(element, value); }
+        report-back => { root.report-back(); }
+        report-retry-menu => { root.report-retry-menu(); }
+        submit-report => { root.submit-report(); }
+        close-report => { root.close-report(); }
+        copy-report-link(link) => { root.copy-text(link); }
     }
     // A masked link, before it opens; see LeavingDialog.
     leaving-motion := PopupMotion { open: root.leaving-link != ""; }

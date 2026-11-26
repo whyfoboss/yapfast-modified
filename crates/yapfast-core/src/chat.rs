@@ -109,6 +109,8 @@ pub struct ChatRoom {
     pub request: bool,
     /// The other person in a one-to-one DM: their Discord user id or Matrix ID.
     pub person: Option<String>,
+    /// All Discord user IDs participating in this DM or group DM (including this account).
+    pub participants: Vec<String>,
     /// Who is in a Discord voice channel or DM call, known without joining it.
     pub people: Vec<VoicePerson>,
     /// Whom a Discord DM call here is ringing, other than this account.
@@ -1339,6 +1341,22 @@ pub struct SearchHit {
     pub message: ChatMessage,
 }
 
+/// Which participant filter a bound suggestion belongs to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchUserFilter {
+    #[default]
+    From,
+    Mentions,
+}
+
+/// A resolved account ID bound by picking a suggestion for `from:` or `mentions:`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchUserBinding {
+    pub filter: SearchUserFilter,
+    pub token: String,
+    pub user_id: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VersionLabel {
     Current,
@@ -1995,6 +2013,9 @@ pub struct ChatMessage {
     /// Discord's that someone pinned one; its body says it after its
     /// author's name.
     pub notice: Option<Notice>,
+    /// Original `(channel_id, message_id)` for a `THREAD_STARTER_MESSAGE` (`type == 21`),
+    /// so reporting targets the source message in the parent channel rather than the stub.
+    pub report_target: Option<Box<(String, String)>>,
 }
 
 /// A notice in place of a message, as Discord's client marks it: with an
@@ -2887,8 +2908,17 @@ pub enum DiscordCommand {
     Search {
         place: String,
         query: String,
+        bindings: Vec<SearchUserBinding>,
+        request: u64,
         offset: u32,
     },
+    /// Download and decode thumbnails on demand for visible search hits.
+    SearchPreviews {
+        request: u64,
+        items: Vec<(String, String)>,
+    },
+    /// Releases stored attachment metadata for the active search.
+    ClearSearch,
     /// Make a Discord group DM with these users, or with `room`, add them to
     /// that group; [`Event::GroupChanged`] follows.
     AddToGroup {
@@ -3277,6 +3307,15 @@ pub enum DiscordCommand {
     HideAllDeletedMessages,
     /// Enable or disable message logger.
     SetMessageLogger(bool),
+    /// Fetch Discord's V3 in-app message report menu tree.
+    ReportMessageMenu {
+        request: u64,
+    },
+    /// Submit a completed V3 in-app message report against a fixed channel and message id.
+    SubmitMessageReport {
+        request: u64,
+        submission: crate::report::ReportSubmission,
+    },
 }
 
 /// What Emoji asks of Discord. Each is followed by the server's emoji
@@ -4228,10 +4267,16 @@ pub enum Event {
     /// What [`DiscordCommand::Search`] found: a page of messages, the newest
     /// first, and how many in all; or why it couldn't search.
     Found {
-        place: String,
-        query: String,
+        request: u64,
         offset: u32,
         result: Result<(u32, Vec<SearchHit>), String>,
+    },
+    /// Thumbnail preview decoded on demand for a visible search result.
+    SearchPreview {
+        request: u64,
+        item: String,
+        index: usize,
+        preview: Option<Arc<Picture>>,
     },
     /// The open Discord channel's topic, when it opens and when it changes;
     /// none when it has none.
@@ -4634,6 +4679,16 @@ pub enum Event {
         room: String,
         item: String,
         history: Option<EditHistoryData>,
+    },
+    /// Discord's V3 in-app message report menu tree, or why it failed.
+    ReportMessageMenu {
+        request: u64,
+        result: Result<crate::report::ReportMenu, crate::report::ReportError>,
+    },
+    /// Confirmation (optional `report_id`) or failure of submitting a V3 message report.
+    MessageReported {
+        request: u64,
+        result: Result<Option<String>, crate::report::ReportError>,
     },
 }
 
@@ -5178,6 +5233,12 @@ pub async fn run(
     #[cfg(feature = "discord")]
     let linked =
         tokio::sync::watch::Sender::new(discord.as_ref().map(crate::discord_text::Chat::service));
+    #[cfg(feature = "discord")]
+    let play_audio_pid = tokio::sync::watch::Sender::new(
+        discord
+            .as_ref()
+            .and_then(crate::discord_text::Chat::play_audio_pid),
+    );
     #[cfg(not(feature = "matrix"))]
     {
         let refused = match start {
@@ -5203,6 +5264,8 @@ pub async fn run(
         session: session.lease(),
         #[cfg(feature = "discord")]
         discord: linked.subscribe(),
+        #[cfg(feature = "discord")]
+        play_audio_pid: play_audio_pid.subscribe(),
     };
     let Ok(mut voice) = voice::Controller::start_remembering(calls, Some(remembered)) else {
         let _ = events.send(Event::Error(
@@ -5261,6 +5324,7 @@ pub async fn run(
                     #[cfg(feature = "discord")]
                     if let Some(discord) = discord.as_mut() {
                         discord.command(command.clone(), &events);
+                        sync_play_audio_pid(Some(&*discord), &play_audio_pid);
                     }
                     #[cfg(feature = "matrix")]
                     if !matrix.command(command, &mut voice, &events).await {
@@ -5289,15 +5353,20 @@ pub async fn run(
                             linked.send_replace(
                                 discord.as_ref().map(crate::discord_text::Chat::service),
                             );
+                            sync_play_audio_pid(discord.as_ref(), &play_audio_pid);
                         }
                     }
                     Command::Discord(DiscordCommand::Unlink) => {
                         unlink_discord(&mut discord, &linked, &voice);
+                        sync_play_audio_pid(discord.as_ref(), &play_audio_pid);
                         discord_error = None;
                         let _ = events.send(Event::DiscordUnlinked);
                     }
                     command => match discord.as_mut() {
-                        Some(discord) => discord.command(command, &events),
+                        Some(discord) => {
+                            discord.command(command, &events);
+                            sync_play_audio_pid(Some(discord), &play_audio_pid);
+                        }
                         None => crate::discord_text::without(
                             command,
                             discord_error
@@ -5318,6 +5387,8 @@ pub async fn run(
                     if let Command::Logout = command {
                         #[cfg(feature = "discord")]
                         unlink_discord(&mut discord, &linked, &voice);
+                        #[cfg(feature = "discord")]
+                        sync_play_audio_pid(discord.as_ref(), &play_audio_pid);
                         let _ = events.send(Event::LoggedOut);
                         break;
                     }
@@ -5337,6 +5408,7 @@ pub async fn run(
             Wake::Discord(wake) => {
                 if let Some(discord) = discord.as_mut() {
                     discord.handle(wake, &events);
+                    sync_play_audio_pid(Some(discord), &play_audio_pid);
                 }
             }
         }
@@ -5344,6 +5416,22 @@ pub async fn run(
     voice.stop().await;
     #[cfg(feature = "matrix")]
     matrix.stop().await;
+}
+
+#[cfg(feature = "discord")]
+fn sync_play_audio_pid(
+    discord: Option<&crate::discord_text::Chat>,
+    tx: &tokio::sync::watch::Sender<Option<u32>>,
+) {
+    let pid = discord.and_then(crate::discord_text::Chat::play_audio_pid);
+    tx.send_if_modified(|current| {
+        if *current != pid {
+            *current = pid;
+            true
+        } else {
+            false
+        }
+    });
 }
 
 /// Logs why Discord couldn't start, and says so as the person sees it.

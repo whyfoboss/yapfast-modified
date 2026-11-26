@@ -37,6 +37,8 @@ pub(super) struct Reach {
     emoji: bool,
     /// The video playing changed.
     video: bool,
+    /// A search thumbnail preview arrived for a visible result row.
+    search_preview: bool,
     pub(super) everything: bool,
 }
 
@@ -48,6 +50,7 @@ impl Reach {
         picker: true,
         emoji: true,
         video: true,
+        search_preview: true,
         everything: true,
     };
 
@@ -82,6 +85,10 @@ impl Reach {
                 video: true,
                 ..Self::default()
             },
+            Event::SearchPreview { .. } => Self {
+                search_preview: true,
+                ..Self::default()
+            },
             _ => Self::EVERYTHING,
         }
     }
@@ -94,6 +101,7 @@ impl Reach {
             picker: self.picker || other.picker,
             emoji: self.emoji || other.emoji,
             video: self.video || other.video,
+            search_preview: self.search_preview || other.search_preview,
             everything: self.everything || other.everything,
         }
     }
@@ -400,6 +408,9 @@ impl Adapter {
         if reach.video {
             self.show_video(window);
         }
+        if reach.search_preview {
+            self.show_search(window);
+        }
     }
 
     /// The custom emoji pictures that arrived for the emoji picker, shown in
@@ -465,9 +476,21 @@ impl Adapter {
             self.show_sidebar(window);
         }
         self.show_account(window);
-        // A server's search stays, with its words, in the server's channels.
-        if !exiting && changes.selection && self.app.state.search_shown().is_none() {
-            window.set_search_text(SharedString::default());
+        // Active search query stays when moving within the searched scope, and
+        // clears from the header input when browsing another scope without closing results.
+        if !exiting && changes.selection {
+            if let Some(search) = self.app.state.search.as_ref()
+                && self.app.state.search_in_current_place()
+            {
+                window.set_search_text(search.query.as_str().into());
+                window.set_search_dropdown_open(false);
+                self.search_bindings = search.bindings.clone();
+            } else {
+                window.set_search_text(SharedString::default());
+                window.set_search_dropdown_open(false);
+                self.search_bindings.clear();
+            }
+            self.schedule_idle_trim(window);
         }
         if !exiting {
             self.show_header(window);
@@ -2180,6 +2203,7 @@ impl Adapter {
     /// What the open DM's header opens: its pinned messages, what its
     /// search found, and the friends picker.
     fn show_dm_tools(&mut self, window: &YapfastWindow) {
+        self.show_search(window);
         let state = &self.app.state;
         let twelve_hour = self.layout.twelve_hour_clock;
         window.set_can_pin(
@@ -2218,64 +2242,12 @@ impl Adapter {
         };
         show_found(
             &self.models.pins,
+            &mut self.pins_row_sigs,
             pinned,
             twelve_hour,
             self.layout.role_colors_everywhere,
-        );
-
-        let search = state.search_shown();
-        let server = search.is_some_and(|search| discord::parse_server(&search.place).is_some());
-        // The box names where it looks: the DM, or the channel's server.
-        let place = state.search_place();
-        let looks_in = place
-            .as_deref()
-            .and_then(|place| state.servers.iter().find(|server| server.id == place))
-            .map(|server| server.name.as_str())
-            .or(state.selected_room().map(|room| room.name.as_str()))
-            .unwrap_or_default();
-        window.set_search_placeholder(format!("Search {looks_in}").into());
-        window.set_search_open(search.is_some());
-        window.set_search_loading(search.is_some_and(|search| search.loading));
-        window.set_search_more(search.is_some_and(Search::more));
-        window.set_search_total(search.map_or(0, |search| search.total.min(i32::MAX as u32) as i32));
-        window.set_search_first(search.map_or(1, |search| search.total.saturating_sub(search.first).min(i32::MAX as u32) as i32));
-        window.set_search_heading(
-            match search {
-                Some(search) if search.results.is_empty() && search.loading => {
-                    "Searching...".into()
-                }
-                Some(search) if search.results.is_empty() && search.error.is_some() => {
-                    "Search".into()
-                }
-                Some(Search { total: 1, .. }) => "1 Result".into(),
-                Some(search) => format!("{} Results", search.total),
-                None => String::new(),
-            }
-            .into(),
-        );
-        window.set_search_note(
-            match search {
-                Some(Search {
-                    error: Some(error), ..
-                }) => error.as_str(),
-                Some(search) if !search.loading && search.results.is_empty() => {
-                    if server {
-                        "Nothing in this server matches. Try other words."
-                    } else {
-                        "Nothing in this conversation matches. Try other words."
-                    }
-                }
-                _ => "",
-            }
-            .into(),
-        );
-        show_hits(
-            &self.models.search_results,
-            state,
-            search.map_or(&[][..], |search| &search.results),
-            server,
-            twelve_hour,
-            self.layout.role_colors_everywhere,
+            &self.revealed,
+            self.restyle,
         );
 
         let history = state.edit_history.as_ref();
@@ -3097,6 +3069,7 @@ impl Adapter {
                 window.set_profile_editor_open(false);
                 window.set_profile_editor_prompt(ProfileEditorPrompt::default());
                 window.set_profile_editor_activity(ModelRc::default());
+                self.schedule_idle_trim(window);
             }
             return;
         };
@@ -3711,6 +3684,7 @@ impl Adapter {
                     .collect()
             }),
         );
+        self.refresh_report(window, state);
         window.set_switcher_open(state.switcher.is_some());
         if self
             .switcher
@@ -3875,6 +3849,7 @@ impl Adapter {
                 );
                 // In a server, an author's name shows its style's font alone.
                 row.name_style = name_style::font_only_in(in_server, row.name_style);
+                messages::mark_reportable(&mut row, Some(room), message, marks.revealed);
                 row
             },
         );
@@ -4244,6 +4219,12 @@ impl Adapter {
                     );
                     // In a server, an author's name shows its style's font alone.
                     row.name_style = name_style::font_only_in(in_server, row.name_style);
+                    messages::mark_reportable(
+                        &mut row,
+                        state.selected.as_deref(),
+                        message,
+                        marks.revealed,
+                    );
                     row
                 },
             );
@@ -4557,6 +4538,11 @@ impl Adapter {
         window.set_can_join(room.is_some_and(|room| state.can_join_voice(&room.id)));
         window.set_muted(voice.muted);
         window.set_deafened(voice.deafened);
+        let discord_call = voice.room.as_deref().is_some_and(|room| {
+            yapfast_core::network::Network::of(room) == yapfast_core::network::Network::Discord
+        });
+        window.set_fake_deafened(voice.fake_deafen);
+        window.set_show_fake_deafen(self.layout.fake_deafen_plugin() && discord_call);
         window.set_voice_status(
             match voice.phase {
                 Phase::Disconnected => "Voice disconnected",
@@ -5206,7 +5192,7 @@ impl Adapter {
     fn show_viewer(&mut self, window: &YapfastWindow) {
         let state = &self.app.state;
         let viewing = state.viewer.as_ref().and_then(|viewer| {
-            let message = state.message(&viewer.item)?;
+            let (_, message) = state.attachment_message(Some(&viewer.room), &viewer.item)?;
             Some((viewer, message, message.attachments.get(viewer.index)?))
         });
         window.set_viewer_open(viewing.is_some());
@@ -5217,6 +5203,7 @@ impl Adapter {
                 window.set_viewer_image(slint::Image::default());
                 window.set_viewer_frames(ModelRc::default());
                 window.set_viewer_delays(ModelRc::default());
+                self.schedule_idle_trim(window);
             }
             self.viewer_size = None;
             return;
@@ -5286,6 +5273,137 @@ impl Adapter {
             Some(place) if images.len() > 1 => format!("{} / {}", place + 1, images.len()).into(),
             _ => SharedString::default(),
         });
+    }
+
+    fn refresh_report(&self, window: &YapfastWindow, state: &AppState) {
+        use yapfast_core::{
+            application::ReportPhase,
+            report::ReportErrorKind,
+        };
+        let Some(report) = state.report.as_ref() else {
+            window.set_report_open(false);
+            window.set_report_author(SharedString::default());
+            window.set_report_time(SharedString::default());
+            window.set_report_preview(SharedString::default());
+            window.set_report_attachments(SharedString::default());
+            window.set_report_message_link(SharedString::default());
+            window.set_report_loading(false);
+            window.set_report_submitting(false);
+            window.set_report_submitted(false);
+            window.set_report_id(SharedString::default());
+            window.set_report_blocked(SharedString::default());
+            window.set_report_menu_error(SharedString::default());
+            window.set_report_header(SharedString::default());
+            window.set_report_subheader(SharedString::default());
+            window.set_report_info(SharedString::default());
+            window.set_report_summary(SharedString::default());
+            window.set_report_can_back(false);
+            window.set_report_can_submit(false);
+            window.set_report_can_submit_now(false);
+            window.set_report_submit_error(SharedString::default());
+            window.set_report_timeout_unknown(false);
+            window.set_report_focus_tick(0);
+            update_model(&self.models.report_options, Vec::new());
+            update_model(&self.models.report_checks, Vec::new());
+            return;
+        };
+        window.set_report_open(true);
+        window.set_report_author(report.author.as_str().into());
+        window.set_report_time(report.time.as_str().into());
+        window.set_report_preview(report.preview.as_str().into());
+        window.set_report_attachments(report.attachments_note.as_str().into());
+        window.set_report_message_link(report.message_link.as_str().into());
+        window.set_report_loading(report.phase == ReportPhase::LoadingMenu);
+        window.set_report_submitting(report.phase == ReportPhase::Submitting);
+        match &report.phase {
+            ReportPhase::Submitted { report_id } => {
+                window.set_report_submitted(true);
+                window.set_report_id(report_id.as_deref().unwrap_or_default().into());
+                window.set_report_blocked(SharedString::default());
+                window.set_report_menu_error(SharedString::default());
+            }
+            ReportPhase::Blocked(reason) => {
+                window.set_report_submitted(false);
+                window.set_report_id(SharedString::default());
+                window.set_report_blocked(reason.as_str().into());
+                window.set_report_menu_error(SharedString::default());
+            }
+            ReportPhase::MenuError(error) => {
+                window.set_report_submitted(false);
+                window.set_report_id(SharedString::default());
+                window.set_report_blocked(SharedString::default());
+                window.set_report_menu_error(error.as_str().into());
+            }
+            ReportPhase::LoadingMenu | ReportPhase::Selecting | ReportPhase::Submitting => {
+                window.set_report_submitted(false);
+                window.set_report_id(SharedString::default());
+                window.set_report_blocked(SharedString::default());
+                window.set_report_menu_error(SharedString::default());
+            }
+        }
+        window.set_report_summary(report.summary().into());
+        window.set_report_can_back(report.can_back());
+        window.set_report_can_submit(report.can_submit_step());
+        window.set_report_can_submit_now(report.can_submit_now(state.discord_online));
+        window.set_report_submit_error(
+            report
+                .submit_error
+                .as_ref()
+                .map_or("", |err| err.message.as_str())
+                .into(),
+        );
+        window.set_report_timeout_unknown(
+            report
+                .submit_error
+                .as_ref()
+                .is_some_and(|err| err.kind == ReportErrorKind::TimeoutUnknown),
+        );
+        window.set_report_focus_tick(report.focus_tick as i32);
+        let node = report.current_node();
+        window.set_report_header(node.map_or("", |n| n.header.as_str()).into());
+        window.set_report_subheader(
+            node.and_then(|n| n.subheader.as_deref())
+                .unwrap_or_default()
+                .into(),
+        );
+        window.set_report_info(
+            node.and_then(|n| n.info.as_deref())
+                .unwrap_or_default()
+                .into(),
+        );
+        let options = node
+            .filter(|_| matches!(report.phase, ReportPhase::Selecting | ReportPhase::Submitting))
+            .map_or_else(Vec::new, |node| {
+                node.children
+                    .iter()
+                    .filter_map(|child| {
+                        i32::try_from(child.target_node_id)
+                            .ok()
+                            .map(|id| ReportOptionRow {
+                                id,
+                                label: child.label.as_str().into(),
+                            })
+                    })
+                    .collect()
+            });
+        update_model(&self.models.report_options, options);
+        let checks = node
+            .filter(|_| matches!(report.phase, ReportPhase::Selecting | ReportPhase::Submitting))
+            .map_or_else(Vec::new, |node| {
+                node.elements
+                    .iter()
+                    .flat_map(|element| {
+                        let picked = report.selected_options.get(&element.name);
+                        element.options.iter().map(move |opt| ReportCheckRow {
+                            element: element.name.as_str().into(),
+                            value: opt.value.as_str().into(),
+                            label: opt.label.as_str().into(),
+                            checked: picked.is_some_and(|vals| vals.iter().any(|v| v == &opt.value)),
+                        })
+                    })
+                    .collect()
+            });
+        update_model(&self.models.report_checks, checks);
     }
 }
 
@@ -5838,28 +5956,227 @@ fn permission_names(bits: u64) -> String {
     }
 }
 
-/// Shows found messages, building rows only for those not shown already:
-/// a search's next page adds to the end of the results.
+impl Adapter {
+    fn show_search(&mut self, window: &YapfastWindow) {
+        if window.get_search_dropdown_open() {
+            let dropdown_sig = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                self.app.state.selected.hash(&mut h);
+                for member in &self.app.state.found_members {
+                    member.id.hash(&mut h);
+                    member.name.hash(&mut h);
+                }
+                h.finish()
+            };
+            if self.search_found_members_sig != dropdown_sig {
+                self.search_found_members_sig = dropdown_sig;
+                let suggestions = super::search::compute_search_suggestions(
+                    &self.app.state,
+                    &window.get_search_text(),
+                    &mut self.pictures,
+                    self.layout.role_colors_everywhere,
+                );
+                let count = suggestions.len() as i32;
+                self.models.search_filter_suggestions.set_vec(suggestions);
+                let current = window.get_search_suggestion_index();
+                if count == 0 {
+                    window.set_search_suggestion_index(-1);
+                } else if current < 0 {
+                    window.set_search_suggestion_index(0);
+                } else if current >= count {
+                    window.set_search_suggestion_index(count - 1);
+                }
+            }
+        }
+        let state = &self.app.state;
+        let twelve_hour = self.layout.twelve_hour_clock;
+        let role_colors = self.layout.role_colors_everywhere;
+        let search = state.search_shown();
+        let server = search.is_some_and(|search| discord::parse_server(&search.place).is_some());
+        let place = state.search_place();
+        let looks_in = place
+            .as_deref()
+            .and_then(|place| state.servers.iter().find(|server| server.id == place))
+            .map(|server| server.name.as_str())
+            .or(state.selected_room().map(|room| room.name.as_str()))
+            .unwrap_or_default();
+        let in_current = state.search_in_current_place();
+        let current_place_label = place
+            .as_deref()
+            .map(|place| state.search_place_label(place))
+            .unwrap_or_default();
+        window.set_search_placeholder(format!("Search {looks_in}").into());
+        window.set_search_open(search.is_some());
+        window.set_search_loading(search.is_some_and(|search| search.loading));
+        window.set_search_more(search.is_some_and(Search::more));
+        window.set_search_total(search.map_or(0, |search| search.total.min(i32::MAX as u32) as i32));
+        window.set_search_generation(search.map_or(0, |s| (s.generation & 0x7fff_ffff) as i32));
+        window.set_search_scope_label(search.map_or("", |s| s.place_label.as_str()).into());
+        window.set_search_scope_differs(search.is_some() && !in_current);
+        window.set_search_current_place_label(current_place_label.into());
+        window.set_search_heading(
+            match search {
+                Some(search) if search.results.is_empty() && search.loading => {
+                    "Searching...".into()
+                }
+                Some(search) if search.results.is_empty() && search.error.is_some() => {
+                    "Search".into()
+                }
+                Some(Search { total: 1, .. }) => "1 Result".into(),
+                Some(search) => format!("{} Results", search.total),
+                None => String::new(),
+            }
+            .into(),
+        );
+        window.set_search_note(
+            match search {
+                Some(Search {
+                    error: Some(error), ..
+                }) => error.as_str(),
+                Some(search) if !search.loading && search.results.is_empty() => {
+                    if server {
+                        "Nothing in this server matches. Try other words."
+                    } else {
+                        "Nothing in this conversation matches. Try other words."
+                    }
+                }
+                _ => "",
+            }
+            .into(),
+        );
+        show_hits(
+            &self.models.search_results,
+            &mut self.search_shown_gen,
+            &mut self.search_row_sigs,
+            state,
+            search,
+            server,
+            twelve_hour,
+            role_colors,
+            &self.revealed,
+            self.restyle,
+        );
+        window.set_search_jump_hint(search.map_or("", |search| search.jump_hint.as_str()).into());
+        window.set_search_jump_index(
+            search
+                .and_then(|search| {
+                    search
+                        .jump_to
+                        .filter(|number| *number as usize <= search.results.len())
+                        .map(|number| (number - 1) as i32)
+                })
+                .unwrap_or(-1),
+        );
+        window.set_search_jump_revision(search.map_or(0, |search| search.jump_revision));
+
+        if let Some(search) = self.app.state.search_shown() {
+            if !search.results.is_empty()
+                && self
+                    .search_viewport_sent
+                    .is_none_or(|(gen_id, _, _)| gen_id != search.generation)
+            {
+                let gen_id = search.generation;
+                let initial_end = search.results.len().min(8);
+                self.search_viewport_sent = Some((gen_id, 0, initial_end));
+                let effects = self.app.dispatch(Action::SearchViewport {
+                    start: 0,
+                    end: initial_end,
+                });
+                self.execute(effects);
+            }
+        } else {
+            self.search_viewport_sent = None;
+        }
+    }
+}
+
+fn found_row_signature(
+    message: &ChatMessage,
+    room: &str,
+    heading: &str,
+    twelve_hour: bool,
+    role_colors: bool,
+    query: Option<&str>,
+    revealed: &HashSet<String>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    message.item.hash(&mut h);
+    room.hash(&mut h);
+    heading.hash(&mut h);
+    twelve_hour.hash(&mut h);
+    role_colors.hash(&mut h);
+    query.hash(&mut h);
+    message.author.hash(&mut h);
+    message.avatar.hash(&mut h);
+    message.color.hash(&mut h);
+    message.body.hash(&mut h);
+    message.edited.hash(&mut h);
+    message.timestamp.hash(&mut h);
+    message.poll.is_some().hash(&mut h);
+    message.emoji.len().hash(&mut h);
+    message.mentions.len().hash(&mut h);
+    for (idx, att) in message.attachments.iter().enumerate() {
+        att.name.hash(&mut h);
+        att.image.hash(&mut h);
+        att.video.hash(&mut h);
+        att.preview
+            .as_ref()
+            .map(|p| Arc::as_ptr(p) as usize)
+            .hash(&mut h);
+        att.preview_failed.hash(&mut h);
+        let spoiler_open = !revealed.is_empty()
+            && revealed.contains(&format!("{}/a{idx}", message.item));
+        spoiler_open.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Shows found messages, updating only changed rows and appending new ones.
 fn show_found(
     model: &VecModel<FoundRow>,
+    row_sigs: &mut Vec<(String, u64)>,
     messages: &[ChatMessage],
     twelve_hour: bool,
     role_colors: bool,
+    revealed: &HashSet<String>,
+    restyle: bool,
 ) {
-    let kept = model
-        .iter()
-        .zip(messages)
-        .take_while(|(row, message)| row.item == message.item.as_str())
-        .count();
-    while model.row_count() > kept {
+    if messages.is_empty() {
+        row_sigs.clear();
+        if model.row_count() > 0 {
+            model.set_vec(Vec::new());
+        }
+        return;
+    }
+    if restyle {
+        row_sigs.clear();
+    }
+    while model.row_count() > messages.len() {
         model.remove(model.row_count() - 1);
     }
-    for message in &messages[kept..] {
-        model.push(found_row_with_role_colors(
-            message,
-            twelve_hour,
-            role_colors,
-        ));
+    row_sigs.truncate(messages.len());
+    for (index, message) in messages.iter().enumerate() {
+        let sig = found_row_signature(message, "", "", twelve_hour, role_colors, None, revealed);
+        if row_sigs
+            .get(index)
+            .is_some_and(|(id, prev)| id == &message.item && *prev == sig)
+        {
+            continue;
+        }
+        let row = messages::found_row_styled(message, twelve_hour, role_colors, None, revealed);
+        if index < model.row_count() {
+            model.set_row_data(index, row);
+            if let Some(slot) = row_sigs.get_mut(index) {
+                *slot = (message.item.clone(), sig);
+            } else {
+                row_sigs.push((message.item.clone(), sig));
+            }
+        } else {
+            model.push(row);
+            row_sigs.push((message.item.clone(), sig));
+        }
     }
 }
 
@@ -5877,27 +6194,46 @@ pub(super) fn span(seconds: u32) -> String {
     format!("{count} {unit}{plural}")
 }
 
-/// Search results, keeping the rows of those still first and building the
-/// rest. A server's name the channel each is in, above the first of a run
-/// in one channel.
+/// Search results, keyed by generation and row signature so appending pages or
+/// hydrating visible thumbnails updates only affected rows in place.
+#[allow(clippy::too_many_arguments)]
 fn show_hits(
     model: &VecModel<FoundRow>,
+    shown_gen: &mut u64,
+    row_sigs: &mut Vec<(String, u64)>,
     state: &AppState,
-    hits: &[yapfast_core::chat::SearchHit],
+    search: Option<&Search>,
     server: bool,
     twelve_hour: bool,
     role_colors: bool,
+    revealed: &HashSet<String>,
+    restyle: bool,
 ) {
-    let query = state.search.as_ref().map(|s| s.query.as_str());
-    let kept = model
-        .iter()
-        .zip(hits)
-        .take_while(|(row, hit)| row.item == hit.message.item.as_str())
-        .count();
-    while model.row_count() > kept {
+    let Some(search) = search.filter(|search| !search.results.is_empty()) else {
+        *shown_gen = 0;
+        row_sigs.clear();
+        if model.row_count() > 0 {
+            model.set_vec(Vec::new());
+        }
+        return;
+    };
+    let hits = &search.results;
+    let generation = search.generation;
+    let query = Some(search.query.as_str());
+    if *shown_gen != generation {
+        *shown_gen = generation;
+        row_sigs.clear();
+        if model.row_count() > 0 {
+            model.set_vec(Vec::new());
+        }
+    } else if restyle {
+        row_sigs.clear();
+    }
+    while model.row_count() > hits.len() {
         model.remove(model.row_count() - 1);
     }
-    for (index, hit) in hits.iter().enumerate().skip(kept) {
+    row_sigs.truncate(hits.len());
+    for (index, hit) in hits.iter().enumerate() {
         let starts = index == 0 || hits[index - 1].room != hit.room;
         let heading = state
             .rooms
@@ -5906,11 +6242,43 @@ fn show_hits(
             .filter(|_| server && starts)
             .map(|room| room.name.as_str())
             .unwrap_or_default();
-        model.push(FoundRow {
+        let sig = found_row_signature(
+            &hit.message,
+            &hit.room,
+            heading,
+            twelve_hour,
+            role_colors,
+            query,
+            revealed,
+        );
+        if row_sigs
+            .get(index)
+            .is_some_and(|(id, prev)| id == &hit.message.item && *prev == sig)
+        {
+            continue;
+        }
+        let row = FoundRow {
             room: hit.room.as_str().into(),
             heading: heading.into(),
-            ..messages::found_row_styled(&hit.message, twelve_hour, role_colors, query)
-        });
+            ..messages::found_row_styled(
+                &hit.message,
+                twelve_hour,
+                role_colors,
+                query,
+                revealed,
+            )
+        };
+        if index < model.row_count() {
+            model.set_row_data(index, row);
+            if let Some(slot) = row_sigs.get_mut(index) {
+                *slot = (hit.message.item.clone(), sig);
+            } else {
+                row_sigs.push((hit.message.item.clone(), sig));
+            }
+        } else {
+            model.push(row);
+            row_sigs.push((hit.message.item.clone(), sig));
+        }
     }
 }
 
@@ -5921,7 +6289,9 @@ fn show_edit_history(
     role_colors: bool,
 ) {
     let Some(history) = history else {
-        model.set_vec(Vec::new());
+        if model.row_count() > 0 {
+            model.set_vec(Vec::new());
+        }
         return;
     };
     let now = yapfast_core::clock::now_ms() / 1000;

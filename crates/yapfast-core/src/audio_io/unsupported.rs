@@ -57,3 +57,13 @@ pub fn others(
 ) -> Result<std::thread::JoinHandle<()>> {
     bail!("Yapfast shares sound on Linux only for now")
 }
+
+#[cfg(feature = "discord")]
+pub fn process_loopback(
+    _: u32,
+    _: u32,
+    _: super::Hear,
+    _: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<std::thread::JoinHandle<()>> {
+    bail!("Yapfast shares sound on Windows and Linux only for now")
+}

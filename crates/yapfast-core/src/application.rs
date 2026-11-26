@@ -46,6 +46,7 @@ mod preview;
 mod profile_editor;
 mod profiles;
 mod reactions;
+mod report;
 mod rooms;
 mod scheduled_event;
 mod server;
@@ -86,6 +87,7 @@ pub use profile_editor::{
     BIO_LIMIT, NAME_LIMIT, PRONOUNS_LIMIT, PictureEdit, ProfileEditor, ProfileText,
 };
 pub use reactions::{ReactionTip, ReactionsWindow, TIP_PEOPLE};
+pub use report::{ReportDialog, ReportPhase};
 pub use rooms::{MUTE_TIMES, MenuChoice, network_id, network_link};
 pub use scheduled_event::EventDialog;
 pub use server_settings::{
@@ -261,17 +263,27 @@ pub struct Pins {
 pub struct Search {
     /// Where it looks: a DM's room id, or a Discord server's id.
     pub place: String,
+    /// Explicit human-readable scope badge (e.g. "Server: Co-op" or "DM: Alice").
+    pub place_label: String,
     pub query: String,
+    /// Exact user IDs bound by picking participant suggestions in this search.
+    pub bindings: Vec<chat::SearchUserBinding>,
+    /// Monotonic generation identifying one distinct search submission.
+    pub generation: u64,
     /// How many messages it found in all, of which `results` are loaded,
     /// the newest first.
     pub total: u32,
     pub results: Vec<chat::SearchHit>,
-    pub first: u32,
+    pub jump_to: Option<u32>,
+    pub jump_revision: i32,
+    pub jump_hint: String,
     /// Where the next page of results starts among them all.
     pub next: u32,
     /// A page of results is on its way.
     pub loading: bool,
     pub error: Option<String>,
+    /// Items whose viewport preview fetch has already been queued in this session.
+    pub preview_requested: HashSet<String>,
 }
 
 impl Search {
@@ -358,6 +370,7 @@ struct ForwardSent {
 /// An image attachment shown large, and the message's other images to step to.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Viewer {
+    pub room: String,
     pub item: String,
     /// The attachment shown, by its place in the message.
     pub index: usize,
@@ -689,6 +702,8 @@ pub struct AppState {
     pub poll_draft: Option<PollDraft>,
     /// A message being forwarded, while its dialog is open.
     pub forwarding: Option<Forwarding>,
+    /// An active Discord message report dialog, while it's open.
+    pub report: Option<ReportDialog>,
     pub places_used: PlacesUsed,
     /// The Discord account's favourite emoji and the emoji it uses, which the
     /// emoji picker shows first.
@@ -830,6 +845,66 @@ impl AppState {
             .map(Arc::as_ref)
     }
 
+    /// Resolves `(room, message)` for an attachment action across the active room,
+    /// beside-thread, open pins, or saved search results (including unopened channels).
+    pub fn attachment_message(
+        &self,
+        room: Option<&str>,
+        item: &str,
+    ) -> Option<(String, &ChatMessage)> {
+        if let Some(target) = room.filter(|r| !r.is_empty()) {
+            if self.selected.as_deref() == Some(target)
+                && let Some(msg) = self.messages.iter().find(|m| m.item == item)
+            {
+                return Some((target.to_owned(), msg.as_ref()));
+            }
+            if let Some(aside) = self.aside.as_ref().filter(|a| a.room == target)
+                && let Some(msg) = aside.messages.iter().find(|m| m.item == item)
+            {
+                return Some((target.to_owned(), msg.as_ref()));
+            }
+            if let Some(Ok(pins)) = self
+                .pins
+                .as_ref()
+                .filter(|p| p.room == target)
+                .and_then(|p| p.messages.as_ref())
+                && let Some(msg) = pins.iter().find(|m| m.item == item)
+            {
+                return Some((target.to_owned(), msg));
+            }
+            if let Some(hit) = self
+                .search
+                .as_ref()
+                .and_then(|s| s.results.iter().find(|h| h.room == target && h.message.item == item))
+            {
+                return Some((hit.room.clone(), &hit.message));
+            }
+            return None;
+        }
+        if let Some(msg) = self.messages.iter().find(|m| m.item == item) {
+            return Some((self.selected.clone().unwrap_or_default(), msg.as_ref()));
+        }
+        if let Some(aside) = self.aside.as_ref()
+            && let Some(msg) = aside.messages.iter().find(|m| m.item == item)
+        {
+            return Some((aside.room.clone(), msg.as_ref()));
+        }
+        if let Some(pins) = self.pins.as_ref()
+            && let Some(Ok(list)) = pins.messages.as_ref()
+            && let Some(msg) = list.iter().find(|m| m.item == item)
+        {
+            return Some((pins.room.clone(), msg));
+        }
+        if let Some(hit) = self
+            .search
+            .as_ref()
+            .and_then(|s| s.results.iter().find(|h| h.message.item == item))
+        {
+            return Some((hit.room.clone(), &hit.message));
+        }
+        None
+    }
+
     /// Whether this account's devices can write to the selected room.
     pub fn can_write(&self) -> bool {
         !self.busy
@@ -890,6 +965,7 @@ impl AppState {
             || self.select_menu.is_some()
             || !self.mfa.is_empty()
             || self.forwarding.is_some()
+            || self.report.is_some()
             || self.new_dm.is_some()
             || self.add_friend.is_some()
             || self.status_editor.is_some()
@@ -1360,10 +1436,46 @@ impl AppState {
         })
     }
 
-    /// The search showing beside the selected conversation.
+    /// Explicit human-readable label for a search scope (`Server: ...`, `DM: ...`, etc.).
+    pub fn search_place_label(&self, place: &str) -> String {
+        if let Some(server) = self.servers.iter().find(|s| s.id == place) {
+            return format!("Server: {}", server.name);
+        }
+        if let Some(room) = self.rooms.iter().find(|r| r.id == place) {
+            if room.direct {
+                if room.participants.len() > 2 || (room.person.is_none() && room.members > 2) {
+                    return format!("Group DM: {}", room.name);
+                }
+                return format!("DM: {}", room.name);
+            }
+            return format!("#{}", room.name);
+        }
+        place.to_owned()
+    }
+
+    /// Whether a previously opened search scope is still accessible to this account.
+    pub fn search_place_accessible(&self, place: &str) -> bool {
+        self.servers.iter().any(|s| s.id == place)
+            || self
+                .rooms
+                .iter()
+                .any(|r| r.id == place && !r.request && !r.locked && r.capabilities.search)
+    }
+
+    /// The saved search while its scope remains accessible (persists across chat/server switches).
     pub fn search_shown(&self) -> Option<&Search> {
-        let place = self.search_place()?;
-        self.search.as_ref().filter(|search| search.place == place)
+        self.search
+            .as_ref()
+            .filter(|search| self.search_place_accessible(&search.place))
+    }
+
+    /// Whether the active search belongs to the currently selected chat/server scope.
+    pub fn search_in_current_place(&self) -> bool {
+        let Some(current) = self.search_place() else {
+            return false;
+        };
+        self.search_shown()
+            .is_some_and(|search| search.place == current)
     }
 
     /// The selected conversation, when it shows messages this account may
@@ -1619,6 +1731,26 @@ pub enum Action {
     /// Forward it to those chosen, with this message added.
     Forward(String),
     CloseForward,
+    /// Open the Discord report dialog for a specific message of the selected room or side thread.
+    OpenReportMessage {
+        item: String,
+        aside: bool,
+    },
+    /// Choose a category/reason node inside the active report dialog.
+    ReportChooseChild(i64),
+    /// Toggle a multi-select/checkbox option inside the active report dialog.
+    ReportToggleOption {
+        element: String,
+        value: String,
+    },
+    /// Return to the previous step in the active report dialog.
+    ReportBack,
+    /// Retry loading Discord's report menu after a load error.
+    ReportRetryMenu,
+    /// Explicitly submit the report for the bound message target.
+    SubmitReport,
+    /// Close the active report dialog without submitting.
+    CloseReport,
     /// Open the edit history sidebar for a message.
     ViewEditHistory(String),
     /// Close the edit history sidebar.
@@ -1660,7 +1792,10 @@ pub enum Action {
         index: usize,
     },
     /// Show an item's image attachment large.
-    ViewImage {
+    ViewImage { item: String, index: usize },
+    /// Show an image from a specific room (such as an unopened channel search hit).
+    ViewImageInRoom {
+        room: String,
         item: String,
         index: usize,
     },
@@ -1902,9 +2037,22 @@ pub enum Action {
     /// Search the selected DM's messages, or a server channel's server;
     /// an empty query ends the search.
     Search(String),
+    /// Search with user IDs bound by picking filter suggestions.
+    SearchWithBindings {
+        query: String,
+        bindings: Vec<chat::SearchUserBinding>,
+    },
+    /// Repeat the active saved search in the currently selected room or server.
+    SearchHere,
+    /// Explicitly closes and clears the saved search session.
+    CloseSearch,
+    /// Ask Discord for server members matching a search filter prefix (`from:`/`mentions:`).
+    SearchFilterMembers(String),
+    /// Report the currently visible `[start, end)` result indices so previews load lazily.
+    SearchViewport { start: usize, end: usize },
     /// Load the next page of the search's results.
     MoreResults,
-    SearchStartAt(u32),
+    SearchStartAt(String),
     /// Open the picker that adds friends to the selected DM, look among
     /// them, choose a friend or unchoose them, add those chosen, or close it.
     OpenAddPeople,
@@ -2327,6 +2475,8 @@ pub struct DiscordEmojiLists {
 #[derive(Default)]
 pub struct Application {
     pub state: AppState,
+    search_request: u64,
+    next_report_request: u64,
     feed_asks: activity_panel::FeedAsks,
     /// The lists from Matrix; `state` shows them with Discord's.
     matrix_rooms: Vec<Arc<ChatRoom>>,
@@ -2453,10 +2603,14 @@ const LISTED_PICTURES: usize = 150;
 /// Server icons and avatars kept beyond those on screen. One is 64 KB
 /// decoded, and the window keeps a copy of each it shows. The rail, the DMs
 /// listed, a member list and a timeline show a few hundred at most.
-const KEPT_PICTURES: usize = 400;
+const KEPT_PICTURES: usize = 256;
+/// Total decoded RGBA bytes of non-emoji pictures kept across channels and profiles.
+const KEPT_PICTURE_BYTES: usize = 10 * 1024 * 1024;
+/// Trim off-screen pictures on room switch, profile close, or search close above this size.
+const ROOM_SWITCH_TRIM_BYTES: usize = 4 * 1024 * 1024;
 /// A few banners can outweigh hundreds of avatars before the count limit trips.
 const LARGE_BANNER_BYTES: usize = 256 * 1024;
-const LARGE_BANNER_TRIM_BYTES: usize = 12 * 1024 * 1024;
+const LARGE_BANNER_TRIM_BYTES: usize = 6 * 1024 * 1024;
 /// Timeline rows either side of those on screen whose avatars stay when
 /// pictures go.
 const PICTURED_AROUND: usize = 30;
@@ -3101,11 +3255,36 @@ impl Application {
         }
         self.state.picture_changes += 1;
         let others = self.state.pictures.len() - self.emoji_pictures;
-        let count_limit = others > KEPT_PICTURES.max(2 * self.pictures_kept);
-        if !count_limit && self.large_banner_arrivals < LARGE_BANNER_TRIM_BYTES {
+        let count_limit = others > KEPT_PICTURES.max(self.pictures_kept + 64);
+        let evict_all = count_limit || self.non_emoji_picture_bytes() > KEPT_PICTURE_BYTES;
+        if !evict_all && self.large_banner_arrivals < LARGE_BANNER_TRIM_BYTES {
             return;
         }
         self.large_banner_arrivals = 0;
+        self.trim_offscreen_pictures_inner(evict_all);
+    }
+
+    fn non_emoji_picture_bytes(&self) -> usize {
+        self.state
+            .pictures
+            .iter()
+            .filter(|(url, _)| !is_custom_emoji(url))
+            .map(|(_, picture)| picture.rgba.len())
+            .sum()
+    }
+
+    pub fn trim_offscreen_pictures(&mut self, force: bool) {
+        if !force && self.non_emoji_picture_bytes() <= ROOM_SWITCH_TRIM_BYTES {
+            return;
+        }
+        self.large_banner_arrivals = 0;
+        if self.trim_offscreen_pictures_inner(true) {
+            self.state.picture_changes += 1;
+        }
+    }
+
+    fn trim_offscreen_pictures_inner(&mut self, evict_all: bool) -> bool {
+        let before = self.state.pictures.len();
         let aside = self
             .state
             .aside
@@ -3132,15 +3311,15 @@ impl Application {
         let mut evicted_large = Vec::new();
         self.state.pictures.retain(|url, picture| {
             let large_banner = url.contains("/banners/") && picture.rgba.len() >= LARGE_BANNER_BYTES;
-            if shown_or_emoji(url) || (!count_limit && !large_banner) {
+            if shown_or_emoji(url) || (!evict_all && !large_banner) {
                 return true;
             }
-            if !count_limit {
+            if !evict_all {
                 evicted_large.push(url.clone());
             }
             false
         });
-        if count_limit {
+        if evict_all {
             let pictures = &self.state.pictures;
             self.requested_pictures
                 .retain(|url| shown_or_emoji(url) || pictures.contains_key(url));
@@ -3150,6 +3329,7 @@ impl Application {
             }
         }
         self.pictures_kept = self.state.pictures.len() - self.emoji_pictures;
+        self.state.pictures.len() != before
     }
 
     fn dispatch_action(&mut self, action: Action) -> Vec<Effect> {
@@ -3318,6 +3498,15 @@ impl Application {
                 self.state.forwarding = None;
                 vec![]
             }
+            Action::OpenReportMessage { item, aside } => self.open_report_message(item, aside),
+            Action::ReportChooseChild(target) => self.report_choose_child(target),
+            Action::ReportToggleOption { element, value } => {
+                self.report_toggle_option(element, value)
+            }
+            Action::ReportBack => self.report_back(),
+            Action::ReportRetryMenu => self.report_retry_menu(),
+            Action::SubmitReport => self.submit_report(),
+            Action::CloseReport => self.close_report(),
             Action::ViewEditHistory(item) => {
                 if let Some(room) = self.state.selected.as_ref() {
                     vec![Effect::Backend(Command::Discord(
@@ -3411,7 +3600,10 @@ impl Application {
             Action::ToggleSpoiler(index) => self.toggle_spoiler(index),
             Action::SaveAttachment { item, index, path } => self.save_attachment(item, index, path),
             Action::CopyAttachment { item, index } => self.copy_attachment(item, index),
-            Action::ViewImage { item, index } => self.view_image(item, index),
+            Action::ViewImage { item, index } => self.view_image(None, item, index),
+            Action::ViewImageInRoom { room, item, index } => {
+                self.view_image(Some(room), item, index)
+            }
             Action::PlayVideo {
                 item,
                 index,
@@ -3593,7 +3785,12 @@ impl Application {
                 }
                 vec![]
             }
-            Action::Search(query) => self.search(query),
+            Action::Search(query) => self.search(query, vec![]),
+            Action::SearchWithBindings { query, bindings } => self.search(query, bindings),
+            Action::SearchHere => self.search_here(),
+            Action::CloseSearch => self.close_search(),
+            Action::SearchFilterMembers(query) => self.request_server_members(&query),
+            Action::SearchViewport { start, end } => self.search_viewport(start, end),
             Action::MoreResults => self.more_results(),
             Action::SearchStartAt(position) => self.search_start_at(position),
             Action::OpenAddPeople => self.open_add_people(),
@@ -4026,6 +4223,7 @@ impl Application {
             }
             Action::CloseProfile => {
                 self.state.profile = None;
+                self.trim_offscreen_pictures(false);
                 vec![]
             }
             Action::ShowRole(role) => self.show_role(role),
@@ -4168,10 +4366,8 @@ impl Application {
                 index,
                 picture,
             } => {
-                // The room it came from: the selected one, or the thread
-                // beside it.
-                if self.state.room_of(&item) == Some(&room)
-                    && let Some(viewer) = &mut self.state.viewer
+                if let Some(viewer) = &mut self.state.viewer
+                    && viewer.room == room
                     && viewer.item == item
                 {
                     viewer.pictures.insert(index, Some(picture));
@@ -4330,11 +4526,16 @@ impl Application {
             Event::ThreadStarted { room, result } => return self.thread_started(room, result),
             Event::ForumPosted { room, result } => return self.forum_posted(room, result),
             Event::Found {
-                place,
-                query,
+                request,
                 offset,
                 result,
-            } => self.found(place, query, offset, result),
+            } => return self.found(request, offset, result),
+            Event::SearchPreview {
+                request,
+                item,
+                index,
+                preview,
+            } => self.search_preview(request, item, index, preview),
             Event::Topic { room, topic } => {
                 if self.state.selected.as_ref() == Some(&room) {
                     self.state.topic = topic;
@@ -4671,7 +4872,13 @@ impl Application {
                 }
             }
             Event::Saved { room, name, result } => {
-                if self.state.selected.as_ref() == Some(&room) {
+                if self.state.selected.as_ref() == Some(&room)
+                    || self
+                        .state
+                        .viewer
+                        .as_ref()
+                        .is_some_and(|viewer| viewer.room == room)
+                {
                     self.state.notice = Some(match result {
                         Ok(()) => format!("Saved {name}."),
                         Err(error) => error.into(),
@@ -4703,11 +4910,16 @@ impl Application {
             } => {
                 if self.state.selected.as_ref() == Some(&room) {
                     if history.is_some() {
-                        self.state.search = None;
                         self.state.profile = None;
                     }
                     self.state.edit_history = history;
                 }
+            }
+            Event::ReportMessageMenu { request, result } => {
+                self.on_report_menu_event(request, result);
+            }
+            Event::MessageReported { request, result } => {
+                self.on_message_reported_event(request, result);
             }
         }
         vec![]

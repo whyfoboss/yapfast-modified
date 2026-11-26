@@ -1,6 +1,9 @@
 //! Discord's HTTP API, called the way the web client calls it.
 
-use std::sync::RwLock;
+use std::sync::{
+    RwLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode, header};
@@ -11,7 +14,7 @@ use crate::{
     captcha::Captcha,
     client,
     limits::{self, Limits, Refusals, Stopped},
-    mfa, scheduled_event,
+    mfa, report, scheduled_event,
     settings::{self, CustomStatus},
 };
 
@@ -265,6 +268,15 @@ pub fn code(error: &anyhow::Error) -> Option<u64> {
         .map(|refusal| refusal.code)
 }
 
+/// Whether `error` represents a transport/HTTP client failure rather than a
+/// response refusal from Discord.
+pub fn is_network_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Refused>().is_none()
+        && error
+            .chain()
+            .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+}
+
 /// Whether a failed [`Api::download`] may work if tried later: Discord was
 /// out of reach, failed or asked Yapfast to slow down, rather than refusing the
 /// file or Yapfast refusing what came.
@@ -284,6 +296,9 @@ pub fn may_work_later(error: &anyhow::Error) -> bool {
     }
 }
 
+/// Default timeout for in-app report menu fetches and submissions.
+const REPORT_TIMEOUT_MS: u64 = 15_000;
+
 pub struct Api {
     http: Client,
     /// Empty without a login; Discord may refresh it in READY.
@@ -297,6 +312,8 @@ pub struct Api {
     downloads: tokio::sync::Semaphore,
     /// [`STALL`], shorter in tests.
     stall: std::time::Duration,
+    /// Timeout for reporting menu/submission requests, in milliseconds.
+    report_timeout_ms: AtomicU64,
 }
 
 /// The most files Yapfast downloads from Discord at once. They share one HTTP/2
@@ -310,6 +327,16 @@ impl Api {
             .user_agent(client::user_agent())
             .cookie_provider(crate::cookies::jar())
             .connect_timeout(std::time::Duration::from_secs(15))
+            // Keep HTTP redirects within Discord, allowed media hosts, or the test server.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error(anyhow!("too many redirects"))
+                } else if allowed_redirect(attempt.url().as_str()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             // Requests to a host share one HTTP/2 connection. While some are
             // waiting, a ping that goes unanswered closes it, so the next
             // request opens a new one rather than waiting on a lost one.
@@ -329,7 +356,17 @@ impl Api {
             refusals: Refusals::default(),
             downloads: tokio::sync::Semaphore::new(DOWNLOADS),
             stall: STALL,
+            report_timeout_ms: AtomicU64::new(REPORT_TIMEOUT_MS),
         })
+    }
+
+    pub fn set_report_timeout(&self, timeout: std::time::Duration) {
+        let ms = u64::try_from(timeout.as_millis().max(1)).unwrap_or(u64::MAX);
+        self.report_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    fn report_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.report_timeout_ms.load(Ordering::Relaxed).max(1))
     }
 
     /// Without a login, for linking one.
@@ -891,6 +928,65 @@ impl Api {
                 Ok(())
             }
             deleted => deleted,
+        }
+    }
+
+    /// Fetches Discord's V3 in-app message report menu tree.
+    pub async fn message_report_menu(&self) -> Result<report::ReportMenu> {
+        let value = self
+            .report_json(self.request(Method::GET, "/reporting/menu/message"))
+            .await?;
+        report::parse_menu(&value)
+    }
+
+    /// Submits a completed V3 in-app message report against a fixed channel and
+    /// message snowflake without automatic retries.
+    pub async fn submit_message_report(
+        &self,
+        submission: &report::ReportSubmission,
+    ) -> Result<Option<String>> {
+        if !report::is_snowflake(&submission.channel_id)
+            || !report::is_snowflake(&submission.message_id)
+        {
+            bail!("Invalid Discord channel or message identifier.");
+        }
+        let path = report::validate_postback_path(Some(&submission.postback_path));
+        let body = submission.body();
+        let value = self
+            .report_json(with_json(self.request(Method::POST, &path), &body))
+            .await?;
+        Ok(value["report_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned))
+    }
+
+    async fn report_json(&self, request: RequestBuilder) -> Result<Value> {
+        let timeout = self.report_timeout();
+        let fut = async {
+            let response = self.send_request(request, false).await?;
+            let bytes = response
+                .bytes()
+                .await
+                .context("could not read Discord's answer")?;
+            if bytes.is_empty() {
+                return Ok(Value::Null);
+            }
+            serde_json::from_slice(&bytes).context("could not understand Discord's answer")
+        };
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                if error
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout))
+                {
+                    return Err(anyhow::Error::new(report::ReportTimeout));
+                }
+                Err(error)
+            }
+            Err(_) => Err(anyhow::Error::new(report::ReportTimeout)),
         }
     }
 
@@ -2789,6 +2885,15 @@ fn allowed(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `url` is a permitted HTTP redirect destination for `Api::http`.
+fn allowed_redirect(url: &str) -> bool {
+    allowed(url).is_ok()
+        || url.starts_with("https://discord.com/")
+        || url.starts_with("https://canary.discord.com/")
+        || url.starts_with("https://ptb.discord.com/")
+        || url.starts_with("https://discord-attachments-uploads-prd.storage.googleapis.com/")
+}
+
 /// Whether `url` is on Discord's CDN or its media proxy, which serves
 /// embeds' pictures from `images-ext-1.discordapp.net` and the like.
 fn discord_file(url: &str) -> bool {
@@ -3085,5 +3190,16 @@ mod tests {
         assert!(!Refused(StatusCode::FORBIDDEN).rate_limited());
         assert!(Refused(StatusCode::NOT_FOUND).gone());
         assert!(!Refused(StatusCode::TOO_MANY_REQUESTS).gone());
+    }
+
+    #[test]
+    fn redirects_only_to_allowed_hosts() {
+        assert!(super::allowed_redirect("https://cdn.discordapp.com/attachments/1/2/a.png"));
+        assert!(super::allowed_redirect("https://discord.com/api/v9/users/@me"));
+        assert!(super::allowed_redirect("https://media.tenor.com/xAAAP1/clip.mp4"));
+        assert!(!super::allowed_redirect("http://127.0.0.1:8080/internal"));
+        assert!(!super::allowed_redirect("http://169.254.169.254/latest/meta-data/"));
+        assert!(!super::allowed_redirect("https://evil.example/payload.bin"));
+        assert!(!super::allowed_redirect("file:///C:/Windows/win.ini"));
     }
 }

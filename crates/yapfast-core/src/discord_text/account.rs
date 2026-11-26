@@ -5,9 +5,9 @@
 
 use super::{
     channels::SEARCH_PAUSE,
-    channels::SharedPreviews,
+    channels::{SharedFoundAttachments, SharedPreviews},
     commands::NOT_DISCORD,
-    render::{chat_badges, chat_profile, found_in, hits_in, with_previews},
+    render::{chat_badges, chat_profile, found_in, hits_in, preview, with_previews},
     *,
 };
 use crate::chat::{
@@ -21,6 +21,7 @@ pub(super) fn command(
     discord: Result<&Discord, &str>,
     searches: &Arc<std::sync::atomic::AtomicU64>,
     previews: &SharedPreviews,
+    found_attachments: &SharedFoundAttachments,
     events: &UnboundedSender<Event>,
 ) -> Option<Command> {
     // Matrix looks for people too.
@@ -588,6 +589,7 @@ pub(super) fn command(
             (Ok(discord), Some((guild, channel))) => {
                 let (discord, events) = (discord.clone(), events.clone());
                 let previews = previews.clone();
+                let found_attachments = found_attachments.clone();
                 tokio::spawn(async move {
                     let pins = match discord.pins(&guild, &channel).await {
                         Ok(pins) => pins,
@@ -598,6 +600,22 @@ pub(super) fn command(
                             return;
                         }
                     };
+                    {
+                        let mut guard = found_attachments
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard.pins.retain(|(r, _), _| r != &room);
+                        for message in &pins {
+                            let item = format!("d:{}", message.id);
+                            let atts = message
+                                .attachments
+                                .iter()
+                                .filter(|a| a.shown == Shown::Message)
+                                .cloned()
+                                .collect();
+                            guard.pins.insert((room.clone(), item), atts);
+                        }
+                    }
                     // The list shows at once, its pictures as they come.
                     let mut found = found_in(&discord, &room, &pins);
                     let _ = events.send(Event::Pins {
@@ -852,9 +870,39 @@ pub(super) fn command(
     if let Command::Discord(DiscordCommand::Search {
         place,
         query,
+        bindings,
+        request,
         offset,
     }) = command
     {
+        let mut discord_bindings = yapfast_discord::service::SearchBindings::default();
+        for binding in bindings {
+            let key = binding
+                .token
+                .trim()
+                .trim_start_matches('@')
+                .to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            match binding.filter {
+                crate::chat::SearchUserFilter::From => {
+                    discord_bindings.from.push((key, binding.user_id));
+                }
+                crate::chat::SearchUserFilter::Mentions => {
+                    discord_bindings.mentions.push((key, binding.user_id));
+                }
+            }
+        }
+        if offset == 0 {
+            let mut guard = found_attachments
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if request >= guard.search_request {
+                guard.search_request = request;
+                guard.search.clear();
+            }
+        }
         // A DM is searched on its own, and a server as a whole.
         let scope = discord::parse_room(&place)
             .map(|(guild, channel)| (guild.to_owned(), Some(channel.to_owned())))
@@ -862,21 +910,41 @@ pub(super) fn command(
         match (discord, scope) {
             (Ok(discord), Some((guild, channel))) => {
                 let (discord, events) = (discord.clone(), events.clone());
-                let previews = previews.clone();
+                let found_attachments = found_attachments.clone();
                 tokio::spawn(async move {
                     let result = match discord
-                        .search(&guild, channel.as_deref(), &query, offset)
+                        .search_with_bindings(
+                            &guild,
+                            channel.as_deref(),
+                            &query,
+                            offset,
+                            &discord_bindings,
+                        )
                         .await
                     {
                         Ok(page) => {
-                            let mut hits = hits_in(&discord, &guild, &page.messages);
-                            let mut found: Vec<_> = hits
-                                .iter_mut()
-                                .map(|hit| std::mem::take(&mut hit.message))
-                                .collect();
-                            with_previews(&discord, &previews, &page.messages, &mut found).await;
-                            for (hit, message) in hits.iter_mut().zip(found) {
-                                hit.message = message;
+                            let hits = hits_in(&discord, &guild, &page.messages);
+                            {
+                                let mut guard = found_attachments
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if request >= guard.search_request {
+                                    guard.search_request = request;
+                                    if offset == 0 {
+                                        guard.search.clear();
+                                    }
+                                    for (hit, message) in hits.iter().zip(&page.messages) {
+                                        let atts = message
+                                            .attachments
+                                            .iter()
+                                            .filter(|a| a.shown == Shown::Message)
+                                            .cloned()
+                                            .collect();
+                                        guard
+                                            .search
+                                            .insert((hit.room.clone(), hit.message.item.clone()), atts);
+                                    }
+                                }
                             }
                             Ok((page.total, hits))
                         }
@@ -886,8 +954,7 @@ pub(super) fn command(
                         }
                     };
                     let _ = events.send(Event::Found {
-                        place,
-                        query,
+                        request,
                         offset,
                         result,
                     });
@@ -895,13 +962,107 @@ pub(super) fn command(
             }
             (discord, _) => {
                 let _ = events.send(Event::Found {
-                    place,
-                    query,
+                    request,
                     offset,
                     result: Err(discord.err().unwrap_or(NOT_DISCORD).into()),
                 });
             }
         }
+        return None;
+    }
+    if let Command::Discord(DiscordCommand::SearchPreviews { request, items }) = command {
+        if let Ok(discord) = discord {
+            let wanted: Vec<(String, usize, String)> = {
+                let guard = found_attachments
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if guard.search_request != request {
+                    Vec::new()
+                } else {
+                    let mut list = Vec::new();
+                    for (room, item) in items {
+                        if let Some(atts) = guard.search.get(&(room, item.clone())) {
+                            list.extend(
+                                atts.iter()
+                                    .enumerate()
+                                    .filter(|(_, a)| a.image || a.video_url.is_some())
+                                    .filter_map(|(idx, a)| {
+                                        Some((item.clone(), idx, a.preview_url.clone()?))
+                                    })
+                                    .take(crate::chat::FOUND_PICTURES),
+                            );
+                        }
+                    }
+                    list
+                }
+            };
+            if !wanted.is_empty() {
+                let (discord, events) = (discord.clone(), events.clone());
+                let previews = previews.clone();
+                let found_attachments = found_attachments.clone();
+                tokio::spawn(async move {
+                    use futures_util::StreamExt;
+                    let cached = |url: &str| {
+                        previews
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .get(url)
+                    };
+                    futures_util::stream::iter(wanted)
+                        .for_each_concurrent(Some(4), |(item, index, url)| {
+                            let discord = &discord;
+                            let previews = &previews;
+                            let found_attachments = &found_attachments;
+                            let events = &events;
+                            async move {
+                                let still_active = found_attachments
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .search_request
+                                    == request;
+                                if !still_active {
+                                    return;
+                                }
+                                let picture = if let Some(pic) = cached(&url) {
+                                    Some(pic)
+                                } else {
+                                    let pic = preview(discord, &url).await;
+                                    if let Some(pic) = &pic {
+                                        previews
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                            .insert(url, pic.clone());
+                                    }
+                                    pic
+                                };
+                                let still_active = found_attachments
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .search_request
+                                    == request;
+                                if still_active {
+                                    let _ = events.send(Event::SearchPreview {
+                                        request,
+                                        item,
+                                        index,
+                                        preview: picture,
+                                    });
+                                }
+                            }
+                        })
+                        .await;
+                });
+            }
+        }
+        return None;
+    }
+    if let Command::Discord(DiscordCommand::ClearSearch) = command {
+        let mut guard = found_attachments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.search.clear();
+        guard.search.shrink_to_fit();
+        guard.search_request = guard.search_request.wrapping_add(1);
         return None;
     }
     if let Command::Discord(DiscordCommand::AddToGroup { room, users }) = command {

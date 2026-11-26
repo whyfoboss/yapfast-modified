@@ -90,6 +90,13 @@ impl Application {
             Command::Recover(_) | Command::RefreshTrust | Command::Logout => {
                 self.state.busy = false;
             }
+            Command::Discord(
+                DiscordCommand::ReportMessageMenu { request }
+                | DiscordCommand::SubmitMessageReport { request, .. },
+            ) => {
+                self.fail_report_request(*request, "Could not reach Discord.");
+                return;
+            }
             _ => {}
         }
         self.stop_waiting();
@@ -100,6 +107,7 @@ impl Application {
     /// Ends what dialogs wait for once no answer can come: sending a friend
     /// request, saving the custom status and fetching a profile fail.
     fn stop_waiting(&mut self) {
+        self.stop_report_wait(STOPPED);
         if let Some(dialog) = self
             .state
             .add_friend
@@ -143,7 +151,11 @@ impl Application {
         let reset_version = self.state.reset_version.wrapping_add(1);
         let reaction_uses = std::mem::take(&mut self.reaction_uses);
         let pinned = std::mem::take(&mut self.state.pinned);
+        let search_request = self.search_request.wrapping_add(1);
+        let next_report_request = self.next_report_request.wrapping_add(1);
         *self = Self::default();
+        self.search_request = search_request;
+        self.next_report_request = next_report_request;
         self.reaction_uses = reaction_uses;
         self.state.pinned = pinned;
         self.state.selection_version = selection_version;

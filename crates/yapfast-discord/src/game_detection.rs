@@ -83,6 +83,11 @@ async fn run(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A list from the cache is asked for again once it's a day old, and
     // comes again only if it changed.
+    let mut exit_checks = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    exit_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut cached = age.is_some();
     let mut due = custom.is_none() && age.is_none_or(|age| age >= catalog::MAX_AGE);
     let mut refresh = Box::pin(catalog::refresh(&api, cache.clone(), cached));
@@ -114,6 +119,16 @@ async fn run(
                 }
                 due = false;
                 next_refresh = Instant::now() + if success { catalog::MAX_AGE } else { Duration::from_secs(3600) };
+            }
+            _ = exit_checks.tick(), if detector.selection.active.is_some() => {
+                let scanned = tokio::task::spawn_blocking(move || {
+                    let ended = detector.check_active_exit();
+                    (detector, ended)
+                }).await?;
+                detector = scanned.0;
+                if scanned.1 {
+                    ticks.reset_immediately();
+                }
             }
             _ = ticks.tick() => {
                 if custom.is_none() && !due && Instant::now() >= next_refresh {
@@ -154,6 +169,7 @@ struct Found {
 struct Active {
     found: Found,
     missed: u8,
+    exit_misses: u8,
     activity: Arc<Value>,
 }
 
@@ -180,6 +196,7 @@ impl Selection {
         if let Some(active) = &mut self.active {
             if current_found {
                 active.missed = 0;
+                active.exit_misses = 0;
                 return Some(active.activity.clone());
             }
             active.missed += 1;
@@ -201,6 +218,7 @@ impl Selection {
             Active {
                 found,
                 missed: 0,
+                exit_misses: 0,
                 activity: Arc::new(value),
             }
         });
@@ -382,6 +400,37 @@ impl Detector {
         {
             self.selection.active = None;
         }
+    }
+
+    /// A cheap check of the displayed game between full catalogue scans.
+    fn check_active_exit(&mut self) -> bool {
+        let Some(active) = self.selection.active.as_mut() else {
+            return false;
+        };
+        let identity = active.found.identity;
+        let pid = sysinfo::Pid::from_u32(identity.pid);
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+        if system.process(pid).is_some_and(|process| {
+            let started = process.start_time();
+            started == 0 || identity.started == 0 || started == identity.started
+        }) {
+            active.exit_misses = 0;
+            return false;
+        }
+
+        // A process snapshot can miss a live process. Confirm its absence
+        // before clearing the activity and looking for a replacement.
+        active.exit_misses += 1;
+        if active.exit_misses < 2 {
+            return false;
+        }
+        self.selection.active = None;
+        true
     }
 
     fn scan(&mut self, now_ms: u64) -> Option<Arc<Value>> {
@@ -785,10 +834,13 @@ mod tests {
             detector.scan(crate::service::now_ms()).unwrap()["name"],
             "Native Fixture"
         );
+        assert!(!detector.check_active_exit(), "a running game stays shown");
         child.0.kill().unwrap();
         child.0.wait().unwrap();
-        assert!(detector.scan(crate::service::now_ms()).is_some());
+        assert!(!detector.check_active_exit(), "one missing sample is tolerated");
+        assert!(detector.check_active_exit(), "two checks confirm the game exited");
         assert!(detector.scan(crate::service::now_ms()).is_none());
+        assert!(!detector.check_active_exit(), "nothing to check after exit");
     }
 
     #[test]

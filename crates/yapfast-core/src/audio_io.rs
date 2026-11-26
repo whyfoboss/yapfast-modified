@@ -311,6 +311,21 @@ pub fn others(
     platform::others(skip, Box::new(heard), stop)
 }
 
+/// Captures what `process` and its child processes play at [`RATE`] in stereo
+/// as `source` until `stop`.
+#[cfg(feature = "discord")]
+pub fn process_loopback(
+    process: u32,
+    source: u32,
+    heard: impl FnMut(Heard<'_>) + Send + 'static,
+    stop: Arc<AtomicBool>,
+) -> Result<JoinHandle<()>> {
+    if !devices() {
+        return Ok(std::thread::spawn(|| {}));
+    }
+    platform::process_loopback(process, source, Box::new(heard), stop)
+}
+
 #[cfg(feature = "discord")]
 type Hear = Box<dyn FnMut(Heard<'_>) + Send>;
 

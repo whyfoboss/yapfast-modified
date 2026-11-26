@@ -37,7 +37,7 @@ pub(crate) const PREFIX: &str = "discord:";
 /// Discord channels kept after closing, so going back to one shows it at
 /// once, and of each, the newest messages kept. Decoded previews use one
 /// eight MiB cache across these channels and come back from disk after eviction.
-pub const KEPT_CHANNELS: usize = 40;
+pub const KEPT_CHANNELS: usize = 24;
 pub const KEPT_MESSAGES: usize = 200;
 
 /// The games this device names itself: an executable, by file name or full
@@ -706,6 +706,9 @@ fn dm_room(snapshot: &Snapshot, dm: &Conversation, premium: u8, me: &str) -> Cha
         category_id: None,
         request: dm.request,
         person: dm.person.clone(),
+        participants: std::iter::once(me.to_owned())
+            .chain(dm.recipients.iter().cloned())
+            .collect(),
         people: in_voice(snapshot, &dm.id),
         ringing: dm
             .ringing
@@ -866,6 +869,7 @@ fn server_rooms(
                 category_id: category_id.clone(),
                 request: false,
                 person: None,
+                participants: vec![],
                 people: in_voice(snapshot, &channel.id),
                 ringing: vec![],
                 incoming: false,
@@ -920,6 +924,7 @@ fn server_rooms(
                 category_id: category_id.clone(),
                 request: false,
                 person: None,
+                participants: vec![],
                 people: vec![],
                 ringing: vec![],
                 incoming: false,
@@ -1072,6 +1077,7 @@ fn thread_room(
         category_id: parent.category_id.clone(),
         request: false,
         person: None,
+        participants: vec![],
         people: vec![],
         ringing: vec![],
         incoming: false,

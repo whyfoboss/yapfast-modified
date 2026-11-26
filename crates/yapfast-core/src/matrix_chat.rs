@@ -1203,6 +1203,7 @@ async fn room_index(client: &Client) -> RoomIndex {
             category_id: None,
             request: false,
             person,
+            participants: vec![],
             people: vec![],
             ringing: vec![],
             incoming: false,

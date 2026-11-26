@@ -440,8 +440,21 @@ impl Application {
                 Status::Offline(reason) => reason.clone(),
             });
         }
+        let mut extra_effects = Vec::new();
         if self.state.discord_user != snapshot.user_id {
             self.state.discord_presence_preview = Default::default();
+            if self.state.discord_user.is_some() {
+                self.invalidate_report_on_account_change();
+            }
+            if self.state.discord_user.is_some()
+                && self
+                    .state
+                    .search
+                    .as_ref()
+                    .is_some_and(|search| search.place.starts_with(discord::PREFIX))
+            {
+                extra_effects.extend(self.close_search());
+            }
         }
         self.state.discord_linked = true;
         self.state.discord_user = snapshot.user_id.clone();
@@ -582,6 +595,7 @@ impl Application {
         });
         self.discord = Some(snapshot);
         let mut effects = self.list_discord();
+        effects.extend(extra_effects);
         self.refresh_browse();
         effects.extend(self.follow_server_settings());
         effects.extend(self.follow_channel_settings());
@@ -662,6 +676,7 @@ impl Application {
             self.state.discord_names = None;
         }
         self.state.person_dialog = None;
+        self.invalidate_report_on_account_change();
         self.state.server_settings = None;
         self.state.channel_settings = None;
         self.state.browse = None;
@@ -674,6 +689,16 @@ impl Application {
         self.state.discord_presence_preview = Default::default();
         self.state.join_sounds.clear();
         self.state.sound_catalog = None;
-        self.show_lists()
+        let mut effects = Vec::new();
+        if self
+            .state
+            .search
+            .as_ref()
+            .is_some_and(|search| search.place.starts_with(discord::PREFIX))
+        {
+            effects.extend(self.close_search());
+        }
+        effects.extend(self.show_lists());
+        effects
     }
 }

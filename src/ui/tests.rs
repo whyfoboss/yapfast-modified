@@ -69,6 +69,111 @@ fn account_footer_tints_only_the_music_note() {
     assert!(green_pixels(2) > idle, "the music note uses the live accent");
 }
 
+#[test]
+fn search_result_jump_reveals_and_highlights_offscreen_cards() {
+    use i_slint_core::{
+        accessibility::AccessibleStringProperty, item_tree::ItemRc, items::BasicBorderRectangle,
+    };
+    use std::ops::ControlFlow;
+
+    let window = one_message("Search fixture");
+    window.set_search_open(true);
+    window.set_search_total(55);
+    window.set_search_generation(1);
+    window.set_search_results(ModelRc::new(VecModel::from(
+        (1..=55)
+            .map(|number| {
+                let message = ChatMessage {
+                    item: format!("d:{number}"),
+                    author: format!("Result {number}"),
+                    body: if number % 3 == 0 {
+                        format!(
+                            "Longer multi-line result {number}\nwith dynamic height line two\nand line three"
+                        )
+                    } else {
+                        format!("Short {number}")
+                    },
+                    ..Default::default()
+                };
+                let mut row = super::messages::found_row_with_role_colors(&message, false, true);
+                row.heading = if number % 15 == 1 {
+                    format!("ch-{}", number / 15).into()
+                } else {
+                    SharedString::default()
+                };
+                row
+            })
+            .collect::<Vec<_>>(),
+    )));
+    let settle = || {
+        for _ in 0..3 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+        }
+    };
+    let try_card = |number| {
+        let label = format!("Result {number}, , jump to the message");
+        let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+        ItemRc::new_root(inner.component()).visit_descendants(|item| {
+            if item
+                .accessible_string_property(AccessibleStringProperty::Label)
+                .as_deref()
+                != Some(label.as_str())
+            {
+                return ControlFlow::Continue(());
+            }
+            let bounds = item.geometry();
+            let y = item.map_to_window(Default::default()).y;
+            let rect = item.clone().downcast::<BasicBorderRectangle>().unwrap();
+            let color = BasicBorderRectangle::FIELD_OFFSETS
+                .border_color()
+                .apply_pin(rect.as_pin_ref())
+                .get();
+            ControlFlow::Break((y, bounds.size.height, color))
+        })
+    };
+    settle();
+    let height = window.window().size().height as f32 / window.window().scale_factor();
+    assert!(
+        try_card(49).is_none(),
+        "virtualized ListView does not materialize offscreen result 49 before jumping"
+    );
+    let accent = slint::Brush::SolidColor(window.global::<Theme>().get_accent());
+    let mut settle_tick = 0;
+    for (revision, number) in [1, 49, 55, 55].into_iter().enumerate() {
+        window.set_search_jump_index(number - 1);
+        window.set_search_jump_revision(revision as i32 + 1);
+        for _ in 0..3 {
+            settle_tick += 1;
+            window.set_search_jump_settle_tick(settle_tick);
+            settle();
+        }
+        let (y, row_height, color) = try_card(number).expect("jumped search card is laid out");
+        assert!(y >= 0. && y + row_height <= height + 1., "result {number} at {y}");
+        assert_eq!(color, accent);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1250));
+        settle();
+        assert_ne!(
+            try_card(number).expect("card stays visible").2,
+            accent,
+            "highlight expires"
+        );
+    }
+    assert!(
+        try_card(1).is_none(),
+        "virtualized ListView unloads offscreen result 1 when scrolled to 55"
+    );
+    window.set_search_jump_index(-1);
+    settle();
+    let last_y = try_card(55).expect("result 55 remains visible").0;
+    window.set_search_jump_hint("Enter a result number from 1 to 55".into());
+    settle();
+    assert!(
+        (try_card(55).expect("result 55 still visible").0 - last_y).abs() < 30.,
+        "invalid input keeps the list scrolled"
+    );
+    assert_eq!(window.get_search_results().row_count(), 55);
+}
+
 fn message_row_plain(message: &ChatMessage) -> MessageRow {
     message_row(message, &HashSet::new())
 }
@@ -5278,9 +5383,23 @@ fn virtualized_lists_request_only_nearby_avatars() {
             .iter()
             .any(|url| !first.contains(url) && url.starts_with("member/"))
     );
+    window
+        .window()
+        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(36., 380.),
+            delta_x: 0.,
+            delta_y: -600.,
+        });
+    settle();
+    assert!(
+        requested
+            .borrow()
+            .iter()
+            .any(|url| !first.contains(url) && url.starts_with("server/"))
+    );
     assert!(
         requested.borrow().len() < 100,
-        "scrolling does not instantiate the whole list"
+        "scrolling does not request pictures for the whole list"
     );
     window.hide().unwrap();
 }
@@ -5771,6 +5890,7 @@ fn friends_in_a_servers_voice_channel_show_where() {
         category_id: None,
         request: false,
         person: None,
+        participants: vec![],
         people,
         ringing: Vec::new(),
         incoming: false,
@@ -5935,6 +6055,7 @@ fn closing_the_viewer_lets_go_of_its_picture() {
         ..Default::default()
     })]);
     adapter.app.state.viewer = Some(yapfast_core::application::Viewer {
+        room: String::new(),
         item: "i0".into(),
         index: 0,
         pictures: HashMap::new(),
@@ -6191,8 +6312,7 @@ fn a_server_search_names_the_server_and_heads_results_with_their_channels() {
         app.dispatch(Action::SelectRoom("discord:10:11".into()));
         app.dispatch(Action::Search("plan".into()));
         app.apply(Event::Found {
-            place: "discord:10".into(),
-            query: "plan".into(),
+            request: 1,
             offset: 0,
             result: Ok((
                 3,
@@ -8885,6 +9005,7 @@ fn requests_list_someone_once_with_their_message() {
         category_id: None,
         request: true,
         person: Some(person.into()),
+        participants: vec![],
         people: Vec::new(),
         ringing: Vec::new(),
         incoming: false,
@@ -13055,7 +13176,8 @@ fn task7_stream_tick_delivers_independent_frames() {
         ad.show_voice(&window);
     }
 
-    // Fire stream tick to grab and render frames into stream_frames model
+    // Fire stream tick while call stage is visible to grab and render frames into stream_frames
+    window.set_stage_full(true);
     window.invoke_stream_tick();
 
     let stream_frames = adapter.borrow().models.stream_frames.clone();
@@ -13080,6 +13202,11 @@ fn task7_stream_tick_delivers_independent_frames() {
     writer2.write(2, 2, |buf| buf[..16].fill(84));
     window.invoke_stream_tick();
     assert_eq!(window.get_watch_frame().size().width, 2);
+
+    // Hiding the stage and PiP skips decoding and releases displayed frames.
+    window.set_stage_full(false);
+    window.invoke_stream_tick();
+    assert_eq!(window.get_watch_frame().size().width, 0);
 }
 
 #[test]
@@ -16559,6 +16686,7 @@ fn a_voice_channels_chat_marks_its_server_only_by_mentions() {
         category_id: None,
         request: false,
         person: None,
+        participants: vec![],
         people: Vec::new(),
         ringing: Vec::new(),
         incoming: false,
@@ -17101,4 +17229,1198 @@ fn soundcloud_plus_title_pause_at_008_keeps_preview_and_clears_on_stop() {
     apply_preview(&adapter, None);
     assert!(!window.get_has_game_activity_preview());
     assert_eq!(window.get_account_profile().activities.row_count(), 0);
+}
+
+#[cfg(feature = "discord")]
+#[test]
+fn closing_search_clears_results_model_and_trims_offscreen_pictures() {
+    use yapfast_core::chat::{Event, SearchHit};
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = discord_server_adapter(&window, directory.path());
+    let hit = |room: &str, item: &str| SearchHit {
+        room: room.into(),
+        message: ChatMessage {
+            item: item.into(),
+            body: "plan".into(),
+            ..Default::default()
+        },
+    };
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.dispatch(Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.app.dispatch(Action::SelectRoom("discord:10:11".into()));
+        ad.app.dispatch(Action::Search("plan".into()));
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 0,
+            result: Ok((
+                3,
+                vec![
+                    hit("discord:10:12", "d:9"),
+                    hit("discord:10:12", "d:8"),
+                    hit("discord:10:11", "d:7"),
+                ],
+            )),
+        });
+        const THREE_MIB: usize = 3 * 1024 * 1024;
+        for index in 0..3 {
+            let url = format!("https://cdn.discordapp.com/attachments/search-{index}.png");
+            ad.app.apply(Event::Picture {
+                url,
+                picture: Arc::new(yapfast_core::chat::Picture {
+                    width: 256,
+                    height: (THREE_MIB / (256 * 4)) as u32,
+                    rgba: yapfast_core::chat::Pixels::new(
+                        256,
+                        (THREE_MIB / (256 * 4)) as u32,
+                        vec![0; THREE_MIB],
+                    ),
+                    ..Default::default()
+                }),
+            });
+        }
+        ad.refresh(&window);
+    }
+    assert!(window.get_search_open());
+    assert_eq!(window.get_search_results().row_count(), 3);
+    assert_eq!(adapter.borrow().app.state.pictures.len(), 3);
+
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.dispatch(Action::SearchStartAt("2".into()));
+        assert_eq!(ad.app.state.search.as_ref().unwrap().jump_to, Some(2));
+        ad.app.dispatch(Action::Search(String::new()));
+        ad.refresh(&window);
+    }
+    assert!(!window.get_search_open());
+    assert_eq!(window.get_search_results().row_count(), 0);
+    assert!(adapter.borrow().app.state.pictures.is_empty());
+}
+
+fn test_image_attachment(
+    name: String,
+    spoiler: bool,
+    preview: Option<Arc<yapfast_core::chat::Picture>>,
+    url: &str,
+) -> yapfast_core::chat::Attachment {
+    yapfast_core::chat::Attachment {
+        voice_ms: None,
+        voice_waveform: None,
+        name,
+        size: Some(1024),
+        image: true,
+        dimensions: Some((120, 80)),
+        preview,
+        preview_failed: false,
+        placement: yapfast_core::chat::Placement::Message,
+        spoiler,
+        video: false,
+        gif: None,
+        url: Some(Arc::from(url)),
+        description: None,
+    }
+}
+
+#[test]
+fn virtualized_search_55_results_incremental_show_more_and_viewport_previews() {
+    use yapfast_core::chat::{Command, DiscordCommand, Event, Picture, SearchHit};
+    let (window, adapter, _directory) = discord_server_window();
+    let sample_pic = || {
+        Arc::new(Picture {
+            width: 4,
+            height: 4,
+            rgba: yapfast_core::chat::Pixels::new(4, 4, vec![255; 64]),
+            ..Default::default()
+        })
+    };
+    let make_hit = |i: usize| SearchHit {
+        room: if i % 10 == 0 {
+            "discord:10:12".into()
+        } else {
+            "discord:10:11".into()
+        },
+        message: ChatMessage {
+            item: format!("d:{i}"),
+            author: "Bob".into(),
+            body: format!("deploy hit {i}"),
+            attachments: vec![test_image_attachment(
+                format!("img-{i}.png"),
+                false,
+                None,
+                &format!("https://cdn.example/img-{i}.png"),
+            )],
+            ..Default::default()
+        },
+    };
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.action(&window, Action::Search("deploy".into()));
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 0,
+            result: Ok((55, (0..25).map(make_hit).collect())),
+        });
+        ad.refresh(&window);
+        // Second page (25..50) and third page (50..55) on jump/Show more
+        ad.action(&window, Action::SearchStartAt("49".into()));
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 25,
+            result: Ok((55, (25..50).map(make_hit).collect())),
+        });
+        ad.action(&window, Action::MoreResults);
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 50,
+            result: Ok((55, (50..55).map(make_hit).collect())),
+        });
+        ad.refresh(&window);
+    }
+    assert_eq!(window.get_search_total(), 55);
+    assert_eq!(window.get_search_results().row_count(), 55);
+    assert_eq!(window.get_search_jump_index(), 48);
+
+    // Hydrate an early preview then move viewport far down -> evicts early preview
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.apply(Event::SearchPreview {
+            request: 1,
+            item: "d:0".into(),
+            index: 0,
+            preview: Some(sample_pic()),
+        });
+        assert!(
+            ad.app.state.search.as_ref().unwrap().results[0].message.attachments[0]
+                .preview
+                .is_some()
+        );
+        let effects = ad.app.dispatch(Action::SearchViewport { start: 45, end: 52 });
+        assert!(
+            ad.app.state.search.as_ref().unwrap().results[0].message.attachments[0]
+                .preview
+                .is_none(),
+            "offscreen result preview should be evicted outside viewport margin"
+        );
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::Backend(Command::Discord(DiscordCommand::SearchPreviews { items, .. }))
+                if items.iter().any(|(_, id)| id == "d:45")
+        )));
+    }
+
+    // Invalid jump numbers produce validation hint and leave jump_index unset
+    for bad in ["0", "56", "abc"] {
+        window.invoke_search_start_at(bad.into());
+        assert_eq!(
+            window.get_search_jump_hint(),
+            "Enter a result number from 1 to 55"
+        );
+        assert_eq!(window.get_search_jump_index(), -1);
+    }
+
+    // Repeating same valid number bumps jump_revision
+    window.invoke_search_start_at("55".into());
+    let rev1 = window.get_search_jump_revision();
+    assert_eq!(window.get_search_jump_index(), 54);
+    window.invoke_search_start_at("55".into());
+    let rev2 = window.get_search_jump_revision();
+    assert_eq!(window.get_search_jump_index(), 54);
+    assert!(rev2 > rev1);
+}
+
+#[test]
+fn search_thumbnail_opens_viewer_without_jumping_while_card_still_jumps() {
+    use yapfast_core::chat::{Event, Picture, SearchHit};
+    i_slint_backend_testing::init_no_event_loop();
+    let directory = tempfile::tempdir().unwrap();
+    let window = classic_window();
+    let adapter = discord_server_adapter(&window, directory.path());
+    let pic = Arc::new(Picture {
+        width: 8,
+        height: 8,
+        rgba: yapfast_core::chat::Pixels::new(8, 8, vec![200; 256]),
+        ..Default::default()
+    });
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.account = Some("@alice".into());
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.action(&window, Action::Search("sunset".into()));
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 0,
+            result: Ok((
+                1,
+                vec![SearchHit {
+                    room: "discord:10:12".into(),
+                    message: ChatMessage {
+                        item: "d:77".into(),
+                        author: "Bob".into(),
+                        body: "sunset".into(),
+                        attachments: vec![
+                            test_image_attachment(
+                                "first.png".into(),
+                                false,
+                                Some(pic.clone()),
+                                "https://cdn.example/first.png",
+                            ),
+                            test_image_attachment(
+                                "second.gif".into(),
+                                true,
+                                Some(pic),
+                                "https://cdn.example/second.gif",
+                            ),
+                        ],
+                        ..Default::default()
+                    },
+                }],
+            )),
+        });
+        ad.refresh(&window);
+    }
+
+    // Click second attachment thumbnail in unopened room "discord:10:12"
+    window.invoke_view_image_in_room("discord:10:12".into(), "d:77".into(), 1);
+    assert!(window.get_viewer_open());
+    assert_eq!(window.get_viewer_item(), "d:77");
+    assert_eq!(window.get_viewer_index(), 1);
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("discord:10:11"),
+        "clicking thumbnail must not jump rooms"
+    );
+
+    // Close viewer: search stays open
+    adapter.borrow_mut().action(&window, Action::CloseImage);
+    assert!(!window.get_viewer_open());
+    assert!(window.get_search_open());
+
+    // Clicking card / Jump DOES navigate to discord:10:12 while preserving search
+    window.invoke_jump_in_room("discord:10:12".into(), "d:77".into());
+    assert_eq!(
+        adapter.borrow().app.state.selected.as_deref(),
+        Some("discord:10:12")
+    );
+    assert!(window.get_search_open());
+}
+
+#[test]
+fn ctrl_f_focuses_search_respects_guards_and_scope_label_switch() {
+    use slint::winit_030::winit::keyboard::{Key, KeyCode, PhysicalKey};
+    use yapfast_core::chat::{Event, SearchHit};
+
+    // Physical KeyF matches both Latin 'f'/'F' and non-Latin Russian character 'а'
+    assert!(super::is_f_key(
+        &Key::Character("f".into()),
+        PhysicalKey::Code(KeyCode::KeyF)
+    ));
+    assert!(super::is_f_key(
+        &Key::Character("F".into()),
+        PhysicalKey::Code(KeyCode::KeyF)
+    ));
+    assert!(super::is_f_key(
+        &Key::Character("а".into()),
+        PhysicalKey::Code(KeyCode::KeyF)
+    ));
+    assert!(!super::is_f_key(
+        &Key::Character("g".into()),
+        PhysicalKey::Code(KeyCode::KeyG)
+    ));
+
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.account = Some("@alice".into());
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        let mut dm = (*ad.app.state.rooms[0]).clone();
+        dm.id = "discord:dm:500".into();
+        dm.name = "Bob".into();
+        dm.direct = true;
+        dm.person = Some("100".into());
+        ad.app.state.rooms.push(Arc::new(dm));
+        ad.refresh(&window);
+    }
+    window.set_search_text("alpha".into());
+    window.invoke_search("alpha".into());
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 0,
+            result: Ok((
+                1,
+                vec![SearchHit {
+                    room: "discord:10:11".into(),
+                    message: ChatMessage {
+                        item: "d:10".into(),
+                        body: "alpha".into(),
+                        ..Default::default()
+                    },
+                }],
+            )),
+        });
+        ad.refresh(&window);
+    }
+
+    assert!(window.get_can_search());
+    assert!(window.invoke_focus_search());
+    assert_eq!(window.get_search_text(), "alpha");
+    assert_eq!(window.get_search_scope_label(), "Server: Test");
+    assert!(!window.get_search_scope_differs());
+
+    // Blocked when modal/settings/bot modal are open or channel cannot search
+    window.set_settings_open(true);
+    assert!(!window.invoke_focus_search());
+    window.set_settings_open(false);
+    window.set_viewer_open(true);
+    assert!(window.get_modal_open());
+    assert!(!window.invoke_focus_search());
+    window.set_viewer_open(false);
+    window.set_bot_modal_open(true);
+    assert!(window.get_bot_modal_open());
+    window.set_bot_modal_open(false);
+    window.set_can_search(false);
+    assert!(!window.invoke_focus_search());
+    window.set_can_search(true);
+
+    // Switching to another scope keeps search panel/results open with scope badge,
+    // while clearing the new chat's header input so old query doesn't leak
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::DirectMessages));
+        ad.action(&window, Action::SelectRoom("discord:dm:500".into()));
+    }
+    assert!(window.get_search_open());
+    assert!(window.get_search_scope_differs());
+    assert_eq!(window.get_search_scope_label(), "Server: Test");
+    assert_eq!(window.get_search_text(), "");
+    assert_eq!(window.get_search_results().row_count(), 1);
+
+    // Returning to the searched server restores the search query into the header
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+    }
+    assert!(!window.get_search_scope_differs());
+    assert_eq!(window.get_search_text(), "alpha");
+
+    // Switching back to DM and invoking Search here re-runs in DM scope immediately.
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::DirectMessages));
+        ad.action(&window, Action::SelectRoom("discord:dm:500".into()));
+    }
+    assert!(window.get_search_scope_differs());
+    window.invoke_search_here();
+    assert!(!window.get_search_scope_differs());
+    assert_eq!(window.get_search_text(), "alpha");
+    assert_eq!(window.get_search_scope_label(), "DM: Bob");
+
+    // Explicit close clears search & header
+    window.invoke_close_search();
+    assert!(!window.get_search_open());
+    assert_eq!(window.get_search_results().row_count(), 0);
+}
+
+#[test]
+fn search_jump_field_blur_keeps_go_card_and_chat_working() {
+    use i_slint_core::{accessibility::AccessibleStringProperty, item_tree::ItemRc};
+    use slint::platform::{PointerEventButton, WindowEvent};
+    use std::ops::ControlFlow;
+    use yapfast_core::chat::{Event, SearchHit};
+
+    let (window, adapter, _directory) = discord_server_window();
+    window.show().unwrap();
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1200., 850.));
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.account = Some("@alice".into());
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.app.state.messages = Arc::new(vec![Arc::new(ChatMessage {
+            item: "d:3".into(),
+            body: "note 3".into(),
+            ..Default::default()
+        })]);
+        ad.action(&window, Action::Search("note".into()));
+        let hits = (1..=10)
+            .map(|i| SearchHit {
+                room: "discord:10:11".into(),
+                message: ChatMessage {
+                    item: format!("d:{i}"),
+                    body: format!("note {i}"),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        ad.app.apply(Event::Found {
+            request: 1,
+            offset: 0,
+            result: Ok((10, hits)),
+        });
+        ad.refresh(&window);
+    }
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+
+    // Focus the actual "Go to result" TextInput by clicking its center
+    let inner = i_slint_core::window::WindowInner::from_pub(window.window());
+    let component = inner.component();
+    let field = ItemRc::new_root(component.clone())
+        .visit_descendants(|item| {
+            if item.is_visible()
+                && item
+                    .accessible_string_property(AccessibleStringProperty::Label)
+                    .as_deref()
+                    == Some("Go to result")
+            {
+                ControlFlow::Break(item.clone())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .expect("Go to result field should be visible");
+    let pt = field.map_to_item_tree(field.geometry().center(), &component);
+    let pos = slint::LogicalPosition::new(pt.x, pt.y);
+    window.window().dispatch_event(WindowEvent::PointerMoved { position: pos });
+    window.window().dispatch_event(WindowEvent::PointerPressed {
+        position: pos,
+        button: PointerEventButton::Left,
+    });
+    window.window().dispatch_event(WindowEvent::PointerReleased {
+        position: pos,
+        button: PointerEventButton::Left,
+    });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    assert!(window.get_search_jump_focused());
+
+    window.invoke_blur_search_jump();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    assert!(!window.get_search_jump_focused());
+
+    // Go button, card jump, and composer input still work independently
+    window.invoke_search_start_at("3".into());
+    assert_eq!(window.get_search_jump_index(), 2);
+    window.invoke_jump_in_room("discord:10:11".into(), "d:3".into());
+    assert_eq!(
+        adapter
+            .borrow()
+            .app
+            .state
+            .jump
+            .as_ref()
+            .map(|(id, _)| id.as_str()),
+        Some("d:3")
+    );
+    window.invoke_draft_edited("hello after blur".into());
+    assert_eq!(adapter.borrow().app.state.draft(), "hello after blur");
+}
+
+#[test]
+fn group_dm_participant_suggestions_strict_scope_dedup_and_user_id_bindings() {
+    use yapfast_core::chat::{ChatMember, Friend, Role, SearchUserFilter};
+    use yapfast_core::yapfast_discord::{message::Names, service::SharedNames};
+
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        let mut names = Names::default();
+        names.learn_user(&serde_json::json!({
+            "id": "901",
+            "username": "alex.old",
+            "global_name": "Alex",
+        }));
+        names.learn_user(&serde_json::json!({
+            "id": "902",
+            "username": "alex.new",
+            "global_name": "Alex",
+        }));
+        names.learn_user(&serde_json::json!({
+            "id": "903",
+            "username": "former_member",
+            "global_name": "Former Member",
+        }));
+        names.learn_user(&serde_json::json!({
+            "id": "904",
+            "username": "sam_friend",
+            "global_name": "Sam Friend",
+        }));
+        ad.app.state.discord_names = Some(SharedNames::new(Arc::new(std::sync::RwLock::new(names))));
+        ad.app.state.friends = vec![Friend {
+            id: "904".into(),
+            name: "Sam Friend".into(),
+            nickname: None,
+            avatar: None,
+            presence: None,
+            activity: None,
+            activities: Default::default(),
+        }];
+
+        let mut gdm = (*ad.app.state.rooms[0]).clone();
+        gdm.id = "discord:dm:999".into();
+        gdm.name = "Alex Sync".into();
+        gdm.direct = true;
+        gdm.person = None;
+        gdm.members = 3;
+        gdm.participants = vec!["901".into(), "902".into()];
+        ad.app.state.rooms.push(Arc::new(gdm));
+        ad.action(&window, Action::SelectRoom("discord:dm:999".into()));
+
+        // Historical message from an ex-author not in recipients
+        ad.app.state.messages = Arc::new(vec![Arc::new(ChatMessage {
+            item: "d:888".into(),
+            author: "Former Member".into(),
+            sender: "903".into(),
+            body: "historical note".into(),
+            ..Default::default()
+        })]);
+    }
+
+    // 1. Empty "from:" in Group DM shows ONLY current participants (both Alex accounts, NO ex-author, NO external friend)
+    {
+        let ad = adapter.borrow();
+        let state = &ad.app.state;
+        let mut pics = HashMap::new();
+        let empty = super::search::compute_search_suggestions(state, "from:", &mut pics, true);
+        let ids: Vec<&str> = empty.iter().map(|item| item.user_id.as_str()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"901"));
+        assert!(ids.contains(&"902"));
+        assert!(!ids.contains(&"903"), "ex-author must not leak into empty Group DM suggestions");
+        assert!(!ids.contains(&"904"), "external friend must not leak into empty Group DM suggestions");
+        assert!(empty.iter().all(|item| !item.external));
+        let tokens: Vec<&str> = empty.iter().map(|item| item.token.as_str()).collect();
+        assert!(tokens.contains(&"from:@alex.old "));
+        assert!(tokens.contains(&"from:@alex.new "));
+
+        // 2. Typed query surfaces external known user clearly labeled after local results
+        let typed = super::search::compute_search_suggestions(state, "from:sam", &mut pics, true);
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0].user_id, "904");
+        assert!(typed[0].external);
+        assert!(typed[0].detail.contains("Not in group"));
+    }
+
+    // 3. Picking @alex.new binds exact user_id and editing away unbinds it
+    window.set_search_text("from:al".into());
+    window.invoke_search_input_edited("from:al".into());
+    let pick_idx = (0..adapter.borrow().models.search_filter_suggestions.row_count())
+        .find(|&i| {
+            adapter
+                .borrow()
+                .models
+                .search_filter_suggestions
+                .row_data(i)
+                .is_some_and(|r| r.user_id == "902")
+        })
+        .expect("alex.new suggestion present");
+    window.invoke_choose_search_suggestion(pick_idx as i32);
+    assert_eq!(window.get_search_text(), "from:@alex.new ");
+    assert_eq!(adapter.borrow().search_bindings.len(), 1);
+    assert_eq!(adapter.borrow().search_bindings[0].user_id, "902");
+    assert_eq!(adapter.borrow().search_bindings[0].filter, SearchUserFilter::From);
+
+    // Removing the filter token unbinds it
+    window.set_search_text("deploy".into());
+    window.invoke_search_input_edited("deploy".into());
+    assert!(adapter.borrow().search_bindings.is_empty());
+
+    // 4. Open dropdown refreshes when server SearchMembers populates found_members
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+    }
+    window.set_search_text("from:live".into());
+    window.set_search_dropdown_open(true);
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.found_members = vec![ChatMember {
+            id: "999".into(),
+            bot: false,
+            name: "Live Member".into(),
+            username: Some("live_user".into()),
+            role: Role::Member,
+            avatar: None,
+            decoration: None,
+            nameplate: None,
+            style: None,
+            group: None,
+            group_icon: None,
+            role_icon: None,
+            presence: None,
+            color: None,
+            activity: None,
+            activities: Default::default(),
+            roles: Default::default(),
+            timed_out_until: None,
+            tag: None,
+            boosting_since: None,
+        }];
+        ad.refresh(&window);
+    }
+    assert!(
+        (0..adapter.borrow().models.search_filter_suggestions.row_count()).any(|i| {
+            adapter
+                .borrow()
+                .models
+                .search_filter_suggestions
+                .row_data(i)
+                .is_some_and(|r| r.user_id == "999")
+        }),
+        "open search dropdown must update when found_members arrive"
+    );
+}
+
+#[cfg(feature = "discord")]
+fn ui_timeline(items: Vec<ChatMessage>) -> Vec<Arc<ChatMessage>> {
+    items.into_iter().map(Arc::new).collect()
+}
+
+#[cfg(feature = "discord")]
+fn sample_ui_report_menu() -> yapfast_core::report::ReportMenu {
+    use std::collections::HashMap;
+    use yapfast_core::report::{
+        ReportButton, ReportButtonKind, ReportChild, ReportElement, ReportMenu, ReportNode,
+        ReportOption,
+    };
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        1,
+        ReportNode {
+            id: 1,
+            key: "root".into(),
+            report_type: None,
+            header: "What's wrong?".into(),
+            subheader: Some("Pick a category.".into()),
+            info: None,
+            children: vec![
+                ReportChild {
+                    label: "Spam or scam".into(),
+                    target_node_id: 10,
+                },
+                ReportChild {
+                    label: "Harassment".into(),
+                    target_node_id: 20,
+                },
+            ],
+            elements: vec![],
+            button: None,
+            is_multi_select_required: false,
+            is_auto_submit: false,
+        },
+    );
+    nodes.insert(
+        10,
+        ReportNode {
+            id: 10,
+            key: "spam".into(),
+            report_type: Some("SPAM".into()),
+            header: "Spam".into(),
+            subheader: None,
+            info: None,
+            children: vec![],
+            elements: vec![],
+            button: Some(ReportButton {
+                kind: ReportButtonKind::Submit,
+                target: None,
+            }),
+            is_multi_select_required: false,
+            is_auto_submit: true,
+        },
+    );
+    nodes.insert(
+        20,
+        ReportNode {
+            id: 20,
+            key: "harassment".into(),
+            report_type: Some("HARASSMENT".into()),
+            header: "Harassment details".into(),
+            subheader: None,
+            info: Some("Reporting does not block the user.".into()),
+            children: vec![],
+            elements: vec![ReportElement {
+                name: "context".into(),
+                kind: "checkbox".into(),
+                should_submit_data: true,
+                options: vec![ReportOption {
+                    value: "repeated".into(),
+                    label: "Repeated unwanted behavior".into(),
+                }],
+            }],
+            button: Some(ReportButton {
+                kind: ReportButtonKind::Submit,
+                target: None,
+            }),
+            is_multi_select_required: true,
+            is_auto_submit: false,
+        },
+    );
+    ReportMenu {
+        name: "message".into(),
+        version: "1.0".into(),
+        variant: "1".into(),
+        postback_path: "/reporting/message".into(),
+        language: "en".into(),
+        root_node_id: 1,
+        success_node_id: Some(900),
+        fail_node_id: Some(901),
+        nodes,
+    }
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_message_menu_eligibility_in_timeline_rows() {
+    use yapfast_core::chat::{Delivery, Notice, NoticeKind};
+    use yapfast_core::report::{EPHEMERAL, LOADING};
+
+    let (window, adapter, _directory) = discord_server_window();
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.apply(Event::Timeline {
+            room: "discord:10:11".into(),
+            messages: ui_timeline(vec![
+                    ChatMessage {
+                        id: "d:101".into(),
+                        item: "d:101".into(),
+                        author: "Bob".into(),
+                        body: "Eligible message".into(),
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "d:102".into(),
+                        item: "d:102".into(),
+                        author: "Alice".into(),
+                        body: "Own message".into(),
+                        own: true,
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "d:103".into(),
+                        item: "d:103".into(),
+                        author: "Bob".into(),
+                        body: "Deleted".into(),
+                        deleted: true,
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "t:104".into(),
+                        item: "t:104".into(),
+                        author: "Bob".into(),
+                        body: "Pending".into(),
+                        delivery: Delivery::Sending,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "d:105".into(),
+                        item: "d:105".into(),
+                        author: "Bot".into(),
+                        body: "Ephemeral".into(),
+                        flags: EPHEMERAL,
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "d:106".into(),
+                        item: "d:106".into(),
+                        author: "Bot".into(),
+                        body: "Thinking".into(),
+                        flags: LOADING,
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "d:107".into(),
+                        item: "d:107".into(),
+                        author: "Dave".into(),
+                        body: "Blocked".into(),
+                        blocked: true,
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                    ChatMessage {
+                        id: "d:108".into(),
+                        item: "d:108".into(),
+                        author: "Bob".into(),
+                        notice: Some(Notice {
+                            kind: NoticeKind::Joined,
+                            text: "joined".into(),
+                        }),
+                        delivery: Delivery::Sent,
+                        ..Default::default()
+                    },
+                ]),
+            });
+        ad.refresh(&window);
+    }
+
+    let rows = window.get_messages();
+    assert!(rows.row_data(0).unwrap().can_report, "other user's sent Discord message is reportable");
+    for idx in 1..8 {
+        assert!(
+            !rows.row_data(idx).unwrap().can_report,
+            "row {idx} must not offer Report Message"
+        );
+    }
+
+    // Matrix preview messages never offer Discord's Report Message.
+    window.invoke_explore_preview();
+    let preview_rows = window.get_messages();
+    assert!(
+        preview_rows.iter().all(|row| !row.can_report),
+        "Matrix rooms must not offer Report Message"
+    );
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_message_dialog_ui_flow_back_cancel_submit_and_regressions() {
+    use yapfast_core::chat::{Attachment, Delivery, Placement};
+    use yapfast_core::yapfast_discord::ready::Channel;
+
+    let (window, adapter, _directory) = discord_server_window_changed(0, |server, _| {
+        server.text_channels.push(Channel {
+            id: "12".into(),
+            name: "rules".into(),
+            ..Default::default()
+        });
+    });
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.apply(Event::Timeline {
+            room: "discord:10:11".into(),
+            messages: ui_timeline(vec![ChatMessage {
+                id: "d:101".into(),
+                item: "d:101".into(),
+                author: "Bob".into(),
+                time: "14:20".into(),
+                body: "Look at ||hidden spoiler|| here".into(),
+                spoilers: true,
+                attachments: vec![Attachment {
+                    voice_ms: None,
+                    voice_waveform: None,
+                    name: "pic.png".into(),
+                    size: None,
+                    image: true,
+                    dimensions: None,
+                    preview: None,
+                    preview_failed: false,
+                    placement: Placement::Message,
+                    gif: None,
+                    spoiler: false,
+                    video: false,
+                    url: None,
+                    description: None,
+                }],
+                can_forward: true,
+                can_reply: true,
+                delivery: Delivery::Sent,
+                ..Default::default()
+            }]),
+        });
+        ad.refresh(&window);
+    }
+
+    // Opening via the Slint callback checks target snapshot fields and, with
+    // no live backend attached in tests, surfaces the safe MenuError state.
+    window.invoke_report_message("d:101".into(), false);
+    assert!(window.get_report_open());
+    assert!(!window.get_report_loading());
+    assert!(!window.get_report_menu_error().is_empty());
+    assert!(!window.get_report_preview().contains("hidden spoiler"));
+    assert!(window.get_report_preview().contains("(spoiler)"));
+    assert_eq!(window.get_report_attachments(), "1 attachment");
+    assert_eq!(
+        window.get_report_message_link(),
+        "https://discord.com/channels/10/11/101"
+    );
+    window.invoke_close_report();
+    assert!(!window.get_report_open());
+
+    // Drive the full loading -> selecting -> submitting -> submitted UI lifecycle
+    // while capturing backend effects directly so `backend: None` does not fail them.
+    let menu_req = {
+        let mut ad = adapter.borrow_mut();
+        let effects = ad.app.dispatch(Action::OpenReportMessage {
+            item: "d:101".into(),
+            aside: false,
+        });
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            yapfast_core::application::Effect::Backend(
+                yapfast_core::chat::Command::Discord(
+                    yapfast_core::chat::DiscordCommand::ReportMessageMenu { .. }
+                )
+            )
+        )));
+        ad.refresh(&window);
+        ad.app.state.report.as_ref().unwrap().request_id
+    };
+    assert!(window.get_report_open());
+    assert!(window.get_report_loading());
+
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.apply(Event::ReportMessageMenu {
+            request: menu_req,
+            result: Ok(sample_ui_report_menu()),
+        });
+        ad.refresh(&window);
+    }
+    assert!(!window.get_report_loading());
+    assert_eq!(window.get_report_options().row_count(), 2);
+    assert!(!window.get_report_can_back());
+
+    // Choose category -> Back -> choose Harassment -> toggle checkbox -> Escape on leaf closes cleanly.
+    let tick_before = window.get_report_focus_tick();
+    window.invoke_report_choose(10);
+    assert!(window.get_report_can_back());
+    assert!(window.get_report_focus_tick() > tick_before);
+    window.invoke_report_back();
+    assert!(!window.get_report_can_back());
+    window.invoke_report_choose(20);
+    assert!(window.get_report_can_submit());
+    assert!(!window.get_report_can_submit_now(), "required checkbox must be picked first");
+    window.invoke_report_toggle_option("context".into(), "repeated".into());
+    assert!(window.get_report_can_submit_now());
+    assert!(window.invoke_escape_composing());
+    assert!(!window.get_report_open());
+
+    // Reopen, pick Harassment + checkbox, and submit explicitly.
+    let menu_req2 = {
+        let mut ad = adapter.borrow_mut();
+        let _ = ad.app.dispatch(Action::OpenReportMessage {
+            item: "d:101".into(),
+            aside: false,
+        });
+        ad.refresh(&window);
+        ad.app.state.report.as_ref().unwrap().request_id
+    };
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.apply(Event::ReportMessageMenu {
+            request: menu_req2,
+            result: Ok(sample_ui_report_menu()),
+        });
+        ad.refresh(&window);
+    }
+    window.invoke_report_choose(20);
+    window.invoke_report_toggle_option("context".into(), "repeated".into());
+    let submit_req = {
+        let mut ad = adapter.borrow_mut();
+        let effects = ad.app.dispatch(Action::SubmitReport);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            yapfast_core::application::Effect::Backend(
+                yapfast_core::chat::Command::Discord(
+                    yapfast_core::chat::DiscordCommand::SubmitMessageReport { .. }
+                )
+            )
+        )));
+        ad.refresh(&window);
+        ad.app.state.report.as_ref().unwrap().request_id
+    };
+    assert!(window.get_report_submitting());
+    // Closing via Escape or CloseReport while submitting is blocked; duplicate submit ignored.
+    assert!(window.invoke_escape_composing());
+    assert!(window.get_report_open());
+    window.invoke_close_report();
+    assert!(window.get_report_open());
+    window.invoke_submit_report();
+    assert!(window.get_report_submitting());
+    assert_eq!(
+        adapter.borrow().app.state.report.as_ref().unwrap().request_id,
+        submit_req
+    );
+
+    // TimeoutUnknown keeps selection intact and flips Submit button into Submit Again mode.
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.apply(Event::MessageReported {
+            request: submit_req,
+            result: Err(yapfast_core::report::ReportError {
+                kind: yapfast_core::report::ReportErrorKind::TimeoutUnknown,
+                message: "Timed out waiting for Discord. It is unknown whether the report was received.".into(),
+            }),
+        });
+        ad.refresh(&window);
+    }
+    assert!(window.get_report_open());
+    assert!(!window.get_report_submitting());
+    assert!(window.get_report_timeout_unknown());
+
+    let retry_req = {
+        let mut ad = adapter.borrow_mut();
+        let _ = ad.app.dispatch(Action::SubmitReport);
+        ad.refresh(&window);
+        ad.app.state.report.as_ref().unwrap().request_id
+    };
+    assert!(window.get_report_submitting());
+
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.apply(Event::MessageReported {
+            request: retry_req,
+            result: Ok(Some("rep-123".into())),
+        });
+        ad.refresh(&window);
+    }
+    assert!(window.get_report_submitted());
+    assert_eq!(window.get_report_id(), "rep-123");
+    assert_eq!(window.get_messages().row_count(), 1, "message remains in chat");
+    window.invoke_close_report();
+    assert!(!window.get_report_open());
+
+    // Regression checks: Forward dialog, chat switch, and search remain functional.
+    window.invoke_start_forward("d:101".into());
+    assert!(window.get_forward_open());
+    window.invoke_close_forward();
+    window.invoke_select_room("discord:10:12".into());
+    assert_eq!(adapter.borrow().app.state.selected.as_deref(), Some("discord:10:12"));
+    window.invoke_search("test".into());
+    assert!(window.get_search_open());
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn report_message_from_aside_thread_binds_thread_channel_id() {
+    use yapfast_core::chat::Delivery;
+    use yapfast_core::yapfast_discord::ready::{Channel, Thread};
+
+    let (window, adapter, _directory) = discord_server_window_changed(0, |server, _| {
+        server.threads.push(Channel {
+            id: "30".into(),
+            name: "Side Thread".into(),
+            parent: Some("11".into()),
+            thread: Some(Box::new(Thread {
+                joined: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+    });
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.action(&window, Action::Navigate(Navigation::Server("discord:10".into())));
+        ad.action(&window, Action::SelectRoom("discord:10:11".into()));
+        ad.apply(Event::Timeline {
+            room: "discord:10:11".into(),
+            messages: ui_timeline(vec![ChatMessage {
+                id: "d:555".into(),
+                item: "d:555".into(),
+                author: "Bob".into(),
+                body: "Main message".into(),
+                delivery: Delivery::Sent,
+                ..Default::default()
+            }]),
+        });
+        ad.action(&window, Action::OpenAside("discord:10:30".into()));
+        ad.apply(Event::Timeline {
+            room: "discord:10:30".into(),
+            messages: ui_timeline(vec![ChatMessage {
+                id: "d:555".into(),
+                item: "d:555".into(),
+                author: "Carol".into(),
+                body: "Side thread message".into(),
+                delivery: Delivery::Sent,
+                ..Default::default()
+            }]),
+        });
+        ad.refresh(&window);
+    }
+
+    assert!(window.get_aside_messages().row_data(0).unwrap().can_report);
+    window.invoke_report_message("d:555".into(), true);
+    let ad = adapter.borrow();
+    let report = ad.app.state.report.as_ref().unwrap();
+    assert_eq!(report.channel_id, "30");
+    assert_eq!(report.message_id, "555");
+    assert_eq!(report.author, "Carol");
+    assert_eq!(
+        window.get_report_message_link(),
+        "https://discord.com/channels/10/30/555"
+    );
+}
+
+#[test]
+#[cfg(feature = "discord")]
+fn fake_deafen_plugin_persists_shows_only_on_discord_and_clears_when_disabled() {
+    let (window, adapter, directory) = discord_server_window();
+
+    assert!(!window.get_fake_deafen_plugin());
+    assert!(!adapter.borrow().layout.fake_deafen_plugin());
+    assert!(!window.get_show_fake_deafen());
+    assert!(!window.get_fake_deafened());
+
+    // Toggling the Experimental setting persists in layout.json.
+    window.invoke_fake_deafen_plugin_toggled(true);
+    assert!(window.get_fake_deafen_plugin());
+    assert!(Layout::read(directory.path()).fake_deafen_plugin());
+    assert!(!window.get_show_fake_deafen(), "hidden outside a Discord call");
+
+    // Matrix/preview calls never expose Fake Deafen controls.
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.phase = yapfast_core::voice::Phase::Connected;
+        ad.app.state.voice.room = Some("matrix-room".into());
+        ad.refresh(&window);
+    }
+    assert!(!window.get_show_fake_deafen());
+
+    // Active Discord call shows the button when plugin is enabled.
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.room = Some("discord:10:14".into());
+        ad.app.state.voice.fake_deafen = false;
+        ad.refresh(&window);
+    }
+    assert!(window.get_show_fake_deafen());
+    assert!(!window.get_fake_deafened());
+
+    // Disabling the plugin while Fake Deafen is off only hides the button without sending a Voice command.
+    window.invoke_fake_deafen_plugin_toggled(false);
+    assert!(!window.get_show_fake_deafen());
+    assert!(adapter.borrow().app.state.voice.error.is_none());
+
+    // Re-enable, mark Fake Deafen active, then disable the plugin -> dispatches Command::FakeDeafen(false).
+    window.invoke_fake_deafen_plugin_toggled(true);
+    {
+        let mut ad = adapter.borrow_mut();
+        ad.app.state.voice.fake_deafen = true;
+        ad.refresh(&window);
+    }
+    assert!(window.get_show_fake_deafen());
+    assert!(window.get_fake_deafened());
+
+    window.invoke_fake_deafen_plugin_toggled(false);
+    assert!(!window.get_fake_deafen_plugin());
+    assert!(!Layout::read(directory.path()).fake_deafen_plugin());
+    assert!(!window.get_show_fake_deafen());
+    assert!(
+        adapter
+            .borrow()
+            .app
+            .state
+            .voice
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("Voice is unavailable")),
+        "disabling the plugin while Fake Deafen is active must dispatch Voice::FakeDeafen(false)"
+    );
 }

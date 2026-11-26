@@ -41,13 +41,17 @@ FFmpeg's reading of files people sent out of the window's process. Its
 frames carry their time, which the seek bar shows.
 `stream_worker` starts it with one job as a JSON line and reads its reports
 back. On Linux it starts `/proc/self/exe`, the running Yapfast, since Yapfast's path
-names a deleted file once a rebuild or update replaces it. Frames reach the UI through `frames`, a triple buffer in a memory-mapped
-file in the runtime directory. The file is unlinked once the worker opens it.
-Windows won't delete a mapped file, so there it's a temporary file that
-Windows deletes once both processes close it.
+names a deleted file once a rebuild or update replaces it. Frames reach the UI through `frames`, a triple buffer in shared memory: on Linux, a memory-mapped file in the runtime directory that is unlinked once the worker opens it; on Windows, a named pagefile-backed section (`Local\yapfast-frames-...`) with zero temporary files or disk writes, released once both processes close their handles (while `Writer::open` still accepts a regular file path as fallback).
 Screen sharing and watching store packed I420 in those slots, preserving the
-original video samples. The UI converts the newest frame directly into its
-display buffer. File playback keeps its RGBA frames and timestamps.
+original video samples. The UI converts the newest frame directly into a reused
+display buffer pool scaled by tile role (native for the focused tile, `360x202`
+for strip tiles, `480x270` for PiP, and `1280x720` per stream in a multi-stream
+grid), releasing buffers and skipping decoding while the window is minimized or
+all stream surfaces are hidden. File playback keeps its RGBA frames and
+timestamps, aborting any pending range download if playback stops. On Windows,
+each `yapfast --stream-worker` process is attached to a Job Object configured
+with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and given a 500 ms stop grace before
+forced termination.
 The worker's standard error goes to Yapfast's log file. If its output ends
 without an `ended` report, as when it crashes, the popup says "Screen sharing
 stopped unexpectedly." and Yapfast logs a warning, "the stream worker ended
@@ -66,8 +70,9 @@ as on Windows and in an X11 session such as XFCE's, the share menu lists the
 screens and windows libwebrtc's capturers find (`stream_worker::shareable`),
 and the worker captures the one picked by its id; see the
 [Windows guide](../windows-beta.md#go-live-on-windows). On Windows the outgoing
-frames include the cursor from the capture backend or WebRTC's cursor composer.
-On X11 the capturers
+frames include the cursor from the capture backend or WebRTC's cursor composer
+only while the OS cursor is visible (hiding hidden, suppressed, fully
+transparent, and out-of-window cursors). On X11 the capturers
 read the X server, and Yapfast's own windows are listed too.
 `stream_worker::portal_picks` makes the choice as libwebrtc does:
 `XDG_SESSION_TYPE` starting with `wayland` and `WAYLAND_DISPLAY` set. The
@@ -172,7 +177,13 @@ as plain Opus RTP on the stream's audio SSRC, DAVE-encrypted, with sender
 reports, and op 5 marks them as shared sound (speaking flag 2). Nothing is
 sent while no application plays. On Windows, WASAPI's process loopback hears
 everything but Yapfast's own process tree as one stream, from Windows 10's 2004
-update on; it can't leave other Discord clients out. Other systems share
+update on; it can't leave other Discord clients out. When an in-chat video or
+voice message plays in Yapfast's own playback worker (`Worker::play`), that
+playback worker PID (`Job::Share.include_audio_pid` and
+`Control::IncludeAudioPid`) is captured through a targeted
+`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` stream and mixed alongside
+other applications without echoing calls, soundboard sounds, or watched Go Live
+streams. Other systems share
 video only for now, and so does the test pattern. Two ignored tests check the capture against the
 machine's sound server with a quiet tone: another process's is heard, and
 Yapfast's own is not.
@@ -197,7 +208,7 @@ RTCP that came back (`stream sent`): receiver reports with the highest
 sequence number Discord's server got and its echo of our sender reports
 (`lsr`), its bitrate estimate (REMB), and keyframe requests, and each change
 of bitrate. The voice connection logs the voice server's RTCP too, to compare
-with a sender Discord accepts. Messages the stream server sends are logged
+with a sender Discord accepts. Stream server opcodes are logged
 too, except those carrying keys.
 
 Watching works the same way in reverse. Clicking someone's LIVE badge, or their
@@ -233,7 +244,9 @@ sends a receiver report every second
 echoed). With `YAPFAST_LOG=debug` it logs what it received every 5 s (`stream
 received`): packets out of order, resent, recovered, given up on, and keyframes
 asked for. `YAPFAST_STREAM_LOG=1` reports packet, assembler, decoder, and UI
-progress without stream content or account identifiers. The worker decodes
+progress without stream content or account identifiers. The worker also
+reports the first picture it publishes after a gap of at least one second,
+with the gap duration and whether it resumed on a keyframe. The worker decodes
 with libvpx or with the FFmpeg H264 decoder in
 libwebrtc's archive (`native/decode.c`), AV1 with the dav1d in the same
 archive (`native/av1.c`), a picture out for each frame in, or H265 with the

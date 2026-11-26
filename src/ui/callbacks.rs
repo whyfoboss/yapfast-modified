@@ -704,6 +704,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                         at_end,
                     },
                 );
+                adapter.schedule_idle_trim(&window);
             },
         );
     });
@@ -753,6 +754,7 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                         at_end: false,
                     },
                 );
+                adapter.schedule_idle_trim(&window);
             },
         );
     });
@@ -1104,6 +1106,20 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     {
         let adapter = adapter.clone();
         let weak = window.as_weak();
+        window.on_view_image_in_room(move |room, item, index| {
+            if let Some(window) = weak.upgrade() {
+                let action = Action::ViewImageInRoom {
+                    room: room.into(),
+                    item: item.into(),
+                    index: usize::try_from(index).unwrap_or_default(),
+                };
+                adapter.borrow_mut().action(&window, action);
+            }
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
         window.on_step_image(move |step| {
             if let Some(window) = weak.upgrade() {
                 adapter
@@ -1226,6 +1242,51 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     bind_item!(on_start_forward, Action::StartForward);
     bind_item!(on_forward_choose, Action::ChooseForward);
     bind_item!(on_forward_send, Action::Forward);
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_report_message(move |item, aside| {
+            if let Some(window) = weak.upgrade() {
+                adapter.borrow_mut().action(
+                    &window,
+                    Action::OpenReportMessage {
+                        item: item.into(),
+                        aside,
+                    },
+                );
+            }
+        });
+    }
+    bind!(on_report_back, Action::ReportBack);
+    bind!(on_report_retry_menu, Action::ReportRetryMenu);
+    bind!(on_submit_report, Action::SubmitReport);
+    bind!(on_close_report, Action::CloseReport);
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_report_choose(move |target| {
+            if let Some(window) = weak.upgrade() {
+                adapter
+                    .borrow_mut()
+                    .action(&window, Action::ReportChooseChild(i64::from(target)));
+            }
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_report_toggle_option(move |element, value| {
+            if let Some(window) = weak.upgrade() {
+                adapter.borrow_mut().action(
+                    &window,
+                    Action::ReportToggleOption {
+                        element: element.into(),
+                        value: value.into(),
+                    },
+                );
+            }
+        });
+    }
     bind_item!(on_switcher_search, Action::SearchSwitcher);
     bind_item!(on_switch_to, Action::SwitchTo);
     bind!(on_open_new_dm, Action::OpenNewDm);
@@ -1605,9 +1666,72 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     {
         let adapter = adapter.clone();
         let weak = window.as_weak();
+        window.on_search_here(move || {
+            let Some(window) = weak.upgrade() else { return };
+            let active = {
+                let ad = adapter.borrow();
+                ad.app
+                    .state
+                    .search
+                    .as_ref()
+                    .filter(|_| ad.app.state.search_place().is_some())
+                    .map(|search| (search.query.clone(), search.bindings.clone()))
+            };
+            if let Some((query, bindings)) = active {
+                window.set_search_text(query.into());
+                window.set_search_dropdown_open(false);
+                {
+                    let mut ad = adapter.borrow_mut();
+                    ad.search_bindings = bindings;
+                    ad.models.search_filter_suggestions.set_vec(Vec::new());
+                }
+                adapter.borrow_mut().action(&window, Action::SearchHere);
+            }
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
         window.on_search_start_at(move |position| {
-            if let (Some(window), Ok(position)) = (weak.upgrade(), position.trim().parse::<u32>()) {
-                adapter.borrow_mut().action(&window, Action::SearchStartAt(position));
+            if let Some(window) = weak.upgrade() {
+                adapter
+                    .borrow_mut()
+                    .action(&window, Action::SearchStartAt(position.into()));
+                let active_gen = adapter
+                    .borrow()
+                    .app
+                    .state
+                    .search
+                    .as_ref()
+                    .map(|s| s.generation);
+                if let Some(target_gen) = active_gen {
+                    for delay_ms in [0u64, 30, 100, 250, 500] {
+                        let weak = weak.clone();
+                        let adapter = Rc::downgrade(&adapter);
+                        slint::Timer::single_shot(
+                            std::time::Duration::from_millis(delay_ms),
+                            move || {
+                                let (Some(window), Some(adapter)) =
+                                    (weak.upgrade(), adapter.upgrade())
+                                else {
+                                    return;
+                                };
+                                let current_gen = adapter
+                                    .borrow()
+                                    .app
+                                    .state
+                                    .search
+                                    .as_ref()
+                                    .map(|s| s.generation);
+                                if current_gen == Some(target_gen) {
+                                    window.set_search_jump_settle_tick(
+                                        window.get_search_jump_settle_tick().wrapping_add(1),
+                                    );
+                                }
+                            },
+                        );
+                    }
+                }
             }
         });
     }
@@ -1615,29 +1739,98 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     bind!(on_confirm_add_people, Action::AddPeople);
     bind!(on_close_add_people, Action::CloseAddPeople);
     bind_item!(on_choose_person, Action::ChoosePerson);
-    bind_item!(on_search, Action::Search);
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_search(move |text| {
+            let Some(window) = weak.upgrade() else { return };
+            let query = text.to_string();
+            let bindings = {
+                let mut ad = adapter.borrow_mut();
+                super::search::prune_search_bindings(&query, &mut ad.search_bindings);
+                ad.search_bindings.clone()
+            };
+            adapter
+                .borrow_mut()
+                .action(&window, Action::SearchWithBindings { query, bindings });
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_close_search(move || {
+            let Some(window) = weak.upgrade() else { return };
+            window.set_search_text(SharedString::default());
+            window.set_search_dropdown_open(false);
+            let mut ad = adapter.borrow_mut();
+            ad.search_bindings.clear();
+            ad.models.search_filter_suggestions.set_vec(Vec::new());
+            ad.action(&window, Action::CloseSearch);
+        });
+    }
+    {
+        let adapter = adapter.clone();
+        let weak = window.as_weak();
+        window.on_search_viewport_changed(move |top, bottom| {
+            let Some(window) = weak.upgrade() else { return };
+            let start = usize::try_from(top.max(0)).unwrap_or(0);
+            let end = usize::try_from(bottom.max(top).max(0) + 1).unwrap_or(start + 1);
+            let action = {
+                let mut ad = adapter.borrow_mut();
+                let Some(search) = &ad.app.state.search else {
+                    return;
+                };
+                if search.results.is_empty() {
+                    return;
+                }
+                let max_end = end.min(search.results.len());
+                let clamped_start = start.min(max_end);
+                let key = (search.generation, clamped_start, max_end);
+                if ad.search_viewport_sent == Some(key) {
+                    return;
+                }
+                ad.search_viewport_sent = Some(key);
+                Action::SearchViewport {
+                    start: clamped_start,
+                    end: max_end,
+                }
+            };
+            adapter.borrow_mut().action(&window, action);
+        });
+    }
     {
         let adapter = adapter.clone();
         let weak = window.as_weak();
         window.on_search_input_edited(move |text| {
             if let Some(window) = weak.upgrade() {
-                let mut adapter = adapter.borrow_mut();
-                let adapter = &mut *adapter;
-                let role_colors = adapter.layout.role_colors_everywhere;
-                let suggestions = super::search::compute_search_suggestions(
-                    &adapter.app.state,
-                    &text,
-                    &mut adapter.pictures,
-                    role_colors,
-                );
-                adapter
-                    .models
-                    .search_filter_suggestions
-                    .set_vec(suggestions);
-                if adapter.models.search_filter_suggestions.row_count() > 0 {
-                    window.set_search_suggestion_index(0);
-                } else {
-                    window.set_search_suggestion_index(-1);
+                let remote_query = {
+                    let mut adapter = adapter.borrow_mut();
+                    let adapter = &mut *adapter;
+                    super::search::prune_search_bindings(&text, &mut adapter.search_bindings);
+                    let role_colors = adapter.layout.role_colors_everywhere;
+                    let suggestions = super::search::compute_search_suggestions(
+                        &adapter.app.state,
+                        &text,
+                        &mut adapter.pictures,
+                        role_colors,
+                    );
+                    adapter
+                        .models
+                        .search_filter_suggestions
+                        .set_vec(suggestions);
+                    if adapter.models.search_filter_suggestions.row_count() > 0 {
+                        window.set_search_suggestion_index(0);
+                    } else {
+                        window.set_search_suggestion_index(-1);
+                    }
+                    super::search::active_person_filter_query(&text)
+                        .filter(|(_, q)| !q.is_empty())
+                        .map(|(_, q)| q.to_owned())
+                };
+                if let Some(query) = remote_query {
+                    adapter
+                        .borrow_mut()
+                        .action(&window, Action::SearchFilterMembers(query));
                 }
             }
         });
@@ -1659,6 +1852,38 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                         &item.token,
                         &item.label,
                     );
+                    if item.kind == 1 && !item.user_id.is_empty() {
+                        let filter = if ["mentions:", "from:"]
+                            .into_iter()
+                            .filter_map(|op| current_query.rfind(op).map(|pos| (pos, op)))
+                            .max_by_key(|(pos, _)| *pos)
+                            .is_some_and(|(_, op)| op == "mentions:")
+                        {
+                            yapfast_core::chat::SearchUserFilter::Mentions
+                        } else {
+                            yapfast_core::chat::SearchUserFilter::From
+                        };
+                        let norm = super::search::normalized_binding_token(&item.token, &item.label);
+                        adapter
+                            .search_bindings
+                            .retain(|b| !(b.filter == filter && b.token == norm));
+                        super::search::prune_search_bindings(
+                            &new_query,
+                            &mut adapter.search_bindings,
+                        );
+                        adapter.search_bindings.push(
+                            yapfast_core::chat::SearchUserBinding {
+                                filter,
+                                token: norm,
+                                user_id: item.user_id.into(),
+                            },
+                        );
+                    } else {
+                        super::search::prune_search_bindings(
+                            &new_query,
+                            &mut adapter.search_bindings,
+                        );
+                    }
                     window.set_search_text(new_query.as_str().into());
                     window.set_search_suggestion_caret(i32::try_from(new_query.len()).unwrap_or(i32::MAX));
                     window.set_search_suggestion_edit(window.get_search_suggestion_edit().wrapping_add(1));
@@ -2522,6 +2747,21 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     });
     let state = adapter.clone();
     let weak = window.as_weak();
+    window.on_fake_deafen_plugin_toggled(move |on| {
+        let mut adapter = state.borrow_mut();
+        adapter.layout.fake_deafen_plugin = Some(on);
+        adapter.layout.write(&adapter.root);
+        if let Some(window) = weak.upgrade() {
+            window.set_fake_deafen_plugin(on);
+            if !on && adapter.app.state.voice.active() && adapter.app.state.voice.fake_deafen {
+                adapter.action(&window, Action::Voice(voice::Command::FakeDeafen(false)));
+            } else {
+                adapter.refresh(&window);
+            }
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
     window.on_clear_logger(move || {
         if let Some(window) = weak.upgrade() {
             state.borrow_mut().action(&window, Action::ClearMessageLog);
@@ -2658,13 +2898,21 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     let state = adapter.clone();
     window.on_attachment_link(move |item, index| {
         let adapter = state.borrow();
+        let hint = adapter
+            .app
+            .state
+            .viewer
+            .as_ref()
+            .filter(|v| v.item == item.as_str())
+            .map(|v| v.room.as_str());
         usize::try_from(index)
             .ok()
             .and_then(|index| {
                 adapter
                     .app
                     .state
-                    .message(&item)?
+                    .attachment_message(hint, &item)?
+                    .1
                     .attachments
                     .get(index)?
                     .url
@@ -2677,31 +2925,29 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     window.on_save_attachment(move |item, index| {
         let item = item.to_string();
         let index = usize::try_from(index).unwrap_or_default();
-        let name = state
-            .borrow()
-            .app
-            .state
-            .message(&item)
-            .and_then(|message| message.attachments.get(index))
-            .map(|attachment| attachment.name.clone())
-            .unwrap_or_default();
+        let name = {
+            let adapter = state.borrow();
+            let hint = adapter
+                .app
+                .state
+                .viewer
+                .as_ref()
+                .filter(|v| v.item == item.as_str())
+                .map(|v| v.room.as_str());
+            adapter
+                .app
+                .state
+                .attachment_message(hint, &item)
+                .and_then(|(_, message)| message.attachments.get(index))
+                .map(|attachment| attachment.name.clone())
+                .unwrap_or_default()
+        };
         let weak = Rc::downgrade(&state);
         state.borrow_mut().dialog(async move {
             // Only the file name is suggested; a sender cannot choose the
-            // folder, hide the file with a leading dot, or reverse how its
-            // extension reads.
-            let name = std::path::Path::new(&name)
-                .file_name()
-                .map(|name| {
-                    name.to_string_lossy()
-                        .chars()
-                        .filter(|&c| !c.is_control() && !links::hidden(c))
-                        .collect::<String>()
-                        .trim_start_matches(['.', ' '])
-                        .to_owned()
-                })
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "attachment".into());
+            // folder, hide the file with a leading dot, write to a Windows
+            // device name/ADS stream, or reverse how its extension reads.
+            let name = sanitize_attachment_filename(&name);
             let file = rfd::AsyncFileDialog::new()
                 .set_title("Save attachment")
                 .set_file_name(name)
@@ -3524,28 +3770,61 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     // Frames skip the application state, which would redraw far more than the pictures.
     let state = adapter.clone();
     let weak = window.as_weak();
+    let mut rgba_scratch = Vec::new();
+    let mut share_pool = FramePool::new();
+    let mut watch_pools: std::collections::HashMap<_, FramePool> =
+        std::collections::HashMap::new();
+    let mut video_pool = FramePool::new();
     window.on_stream_tick(move || {
         let Some(window) = weak.upgrade() else {
             return;
         };
         let adapter = state.borrow();
         let voice = &adapter.app.state.voice;
-        let image = |width, height, pixels: &[u8], picture: Option<yapfast_core::picture::I420<'_>>| {
-            let buffer = if let Some(picture) = picture {
-                let mut buffer = slint::SharedPixelBuffer::new(width, height);
-                picture.to_rgba(&mut Vec::new(), buffer.make_mut_bytes(), width, height);
-                buffer
-            } else {
-                slint::SharedPixelBuffer::clone_from_slice(pixels, width, height)
-            };
-            slint::Image::from_rgba8(buffer)
-        };
-        if let Some(frame) = voice
-            .sharing
-            .as_ref()
-            .and_then(|sharing| sharing.frames.take_stream(image))
+        let minimized = window.window().is_minimized();
+        let grid_shown = window.get_grid_shown();
+        let pip_shown = window.get_pip_shown();
+        let pip_kind = window.get_pip_kind();
+        let voice_grid_mode = window.get_voice_grid_mode();
+        let compact_call = window.get_compact_call();
+        let streams_visible = !minimized && (grid_shown || pip_shown);
+        let stream_count = voice.watching.len() + usize::from(voice.sharing.is_some());
+        let mut any_scaled_target = false;
+
+        let share_target: Option<Option<(u32, u32)>> = if !streams_visible || voice.sharing.is_none()
         {
-            window.set_share_frame(frame);
+            None
+        } else if !grid_shown {
+            (pip_shown && pip_kind == 2).then_some(Some(PIP_BOUNDS))
+        } else if compact_call {
+            Some(Some(STRIP_BOUNDS))
+        } else if voice_grid_mode {
+            Some((stream_count > 1).then_some(MULTI_GRID_BOUNDS))
+        } else if matches!(adapter.call_focus, Some(super::tiles::Focus::OwnScreen))
+            || (adapter.call_focus.is_none() && voice.watching.is_empty())
+        {
+            Some(None)
+        } else {
+            Some(Some(STRIP_BOUNDS))
+        };
+
+        if let Some(target) = share_target {
+            if target.is_some() {
+                any_scaled_target = true;
+            }
+            if let Some(sharing) = voice.sharing.as_ref()
+                && let Some((frame, _)) =
+                    fill_stream_frame(&sharing.frames, &mut share_pool, target, &mut rgba_scratch)
+            {
+                window.set_share_frame(frame);
+            }
+        } else {
+            if !share_pool.is_empty() {
+                share_pool.clear();
+            }
+            if window.get_share_frame().size().width > 0 {
+                window.set_share_frame(slint::Image::default());
+            }
         }
         place_videos(&adapter, &window);
         let frames = &adapter.models.participant_frames;
@@ -3566,57 +3845,107 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
         {
             window.set_camera_preview(frame);
         }
+        if !watch_pools.is_empty() {
+            watch_pools.retain(|user, _| voice.watching.iter().any(|w| &w.user == user));
+        }
         let stream_frames = &adapter.models.stream_frames;
+        let mut watch_frame_visible = false;
         for (index, person) in voice.participants.iter().enumerate() {
-            if let Some(watching) = voice.watching.iter().find(|w| w.user == person.id)
-                && let Some(frames) = watching.frames.as_ref()
-                && let Some(frame) = frames.take_stream(image)
-            {
-                let is_first_frame = index < stream_frames.row_count()
-                    && stream_frames
-                        .row_data(index)
-                        .is_none_or(|img| img.size().width == 0);
-                if index < stream_frames.row_count() {
-                    stream_frames.set_row_data(index, frame.clone());
-                }
+            if let Some(watching) = voice.watching.iter().find(|w| w.user == person.id) {
                 let is_focused = match &adapter.call_focus {
                     Some(super::tiles::Focus::Stream(u)) => u == &person.id,
-                    _ => voice.watching.first().is_some_and(|w| w.user == person.id),
+                    None => voice.watching.first().is_some_and(|w| w.user == person.id),
+                    Some(_) => false,
                 };
-                if is_focused {
-                    window.set_watch_frame(frame);
+                let watch_target: Option<Option<(u32, u32)>> = if !streams_visible {
+                    None
+                } else if !grid_shown {
+                    (pip_shown && pip_kind == 1 && is_focused).then_some(Some(PIP_BOUNDS))
+                } else if compact_call {
+                    Some(Some(STRIP_BOUNDS))
+                } else if voice_grid_mode {
+                    Some((stream_count > 1).then_some(MULTI_GRID_BOUNDS))
+                } else if is_focused {
+                    Some(None)
+                } else {
+                    Some(Some(STRIP_BOUNDS))
+                };
+                if is_focused && watch_target.is_some() {
+                    watch_frame_visible = true;
                 }
-                if tracing::enabled!(target: "yapfast_stream", tracing::Level::INFO) {
-                    thread_local! {
-                        static LAST_STREAM_FRAME_LOG: std::cell::Cell<Option<std::time::Instant>> =
-                            const { std::cell::Cell::new(None) };
+                if let Some(target) = watch_target {
+                    if target.is_some() {
+                        any_scaled_target = true;
                     }
-                    LAST_STREAM_FRAME_LOG.with(|last| {
-                        let now = std::time::Instant::now();
-                        if is_first_frame
-                            || last
-                                .get()
-                                .is_none_or(|at| now - at >= std::time::Duration::from_secs(5))
+                    if let Some(frames) = watching.frames.as_ref() {
+                        let pool = watch_pools.entry(person.id.clone()).or_default();
+                        if let Some((frame, _)) =
+                            fill_stream_frame(frames, pool, target, &mut rgba_scratch)
                         {
-                            last.set(Some(now));
-                            tracing::info!(target: "yapfast_stream", first = is_first_frame,
-                                focused = is_focused, "stream frame published to UI");
+                            let is_first_frame = index < stream_frames.row_count()
+                                && stream_frames
+                                    .row_data(index)
+                                    .is_none_or(|img| img.size().width == 0);
+                            if index < stream_frames.row_count() {
+                                stream_frames.set_row_data(index, frame.clone());
+                            }
+                            if is_focused {
+                                window.set_watch_frame(frame);
+                            }
+                            if tracing::enabled!(target: "yapfast_stream", tracing::Level::INFO) {
+                                thread_local! {
+                                    static LAST_STREAM_FRAME_LOG: std::cell::Cell<Option<std::time::Instant>> =
+                                        const { std::cell::Cell::new(None) };
+                                }
+                                LAST_STREAM_FRAME_LOG.with(|last| {
+                                    let now = std::time::Instant::now();
+                                    if is_first_frame
+                                        || last
+                                            .get()
+                                            .is_none_or(|at| now - at >= std::time::Duration::from_secs(5))
+                                    {
+                                        last.set(Some(now));
+                                        tracing::info!(target: "yapfast_stream", first = is_first_frame,
+                                            focused = is_focused, "stream frame published to UI");
+                                    }
+                                });
+                            }
+                            if is_first_frame
+                                && let Some(mut row) = adapter.models.participants.row_data(index)
+                                && !row.stream_ready
+                            {
+                                row.stream_ready = true;
+                                adapter.models.participants.set_row_data(index, row);
+                            }
                         }
-                    });
-                }
-                if is_first_frame {
-                    if let Some(mut row) = adapter.models.participants.row_data(index)
-                        && !row.stream_ready
+                    }
+                } else {
+                    if let Some(pool) = watch_pools.get_mut(&person.id) {
+                        pool.clear();
+                    }
+                    if index < stream_frames.row_count()
+                        && stream_frames
+                            .row_data(index)
+                            .is_some_and(|img| img.size().width > 0)
                     {
-                        row.stream_ready = true;
-                        adapter.models.participants.set_row_data(index, row);
+                        stream_frames.set_row_data(index, slint::Image::default());
                     }
                 }
             }
         }
+        if !watch_frame_visible && window.get_watch_frame().size().width > 0 {
+            window.set_watch_frame(slint::Image::default());
+        }
         let video = adapter.app.state.video.as_ref();
+        if video.is_none() && !video_pool.is_empty() {
+            video_pool.clear();
+        }
         let taken = video.and_then(|video| {
-            let frame = video.frames.as_ref()?.take_timed(|w, h, pixels| image(w, h, pixels, None))?;
+            let frame = video.frames.as_ref()?.take_timed(|w, h, pixels| {
+                video_pool
+                    .fill(w, h, pixels, None, None, &mut rgba_scratch)
+                    .0
+            })?;
             Some((video, frame))
         });
         if taken.is_none() && video.is_some_and(|video| !video.playing && !video.loading) {
@@ -3642,6 +3971,9 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
                 player.set_progress((time as f64 / duration as f64).min(1.0) as f32);
             }
             player.set_time(refresh::video_time(time, video.duration_ms).into());
+        }
+        if !any_scaled_target && rgba_scratch.capacity() > 0 {
+            rgba_scratch = Vec::new();
         }
     });
     // The video playing: started from its cell, controlled from its bar.
@@ -3770,6 +4102,18 @@ pub(super) fn bind_callbacks(window: &YapfastWindow, adapter: &Rc<RefCell<Adapte
     window.on_join_deafened(move || {
         if let Some(window) = weak.upgrade() {
             state.borrow_mut().action(&window, Action::DeafenOnJoin);
+        }
+    });
+    let state = adapter.clone();
+    let weak = window.as_weak();
+    window.on_toggle_fake_deafen(move || {
+        if let Some(window) = weak.upgrade() {
+            let mut adapter = state.borrow_mut();
+            if !adapter.app.state.voice.active() {
+                return;
+            }
+            let enabled = adapter.app.state.voice.fake_deafen;
+            adapter.action(&window, Action::Voice(voice::Command::FakeDeafen(!enabled)));
         }
     });
     let state = adapter.clone();
@@ -4303,6 +4647,57 @@ fn report_delay(last: &Cell<Option<std::time::Instant>>) -> Duration {
     delay
 }
 
+fn sanitize_attachment_filename(raw: &str) -> String {
+    let leaf = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let mut clean: String = leaf
+        .chars()
+        .filter(|&c| {
+            !c.is_control()
+                && !links::hidden(c)
+                && !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+        .collect();
+    while clean.starts_with(['.', ' ']) {
+        clean.remove(0);
+    }
+    while clean.ends_with(['.', ' ']) {
+        clean.pop();
+    }
+    if clean.is_empty() {
+        return "attachment".into();
+    }
+    let stem = clean.split('.').next().unwrap_or(&clean);
+    let reserved = matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved {
+        clean.insert(0, '_');
+    }
+    clean
+}
+
 /// A name style's colours, written as hex joined by commas.
 fn key_colours(key: &str) -> Vec<u32> {
     key.split(',')
@@ -4310,10 +4705,188 @@ fn key_colours(key: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Maximum target dimensions for non-focused tiles in the call strip.
+const STRIP_BOUNDS: (u32, u32) = (360, 202);
+/// Maximum target dimensions for Picture-in-Picture stream tiles.
+const PIP_BOUNDS: (u32, u32) = (480, 270);
+/// Maximum target dimensions per stream when multiple streams share the grid.
+const MULTI_GRID_BOUNDS: (u32, u32) = (1280, 720);
+
+fn fill_stream_frame(
+    frames: &yapfast_core::frames::Frames,
+    pool: &mut FramePool,
+    max_size: Option<(u32, u32)>,
+    rgba_scratch: &mut Vec<u8>,
+) -> Option<(slint::Image, bool)> {
+    if pool.bounds_changed(max_size) {
+        frames
+            .take_stream(|w, h, pixels, pic| pool.fill(w, h, pixels, pic, max_size, rgba_scratch))
+            .or_else(|| {
+                frames.current_stream(|w, h, pixels, pic| {
+                    pool.fill(w, h, pixels, pic, max_size, rgba_scratch)
+                })
+            })
+    } else {
+        frames.take_stream(|w, h, pixels, pic| pool.fill(w, h, pixels, pic, max_size, rgba_scratch))
+    }
+}
+
+#[derive(Default)]
+struct FramePool {
+    slots: [Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>; 2],
+    next: usize,
+    last_target: Option<(u32, u32)>,
+    last_bounds: Option<Option<(u32, u32)>>,
+}
+
+impl FramePool {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn clear(&mut self) {
+        self.slots = [None, None];
+        self.next = 0;
+        self.last_target = None;
+        self.last_bounds = None;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.slots[0].is_none()
+            && self.slots[1].is_none()
+            && self.last_target.is_none()
+            && self.last_bounds.is_none()
+    }
+
+    fn bounds_changed(&self, max_size: Option<(u32, u32)>) -> bool {
+        self.last_bounds != Some(max_size)
+    }
+
+    fn fill(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        picture: Option<yapfast_core::picture::I420<'_>>,
+        max_size: Option<(u32, u32)>,
+        rgba_scratch: &mut Vec<u8>,
+    ) -> (slint::Image, bool) {
+        let (dst_width, dst_height) = match (picture.is_some(), max_size) {
+            (true, Some(bounds)) => yapfast_core::picture::fit(width, height, bounds),
+            _ => (width, height),
+        };
+        let scaled = (dst_width, dst_height) != (width, height);
+        if self.last_target != Some((dst_width, dst_height)) {
+            // Drop buffers from the previous target size at once on resize/focus switch.
+            self.slots = [None, None];
+            self.next = 0;
+            self.last_target = Some((dst_width, dst_height));
+        }
+        self.last_bounds = Some(max_size);
+        let slot = self.next;
+        self.next ^= 1;
+        let mut buffer = match self.slots[slot].take() {
+            Some(existing)
+                if existing.width() == dst_width && existing.height() == dst_height =>
+            {
+                existing
+            }
+            _ => slint::SharedPixelBuffer::new(dst_width, dst_height),
+        };
+        if let Some(picture) = picture {
+            picture.to_rgba(rgba_scratch, buffer.make_mut_bytes(), dst_width, dst_height);
+        } else {
+            let dst = buffer.make_mut_bytes();
+            if dst.len() == pixels.len() {
+                dst.copy_from_slice(pixels);
+            } else {
+                buffer = slint::SharedPixelBuffer::clone_from_slice(pixels, width, height);
+            }
+        }
+        let image = slint::Image::from_rgba8(buffer.clone());
+        self.slots[slot] = Some(buffer);
+        (image, scaled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn frame_pool_reuses_slots_when_unchanged_and_releases_on_clear() {
+        let mut pool = FramePool::default();
+        let mut scratch = Vec::new();
+        let pixels = vec![42u8; 4 * 4 * 4];
+        let (img1, scaled1) = pool.fill(4, 4, &pixels, None, None, &mut scratch);
+        assert!(!scaled1);
+        let ptr1 = pool.slots[0].as_ref().unwrap().as_bytes().as_ptr();
+        let (_img2, _) = pool.fill(4, 4, &pixels, None, None, &mut scratch);
+        assert!(pool.slots[1].is_some());
+        drop(img1);
+        let (_img3, _) = pool.fill(4, 4, &pixels, None, None, &mut scratch);
+        let ptr3 = pool.slots[0].as_ref().unwrap().as_bytes().as_ptr();
+        assert_eq!(ptr1, ptr3, "slot 0 buffer allocation should be reused");
+        pool.clear();
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn frame_pool_scales_i420_to_bounds_and_drops_old_slots_on_switch() {
+        let mut pool = FramePool::new();
+        let mut scratch = Vec::new();
+        let (w, h) = (1920u32, 1080u32);
+        let chroma = (w / 2 * (h / 2)) as usize;
+        let packed = vec![128u8; (w * h) as usize + 2 * chroma];
+        let (y, uv) = packed.split_at((w * h) as usize);
+        let (u, v) = uv.split_at(chroma);
+        let pic = yapfast_core::picture::I420 {
+            width: w,
+            height: h,
+            y,
+            u,
+            v,
+            strides: [w, w / 2, w / 2],
+        };
+
+        let (full_img, full_scaled) =
+            pool.fill(w, h, &packed, Some(pic), None, &mut scratch);
+        assert!(!full_scaled);
+        assert_eq!((full_img.size().width, full_img.size().height), (1920, 1080));
+        assert!(pool.slots[0].is_some());
+
+        // Switching to STRIP_BOUNDS drops the old 1080p slot immediately and scales.
+        assert!(pool.bounds_changed(Some(STRIP_BOUNDS)));
+        let (strip_img, strip_scaled) =
+            pool.fill(w, h, &packed, Some(pic), Some(STRIP_BOUNDS), &mut scratch);
+        assert!(strip_scaled);
+        assert!(!pool.bounds_changed(Some(STRIP_BOUNDS)));
+        assert_eq!(
+            (strip_img.size().width, strip_img.size().height),
+            yapfast_core::picture::fit(w, h, STRIP_BOUNDS)
+        );
+        assert!(pool.slots[0].is_some());
+        assert!(pool.slots[1].is_none(), "old 1080p slot should be cleared");
+
+        // PiP and multi-stream grid scale to their configured bounds.
+        let (pip_img, pip_scaled) =
+            pool.fill(w, h, &packed, Some(pic), Some(PIP_BOUNDS), &mut scratch);
+        assert!(pip_scaled);
+        assert_eq!((pip_img.size().width, pip_img.size().height), (480, 270));
+
+        let (grid_img, grid_scaled) =
+            pool.fill(w, h, &packed, Some(pic), Some(MULTI_GRID_BOUNDS), &mut scratch);
+        assert!(grid_scaled);
+        assert_eq!((grid_img.size().width, grid_img.size().height), (1280, 720));
+
+        // Legacy RGBA leaves size untouched even when bounds are supplied.
+        let rgba = vec![7u8; 8 * 8 * 4];
+        let (legacy_img, legacy_scaled) =
+            pool.fill(8, 8, &rgba, None, Some((4, 4)), &mut scratch);
+        assert!(!legacy_scaled);
+        assert_eq!((legacy_img.size().width, legacy_img.size().height), (8, 8));
+    }
 
     #[test]
     fn reports_at_once_after_a_quiet_spell_and_spaced_while_busy() {
@@ -4323,5 +4896,16 @@ mod tests {
         assert!(busy > Duration::from_millis(40) && busy <= REPORT_SPACING);
         last.set(Some(Instant::now() - REPORT_SPACING));
         assert_eq!(report_delay(&last), Duration::ZERO);
+    }
+
+    #[test]
+    fn sanitizes_attachment_filenames_against_traversal_and_windows_hazards() {
+        assert_eq!(sanitize_attachment_filename("../../evil.png"), "evil.png");
+        assert_eq!(sanitize_attachment_filename(r"a\b\note.txt:Zone.Identifier"), "note.txtZone.Identifier");
+        assert_eq!(sanitize_attachment_filename(".hidden.txt."), "hidden.txt");
+        assert_eq!(sanitize_attachment_filename("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize_attachment_filename("lpt1"), "_lpt1");
+        assert_eq!(sanitize_attachment_filename("..."), "attachment");
+        assert_eq!(sanitize_attachment_filename("a\u{202e}b.png"), "ab.png");
     }
 }

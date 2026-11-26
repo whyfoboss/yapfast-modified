@@ -69,4 +69,9 @@ class DesktopFrame {
 };
 
 std::unique_ptr<DesktopCapturer> new_desktop_capturer(DesktopCapturerOptions options);
+bool cursor_info_is_visible(bool get_cursor_ok, uint32_t flags, bool has_cursor);
+bool cursor_bgra_has_visible_pixel(rust::Slice<const uint8_t> pixels,
+                                    int32_t width,
+                                    int32_t height,
+                                    int32_t stride);
 }  // namespace livekit_ffi

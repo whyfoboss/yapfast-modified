@@ -219,17 +219,21 @@ impl Application {
         index: usize,
         path: PathBuf,
     ) -> Vec<Effect> {
-        if self.state.preview
-            || !self
-                .state
-                .message(&item)
-                .is_some_and(|message| index < message.attachments.len())
-        {
+        if self.state.preview {
             return vec![];
         }
-        let Some(room) = self.state.room_of(&item).cloned() else {
+        let hint = self
+            .state
+            .viewer
+            .as_ref()
+            .filter(|viewer| viewer.item == item)
+            .map(|viewer| viewer.room.as_str());
+        let Some((room, message)) = self.state.attachment_message(hint, &item) else {
             return vec![];
         };
+        if index >= message.attachments.len() {
+            return vec![];
+        }
         vec![Effect::Backend(Command::SaveAttachment {
             room,
             item,
@@ -239,18 +243,25 @@ impl Application {
     }
 
     pub(super) fn copy_attachment(&mut self, item: String, index: usize) -> Vec<Effect> {
-        if self.state.preview
-            || !self
-                .state
-                .message(&item)
-                .and_then(|message| message.attachments.get(index))
-                .is_some_and(|attachment| attachment.url.is_some())
+        if self.state.preview {
+            return vec![];
+        }
+        let hint = self
+            .state
+            .viewer
+            .as_ref()
+            .filter(|viewer| viewer.item == item)
+            .map(|viewer| viewer.room.as_str());
+        let Some((room, message)) = self.state.attachment_message(hint, &item) else {
+            return vec![];
+        };
+        if !message
+            .attachments
+            .get(index)
+            .is_some_and(|attachment| attachment.url.is_some())
         {
             return vec![];
         }
-        let Some(room) = self.state.room_of(&item).cloned() else {
-            return vec![];
-        };
         vec![Effect::Backend(Command::CopyAttachment {
             room,
             item,
@@ -282,16 +293,25 @@ impl Application {
         })]
     }
 
-    pub(super) fn view_image(&mut self, item: String, index: usize) -> Vec<Effect> {
-        if !self
-            .state
-            .message(&item)
-            .and_then(|message| message.attachments.get(index))
+    pub(super) fn view_image(
+        &mut self,
+        room: Option<String>,
+        item: String,
+        index: usize,
+    ) -> Vec<Effect> {
+        let Some((resolved_room, message)) = self.state.attachment_message(room.as_deref(), &item)
+        else {
+            return vec![];
+        };
+        if !message
+            .attachments
+            .get(index)
             .is_some_and(|attachment| attachment.image)
         {
             return vec![];
         }
         self.state.viewer = Some(Viewer {
+            room: resolved_room,
             item,
             index,
             pictures: HashMap::new(),
@@ -305,9 +325,9 @@ impl Application {
         };
         let images: Vec<usize> = self
             .state
-            .message(&viewer.item)
+            .attachment_message(Some(&viewer.room), &viewer.item)
             .into_iter()
-            .flat_map(|message| message.attachments.iter().enumerate())
+            .flat_map(|(_, message)| message.attachments.iter().enumerate())
             .filter(|(_, attachment)| attachment.image)
             .map(|(index, _)| index)
             .collect();
@@ -541,15 +561,6 @@ impl Application {
     /// Downloads the viewer's image at viewing size, unless it has it or is
     /// getting it. The preview shows until it arrives.
     pub(super) fn load_image(&mut self) -> Vec<Effect> {
-        let Some(room) = self
-            .state
-            .viewer
-            .as_ref()
-            .and_then(|viewer| self.state.room_of(&viewer.item))
-            .cloned()
-        else {
-            return vec![];
-        };
         let Some(viewer) = &mut self.state.viewer else {
             return vec![];
         };
@@ -558,7 +569,7 @@ impl Application {
         }
         viewer.pictures.insert(viewer.index, None);
         vec![Effect::Backend(Command::ViewImage {
-            room,
+            room: viewer.room.clone(),
             item: viewer.item.clone(),
             index: viewer.index,
         })]

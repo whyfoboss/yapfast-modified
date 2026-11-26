@@ -189,6 +189,10 @@ pub struct Message {
     /// thinking until Discord updates it.
     #[serde(default)]
     pub loading: bool,
+    /// Original `(channel_id, message_id)` for a `THREAD_STARTER_MESSAGE` (`type == 21`),
+    /// preserved before `id`/`channel_id` are rewritten to the thread's stub message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter_target: Option<Box<(String, String)>>,
 }
 
 /// The interaction an app's message answers, from its
@@ -680,6 +684,23 @@ pub fn parse(value: &Value) -> Option<Message> {
             return None;
         }
         let mut message = parse(original)?;
+        let orig_channel = if !message.channel_id.is_empty() {
+            message.channel_id.clone()
+        } else {
+            value["message_reference"]["channel_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let orig_message = if !message.id.is_empty() {
+            message.id.clone()
+        } else {
+            value["message_reference"]["message_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        message.starter_target = Some(Box::new((orig_channel, orig_message)));
         message.id = value["id"].as_str()?.into();
         message.channel_id = value["channel_id"].as_str().unwrap_or_default().into();
         message.nonce = None;
@@ -948,6 +969,7 @@ pub fn parse(value: &Value) -> Option<Message> {
         poll: Poll::of(&shown["poll"]),
         ephemeral: value["flags"].as_u64().unwrap_or_default() & EPHEMERAL != 0,
         loading: value["flags"].as_u64().unwrap_or_default() & LOADING != 0,
+        starter_target: None,
     })
 }
 
@@ -1461,6 +1483,8 @@ pub struct Names {
     /// what was shown with them can tell it's out of date. Someone new
     /// changes nothing shown, which was rendered after learning them.
     version: u64,
+    /// Bumped whenever persisted `Names` entries change on disk.
+    saved_version: u64,
     /// When each person was last learned or looked up, by user id, counted
     /// in `ticks`; those not seen for longest go first once there are too
     /// many. Looking up only reads, so these count atomically.
@@ -1469,10 +1493,10 @@ pub struct Names {
 }
 
 /// People whose names are kept, at most. Yapfast shows the authors of the
-/// channels it keeps, 41 of up to 200 messages each, and 40 member lists of
+/// channels it keeps, 41 of up to 200 messages each, and 10 member lists of
 /// 100 rows; every message Discord sends from any server teaches it one
 /// more. One person in one server, with two roles, takes about 260 bytes.
-const KEPT_PEOPLE: usize = 20_000;
+const KEPT_PEOPLE: usize = 4_000;
 
 /// Sets `key` to `value`, or removes it for none; whether that changed it.
 fn changed<K: std::hash::Hash + Eq, V: PartialEq>(
@@ -1582,7 +1606,10 @@ impl Names {
             .collect();
         names.ticks = AtomicU64::new(names.seen.len() as u64);
         if names.seen.len() > KEPT_PEOPLE {
-            names.forget();
+            names.prune_to(KEPT_PEOPLE);
+            names.saved_version = 1;
+        } else {
+            names.shrink_maps();
         }
         names
     }
@@ -1614,9 +1641,18 @@ impl Names {
     /// Forgets the quarter of people not seen for longest. What was shown
     /// with them stays as it was, so the version stays.
     fn forget(&mut self) {
+        self.prune_to(KEPT_PEOPLE * 3 / 4);
+    }
+
+    /// Evicts oldest-seen people down to at most `target` entries and shrinks
+    /// excess map capacity.
+    fn prune_to(&mut self, target: usize) {
+        let drop_count = self.seen.len().saturating_sub(target);
+        if drop_count == 0 {
+            return;
+        }
         let mut times: Vec<u64> = self.seen.values().map(|at| at.load(Relaxed)).collect();
-        let quarter = times.len() / 4;
-        let (_, &mut until, _) = times.select_nth_unstable(quarter);
+        let (_, &mut until, _) = times.select_nth_unstable(drop_count - 1);
         self.seen.retain(|_, at| *at.get_mut() > until);
         let seen = &self.seen;
         self.users.retain(|user, _| seen.contains_key(user));
@@ -1642,6 +1678,33 @@ impl Names {
         self.roles.retain(|(_, user), _| seen.contains_key(user));
         self.timeouts.retain(|(_, user), _| seen.contains_key(user));
         self.boosts.retain(|(_, user), _| seen.contains_key(user));
+        self.shrink_maps();
+    }
+
+    pub(crate) fn shrink_maps(&mut self) {
+        self.seen.shrink_to_fit();
+        self.users.shrink_to_fit();
+        self.usernames.shrink_to_fit();
+        self.bots.shrink_to_fit();
+        self.officials.shrink_to_fit();
+        self.avatars.shrink_to_fit();
+        self.tags.shrink_to_fit();
+        self.decorations.shrink_to_fit();
+        self.nameplates.shrink_to_fit();
+        self.styles.shrink_to_fit();
+        self.member_decorations.shrink_to_fit();
+        self.member_nameplates.shrink_to_fit();
+        self.member_styles.shrink_to_fit();
+        self.nicknames.shrink_to_fit();
+        self.members.shrink_to_fit();
+        self.member_avatars.shrink_to_fit();
+        self.roles.shrink_to_fit();
+        self.timeouts.shrink_to_fit();
+        self.boosts.shrink_to_fit();
+        self.collectible_pictures
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shrink_to_fit();
     }
 
     /// Changes whenever what [`Names::name`], [`Names::avatar`],
@@ -1650,17 +1713,25 @@ impl Names {
         self.version
     }
 
+    /// Changes whenever data serialized to `discord-account.json` changed.
+    pub fn saved_version(&self) -> u64 {
+        self.saved_version
+    }
+
     pub fn learn_user(&mut self, user: &Value) {
         let Some(id) = user["id"].as_str().and_then(id) else {
             return;
         };
         let known = self.saw(id);
         let mut learned = false;
+        let mut saved_changed = false;
         if let Some(name) = ready::display_name(user) {
-            learned |= changed(&mut self.users, id, Some(name.to_owned()));
+            let dirty = changed(&mut self.users, id, Some(name.to_owned()));
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         if let Some(username) = user["username"].as_str() {
-            self.usernames.insert(id, username.to_owned());
+            saved_changed |= changed(&mut self.usernames, id, Some(username.to_owned()));
         }
         // Partial user objects leave both out.
         if user.get("system").is_some() || user.get("public_flags").is_some() {
@@ -1673,47 +1744,66 @@ impl Names {
         // Partial user objects leave it out.
         match user["bot"].as_bool() {
             Some(true) => {
-                self.bots.insert(id);
+                saved_changed |= self.bots.insert(id);
             }
             Some(false) => {
-                self.bots.remove(&id);
+                saved_changed |= self.bots.remove(&id);
             }
             None => {}
         }
         // Partial user objects leave the avatar out; null removes it.
         match user.get("avatar") {
             Some(Value::String(hash)) => {
-                learned |= changed(&mut self.avatars, id, Some(hash.clone()));
+                let dirty = changed(&mut self.avatars, id, Some(hash.clone()));
+                learned |= dirty;
+                saved_changed |= dirty;
             }
-            Some(Value::Null) => learned |= changed(&mut self.avatars, id, None),
+            Some(Value::Null) => {
+                let dirty = changed(&mut self.avatars, id, None);
+                learned |= dirty;
+                saved_changed |= dirty;
+            }
             _ => {}
         }
         // Partial user objects leave the tag out; null takes it away, and
         // so does turning it off.
         match user.get("primary_guild") {
             Some(primary @ Value::Object(_)) => {
-                learned |= changed(&mut self.tags, id, Tag::parse(primary));
+                let dirty = changed(&mut self.tags, id, Tag::parse(primary));
+                learned |= dirty;
+                saved_changed |= dirty;
             }
-            Some(Value::Null) => learned |= changed(&mut self.tags, id, None),
+            Some(Value::Null) => {
+                let dirty = changed(&mut self.tags, id, None);
+                learned |= dirty;
+                saved_changed |= dirty;
+            }
             _ => {}
         }
         // Partial user objects leave both out; null, or nothing equipped,
         // removes them.
         if let Some(data) = user.get("avatar_decoration_data") {
-            learned |= changed(
+            let dirty = changed(
                 &mut self.decorations,
                 id,
                 collectibles::decoration_sku(data),
             );
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         if let Some(equipped) = user.get("collectibles") {
             let plate = Plate::parse(&equipped["nameplate"]);
-            learned |= changed(&mut self.nameplates, id, plate);
+            let dirty = changed(&mut self.nameplates, id, plate);
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         if let Some(style) = user.get("display_name_styles") {
-            learned |= changed(&mut self.styles, id, Style::parse(style));
+            let dirty = changed(&mut self.styles, id, Style::parse(style));
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         self.version += u64::from(known && learned);
+        self.saved_version += u64::from(saved_changed);
     }
 
     /// Learns a member object; its user id is in `user` or `user_id`.
@@ -1731,32 +1821,43 @@ impl Names {
         let key = (guild, user);
         let nick = member["nick"].as_str().map(str::to_owned);
         let mut learned = changed(&mut self.nicknames, key, nick);
+        let mut saved_changed = learned;
         let avatar = member["avatar"].as_str().map(str::to_owned);
-        learned |= changed(&mut self.member_avatars, key, avatar);
+        let dirty = changed(&mut self.member_avatars, key, avatar);
+        learned |= dirty;
+        saved_changed |= dirty;
         // Some member objects leave the roles out.
         if let Some(roles) = member["roles"].as_array() {
             let roles: Arc<[String]> = roles
                 .iter()
                 .filter_map(|role| role.as_str().map(str::to_owned))
                 .collect();
-            learned |= changed(&mut self.roles, key, Some(roles));
+            let dirty = changed(&mut self.roles, key, Some(roles));
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         // What they equip for this server alone, which is there when they do
         // and null when they don't; a member object that leaves them out says
         // nothing.
         if let Some(data) = member.get("avatar_decoration_data") {
-            learned |= changed(
+            let dirty = changed(
                 &mut self.member_decorations,
                 key,
                 collectibles::decoration_sku(data),
             );
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         if let Some(equipped) = member.get("collectibles") {
             let plate = Plate::parse(&equipped["nameplate"]);
-            learned |= changed(&mut self.member_nameplates, key, plate);
+            let dirty = changed(&mut self.member_nameplates, key, plate);
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         if let Some(style) = member.get("display_name_styles") {
-            learned |= changed(&mut self.member_styles, key, Style::parse(style));
+            let dirty = changed(&mut self.member_styles, key, Style::parse(style));
+            learned |= dirty;
+            saved_changed |= dirty;
         }
         // Present when known, null when they aren't timed out; a time past
         // is a timeout that ended.
@@ -1769,8 +1870,9 @@ impl Names {
             let since = since.as_str().and_then(iso_ms);
             changed(&mut self.boosts, key, since);
         }
-        self.members.insert(key);
+        saved_changed |= self.members.insert(key);
         self.version += u64::from(known && learned);
+        self.saved_version += u64::from(saved_changed);
     }
 
     /// Forgets what's known of someone as a member of a server they left,
@@ -1787,8 +1889,9 @@ impl Names {
             | self.member_styles.remove(&key).is_some();
         self.timeouts.remove(&key);
         self.boosts.remove(&key);
-        self.members.remove(&key);
+        let removed_member = self.members.remove(&key);
         self.version += u64::from(learned);
+        self.saved_version += u64::from(learned || removed_member);
     }
 
     /// When a member's timeout ends, in Unix milliseconds, if they're timed
@@ -1888,6 +1991,95 @@ impl Names {
             .collect();
         found.sort();
         found.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Cached member user IDs in `guild`, sorted by display name/nickname then id.
+    pub fn guild_members(&self, guild: &str) -> Vec<String> {
+        let Some(guild_id) = id(guild) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<(String, Id)> = self
+            .members
+            .iter()
+            .filter(|(g, _)| *g == guild_id)
+            .map(|(_, user)| {
+                let label = self
+                    .nicknames
+                    .get(&(guild_id, *user))
+                    .or_else(|| self.users.get(user))
+                    .map_or_else(String::new, |s| s.to_lowercase());
+                (label, *user)
+            })
+            .collect();
+        ids.sort();
+        ids.dedup_by_key(|(_, u)| *u);
+        ids.into_iter().map(|(_, u)| u.to_string()).collect()
+    }
+
+    /// Deduplicated user IDs matching `query` by `@username`, display name, or
+    /// server nickname (when `guild` is `Some`). Scoped to `guild` members when
+    /// `guild` is given; otherwise across all known users.
+    pub fn search_people(&self, guild: Option<&str>, query: &str) -> Vec<String> {
+        let needle = query.trim().trim_start_matches('@').to_lowercase();
+        if needle.is_empty() {
+            return guild.map_or_else(Vec::new, |g| self.guild_members(g));
+        }
+        let guild_id = guild.and_then(id);
+        let candidates: Vec<Id> = match guild_id {
+            Some(gid) => self
+                .members
+                .iter()
+                .filter(|(g, _)| *g == gid)
+                .map(|(_, u)| *u)
+                .collect(),
+            None => self
+                .users
+                .keys()
+                .chain(self.usernames.keys())
+                .copied()
+                .collect(),
+        };
+        let mut matched: Vec<(u8, String, Id)> = Vec::new();
+        let mut seen = HashSet::new();
+        for user in candidates {
+            if !seen.insert(user) {
+                continue;
+            }
+            let uname = self.usernames.get(&user).map(|s| s.to_lowercase());
+            let dname = self.users.get(&user).map(|s| s.to_lowercase());
+            let nick = guild_id
+                .and_then(|gid| self.nicknames.get(&(gid, user)))
+                .map(|s| s.to_lowercase());
+            let rank = if uname.as_deref() == Some(needle.as_str()) {
+                0
+            } else if dname.as_deref() == Some(needle.as_str())
+                || nick.as_deref() == Some(needle.as_str())
+            {
+                1
+            } else if uname.as_deref().is_some_and(|s| s.starts_with(&needle))
+                || dname.as_deref().is_some_and(|s| {
+                    s.starts_with(&needle)
+                        || s.split_whitespace().skip(1).any(|w| w.starts_with(&needle))
+                })
+                || nick.as_deref().is_some_and(|s| {
+                    s.starts_with(&needle)
+                        || s.split_whitespace().skip(1).any(|w| w.starts_with(&needle))
+                })
+            {
+                2
+            } else if uname.as_deref().is_some_and(|s| s.contains(&needle))
+                || dname.as_deref().is_some_and(|s| s.contains(&needle))
+                || nick.as_deref().is_some_and(|s| s.contains(&needle))
+            {
+                3
+            } else {
+                continue;
+            };
+            let sort_name = nick.or(dname).or(uname).unwrap_or_default();
+            matched.push((rank, sort_name, user));
+        }
+        matched.sort();
+        matched.into_iter().map(|(_, _, u)| u.to_string()).collect()
     }
 
     /// A user's display name or username, outside any server.
@@ -3286,5 +3478,69 @@ mod tests {
         names.learn_user(&json!({"id": "1", "public_flags": 0}));
         assert!(!names.is_official("1"));
         assert!(!names.is_official("2"));
+    }
+
+    #[test]
+    fn thread_starter_message_preserves_original_parent_target() {
+        let ordinary = parse(&json!({
+            "id": "500",
+            "channel_id": "11",
+            "author": {"id": "2", "username": "bob"},
+            "content": "hello",
+            "timestamp": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(ordinary.starter_target, None);
+
+        let starter = parse(&json!({
+            "id": "30",
+            "channel_id": "30",
+            "type": 21,
+            "author": {"id": "2", "username": "bob"},
+            "content": "",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message_reference": {"type": 0, "channel_id": "11", "message_id": "100"},
+            "referenced_message": {
+                "id": "100",
+                "channel_id": "11",
+                "author": {"id": "2", "username": "bob"},
+                "content": "Welcome",
+                "timestamp": "2026-01-01T00:00:00Z"
+            }
+        }))
+        .unwrap();
+        assert_eq!(starter.id, "30");
+        assert_eq!(starter.channel_id, "30");
+        assert_eq!(
+            starter.starter_target.as_deref(),
+            Some(&("11".to_owned(), "100".to_owned()))
+        );
+    }
+
+    #[test]
+    fn restore_prunes_oversized_saved_names_to_limit_and_shrinks() {
+        let total = 18_000usize;
+        let saved = SavedNames {
+            users: (0..total)
+                .map(|i| ((i + 1).to_string(), format!("User {i}")))
+                .collect(),
+            nicknames: (0..total)
+                .map(|i| ("10".into(), (i + 1).to_string(), format!("Nick {i}")))
+                .collect(),
+            ..SavedNames::default()
+        };
+        let input_bytes = serde_json::to_vec(&saved).unwrap();
+        let restored = Names::restore(saved);
+        assert!(restored.seen.len() <= KEPT_PEOPLE);
+        assert!(restored.users.len() <= KEPT_PEOPLE);
+        assert!(restored.nicknames.len() <= KEPT_PEOPLE);
+        assert!(restored.saved_version() > 0);
+        let pruned_bytes = serde_json::to_vec(&restored.saving()).unwrap();
+        assert!(
+            pruned_bytes.len() < input_bytes.len() / 2,
+            "expected pruned SavedNames JSON ({}) to be under half of {} bytes",
+            pruned_bytes.len(),
+            input_bytes.len()
+        );
     }
 }

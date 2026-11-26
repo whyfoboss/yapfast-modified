@@ -555,6 +555,15 @@ impl OpenChannel {
             .as_mut()
             .unwrap_or(&mut self.shown)
             .keep_newest(KEPT_MESSAGES);
+        self.prune_rendered();
+    }
+
+    fn prune_rendered(&mut self) {
+        let kept = &self.shown.messages;
+        self.rendered.retain(|order, _| kept.contains_key(order));
+        if self.rendered.capacity() > self.rendered.len().saturating_mul(2) + 64 {
+            self.rendered.shrink_to_fit();
+        }
     }
 
     /// Its newest messages to keep on disk, once they've changed. An answer
@@ -755,6 +764,7 @@ impl OpenChannel {
             return false;
         }
         self.shown.keep_newest(keep);
+        self.prune_rendered();
         true
     }
 
@@ -1448,30 +1458,8 @@ impl OpenChannel {
         index: usize,
         path: PathBuf,
     ) {
-        let attachment = self.attachment(item, index);
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let room = self.room.clone();
-        let Some(url) = attachment.map(|attachment| attachment.url.clone()) else {
-            let _ = done.send(Done::Saved {
-                room,
-                name,
-                result: Err("That message has no file to save."),
-            });
-            return;
-        };
-        let (discord, done) = (discord.clone(), done.clone());
-        tokio::spawn(async move {
-            let result = match discord.download_now(&url, MAX_SAVE_BYTES).await {
-                Ok(data) => tokio::fs::write(&path, data)
-                    .await
-                    .map_err(|_| "Could not write the file. Choose another folder."),
-                Err(_) => Err("Could not download the file from Discord. Try again."),
-            };
-            let _ = done.send(Done::Saved { room, name, result });
-        });
+        let url = self.attachment(item, index).map(|a| a.url.clone());
+        save_attachment(discord, done, self.room.clone(), url, path);
     }
 
     /// Downloads an attachment's picture for the clipboard: a GIF that plays
@@ -1483,28 +1471,14 @@ impl OpenChannel {
         item: &str,
         index: usize,
     ) {
-        let room = self.room.clone();
-        let Some(url) = self.attachment(item, index).map(|attachment| {
+        let url = self.attachment(item, index).map(|attachment| {
             attachment
                 .still_url
                 .as_deref()
                 .unwrap_or(&attachment.url)
                 .to_owned()
-        }) else {
-            let _ = done.send(Done::Copied {
-                room,
-                picture: Err("This picture is no longer available."),
-            });
-            return;
-        };
-        let (discord, done) = (discord.clone(), done.clone());
-        self.tasks.spawn(async move {
-            let picture = discord
-                .download_now(&url, MAX_PREVIEW_DOWNLOAD_BYTES)
-                .await
-                .map_err(|_| "Yapfast couldn't copy this picture. Save it instead.");
-            let _ = done.send(Done::Copied { room, picture });
         });
+        copy_attachment(discord, done, self.room.clone(), url, Some(&mut self.tasks));
     }
 
     /// Downloads an image attachment at viewing size, through Discord's media
@@ -1516,60 +1490,146 @@ impl OpenChannel {
         item: String,
         index: usize,
     ) {
-        let room = self.room.clone();
-        let Some(url) = self
+        let url = self
             .attachment(&item, index)
-            .and_then(|attachment| attachment.view_url.clone())
-        else {
-            let _ = done.send(Done::Image {
-                room,
-                item,
-                index,
-                picture: Err("This image is no longer available."),
-            });
-            return;
-        };
-        let (discord, done) = (discord.clone(), done.clone());
-        self.tasks.spawn(async move {
-            let picture = match discord.download_now(&url, MAX_PREVIEW_DOWNLOAD_BYTES).await {
-                Ok(data) => tokio::task::spawn_blocking({
-                    let url = url.clone();
-                    move || {
-                        super::render::decode(
-                            &url,
-                            &data,
-                            (crate::chat::VIEW_WIDTH, crate::chat::VIEW_HEIGHT),
-                        )
-                    }
-                })
-                .await
-                .ok()
-                .flatten()
-                .map(Arc::new)
-                .ok_or("Yapfast can't show this image. Save it to open it elsewhere."),
-                Err(error) => {
-                    // The address stays out of the log: it names the attachment.
-                    let status = error
-                        .downcast_ref::<Refused>()
-                        .map(|Refused(status)| status.as_u16());
-                    let stalled = error.is::<Stalled>();
-                    tracing::warn!(?status, stalled, "could not download an image to view");
-                    Err(if stalled {
-                        "Discord stopped sending this image. Try again."
-                    } else {
-                        "Yapfast couldn't download this image from Discord. Try again."
-                    })
-                }
-            };
-            let _ = done.send(Done::Image {
-                room,
-                item,
-                index,
-                picture,
-            });
-        });
+            .and_then(|attachment| attachment.view_url.clone());
+        fetch_view_image(
+            discord,
+            done,
+            self.room.clone(),
+            item,
+            index,
+            url,
+            Some(&mut self.tasks),
+        );
     }
+}
 
+pub(super) fn save_attachment(
+    discord: &Discord,
+    done: &UnboundedSender<Done>,
+    room: String,
+    url: Option<Arc<str>>,
+    path: PathBuf,
+) {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some(url) = url else {
+        let _ = done.send(Done::Saved {
+            room,
+            name,
+            result: Err("That message has no file to save."),
+        });
+        return;
+    };
+    let (discord, done) = (discord.clone(), done.clone());
+    tokio::spawn(async move {
+        let result = match discord.download_now(&url, MAX_SAVE_BYTES).await {
+            Ok(data) => tokio::fs::write(&path, data)
+                .await
+                .map_err(|_| "Could not write the file. Choose another folder."),
+            Err(_) => Err("Could not download the file from Discord. Try again."),
+        };
+        let _ = done.send(Done::Saved { room, name, result });
+    });
+}
+
+pub(super) fn copy_attachment(
+    discord: &Discord,
+    done: &UnboundedSender<Done>,
+    room: String,
+    url: Option<String>,
+    tasks: Option<&mut JoinSet<()>>,
+) {
+    let Some(url) = url else {
+        let _ = done.send(Done::Copied {
+            room,
+            picture: Err("This picture is no longer available."),
+        });
+        return;
+    };
+    let (discord, done) = (discord.clone(), done.clone());
+    let fut = async move {
+        let picture = discord
+            .download_now(&url, MAX_PREVIEW_DOWNLOAD_BYTES)
+            .await
+            .map_err(|_| "Yapfast couldn't copy this picture. Save it instead.");
+        let _ = done.send(Done::Copied { room, picture });
+    };
+    if let Some(tasks) = tasks {
+        tasks.spawn(fut);
+    } else {
+        tokio::spawn(fut);
+    }
+}
+
+pub(super) fn fetch_view_image(
+    discord: &Discord,
+    done: &UnboundedSender<Done>,
+    room: String,
+    item: String,
+    index: usize,
+    url: Option<String>,
+    tasks: Option<&mut JoinSet<()>>,
+) {
+    let Some(url) = url else {
+        let _ = done.send(Done::Image {
+            room,
+            item,
+            index,
+            picture: Err("This image is no longer available."),
+        });
+        return;
+    };
+    let (discord, done) = (discord.clone(), done.clone());
+    let fut = async move {
+        let picture = match discord.download_now(&url, MAX_PREVIEW_DOWNLOAD_BYTES).await {
+            Ok(data) => tokio::task::spawn_blocking({
+                let url = url.clone();
+                move || {
+                    super::render::decode(
+                        &url,
+                        &data,
+                        (crate::chat::VIEW_WIDTH, crate::chat::VIEW_HEIGHT),
+                    )
+                }
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(Arc::new)
+            .ok_or("Yapfast can't show this image. Save it to open it elsewhere."),
+            Err(error) => {
+                // The address stays out of the log: it names the attachment.
+                let status = error
+                    .downcast_ref::<Refused>()
+                    .map(|Refused(status)| status.as_u16());
+                let stalled = error.is::<Stalled>();
+                tracing::warn!(?status, stalled, "could not download an image to view");
+                Err(if stalled {
+                    "Discord stopped sending this image. Try again."
+                } else {
+                    "Yapfast couldn't download this image from Discord. Try again."
+                })
+            }
+        };
+        let _ = done.send(Done::Image {
+            room,
+            item,
+            index,
+            picture,
+        });
+    };
+    if let Some(tasks) = tasks {
+        tasks.spawn(fut);
+    } else {
+        tokio::spawn(fut);
+    }
+}
+
+impl OpenChannel {
     /// The channel as Yapfast's timeline. Starts downloading image previews it
     /// lacks. Messages that didn't change since the last time come from
     /// [`OpenChannel::rendered`].
@@ -1911,6 +1971,7 @@ impl OpenChannel {
             thread: self.thread_link(server, message),
             poll: message.poll.as_ref().map(|poll| chat_poll(poll, own)),
             notice: chat_notice(message),
+            report_target: message.starter_target.clone(),
         }
     }
 
@@ -2149,5 +2210,31 @@ fn change(
             (res, Vec::new())
         }
         _ => (None, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_and_let_go_prune_evicted_rendered_rows() {
+        let mut channel = OpenChannel::new("discord:1:2").unwrap();
+        let mut msg = Message::default();
+        for id in 1..=(KEPT_MESSAGES + 80) as u64 {
+            msg.id = id.to_string();
+            channel.shown.messages.insert(id, msg.clone());
+            channel.rendered.insert(
+                id,
+                Arc::new(ChatMessage {
+                    id: id.to_string(),
+                    ..Default::default()
+                }),
+            );
+        }
+        channel.trim();
+        assert_eq!(channel.shown.messages.len(), KEPT_MESSAGES);
+        assert_eq!(channel.rendered.len(), KEPT_MESSAGES);
+        assert!(!channel.rendered.contains_key(&1));
     }
 }

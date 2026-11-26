@@ -430,9 +430,7 @@ impl Connection {
             dave.recognise(user);
         }
         for (op, data) in &early {
-            let mut text = data.to_string();
-            text.truncate(400);
-            tracing::debug!(op, data = %text, "the voice server said while connecting");
+            tracing::debug!(op, "the voice server said while connecting");
             if let Some(user) = announced(*op, data) {
                 dave.recognise(user);
             }

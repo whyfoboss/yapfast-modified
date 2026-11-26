@@ -494,6 +494,11 @@ pub fn pause(paused: bool) {
     PAUSED.store(paused, Ordering::Relaxed);
 }
 
+/// Whether global and focused keybinds are temporarily paused for recording.
+pub fn is_paused() -> bool {
+    PAUSED.load(Ordering::Relaxed)
+}
+
 /// Which keybinds hold, from keys going down and up. It allocates only when
 /// made: each event looks through the few keys bound.
 struct Matcher {
@@ -705,6 +710,27 @@ impl Matcher {
             }
         }
     }
+
+    /// Updates this UI-side key state tracker without dispatching global actions.
+    /// Returns true when the event activates or keeps active any watched keybind.
+    fn tracks_key(&mut self, code: u32, down: bool) -> bool {
+        let Some(index) = self.position(code) else {
+            return false;
+        };
+        if self.held[index] == down {
+            return down
+                && !PAUSED.load(Ordering::Relaxed)
+                && self.bindings.iter().any(|b| b.active && b.uses(index));
+        }
+        let mut activated = false;
+        self.key(code, down, &mut |_, active| {
+            if active {
+                activated = true;
+            }
+        });
+        down && !PAUSED.load(Ordering::Relaxed)
+            && (activated || self.bindings.iter().any(|b| b.active && b.uses(index)))
+    }
 }
 
 /// Where keybinds work.
@@ -786,6 +812,9 @@ thread_local! {
     /// On the window's thread: keybinds from its own key events, while
     /// nothing else hears them.
     static FOCUSED: RefCell<Option<(Matcher, Sink)>> = const { RefCell::new(None) };
+    /// On the window's thread: tracks pressed keybinds regardless of backend so
+    /// built-in shortcuts, focused buttons, and type-anywhere avoid double actions.
+    static WINDOW_TRACKER: RefCell<Option<Matcher>> = const { RefCell::new(None) };
     /// The scan codes push-to-talk keybinds hold.
     static TALK_CODES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
@@ -793,6 +822,17 @@ thread_local! {
 static FOCUSED_ON: AtomicBool = AtomicBool::new(false);
 /// The window's latest key press holds a push-to-talk keybind.
 static PRESSED_TALK_KEY: AtomicBool = AtomicBool::new(false);
+/// The window's latest key press matches or holds any active user keybind.
+static PRESSED_BOUND_KEY: AtomicBool = AtomicBool::new(false);
+
+/// Result of matching a window event against active user keybinds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowOutcome {
+    /// Whether this event matched an active keybind (or repeats one).
+    pub matched: bool,
+    /// Whether an active keybind key is currently pressed in the window.
+    pub pressed: bool,
+}
 
 /// Whether the key press Slint is handling is a push-to-talk key, which
 /// shouldn't also type into the composer.
@@ -800,42 +840,72 @@ pub fn pressed_talk_key() -> bool {
     PRESSED_TALK_KEY.load(Ordering::Relaxed)
 }
 
-/// Runs keybinds from the window's own events while no global keys work.
-/// Losing the focus lets them go, as their keys' release won't come.
-pub fn window_event(event: &WindowEvent) {
-    if let WindowEvent::KeyboardInput { event, .. } = event
-        && event.state == ElementState::Pressed
-    {
-        let code = event.physical_key.to_scancode();
-        PRESSED_TALK_KEY.store(
-            code.is_some_and(|code| TALK_CODES.with_borrow(|codes| codes.contains(&code))),
-            Ordering::Relaxed,
-        );
-    }
-    if !FOCUSED_ON.load(Ordering::Relaxed) {
-        return;
-    }
-    FOCUSED.with_borrow_mut(|focused| {
-        let Some((matcher, sink)) = focused.as_mut() else {
-            return;
-        };
-        let out = &mut |action, down| sink.act(action, down);
-        match event {
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(code) = event.physical_key.to_scancode() {
-                    matcher.key(code, event.state == ElementState::Pressed, out);
-                }
+/// Whether the key press Slint is handling matches an active user keybind.
+pub fn pressed_bound_key() -> bool {
+    PRESSED_BOUND_KEY.load(Ordering::Relaxed)
+}
+
+/// Runs keybinds from the window's own events while no global keys work, and
+/// tracks whether the event matched an active keybind so UI controls do not
+/// trigger a second time. Losing focus releases held keys.
+pub fn window_event(event: &WindowEvent) -> WindowOutcome {
+    let mut matched = false;
+    let mut pressed = PRESSED_BOUND_KEY.load(Ordering::Relaxed);
+    match event {
+        WindowEvent::KeyboardInput { event, .. } => {
+            let down = event.state == ElementState::Pressed;
+            let code = event.physical_key.to_scancode();
+            if down {
+                PRESSED_TALK_KEY.store(
+                    code.is_some_and(|code| TALK_CODES.with_borrow(|codes| codes.contains(&code))),
+                    Ordering::Relaxed,
+                );
             }
-            #[cfg(windows)]
-            WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(key) = Key::mouse(*button) {
-                    matcher.key(key.scancode, *state == ElementState::Pressed, out);
-                }
-            }
-            WindowEvent::Focused(false) => matcher.release_all(out),
-            _ => {}
+            matched = WINDOW_TRACKER.with_borrow_mut(|tracker| {
+                tracker
+                    .as_mut()
+                    .zip(code)
+                    .is_some_and(|(matcher, code)| matcher.tracks_key(code, down))
+            });
+            pressed = down && matched;
+            PRESSED_BOUND_KEY.store(pressed, Ordering::Relaxed);
         }
-    });
+        WindowEvent::Focused(false) => {
+            WINDOW_TRACKER.with_borrow_mut(|tracker| {
+                if let Some(matcher) = tracker.as_mut() {
+                    matcher.release_all(&mut |_, _| {});
+                }
+            });
+            PRESSED_TALK_KEY.store(false, Ordering::Relaxed);
+            PRESSED_BOUND_KEY.store(false, Ordering::Relaxed);
+            pressed = false;
+        }
+        _ => {}
+    }
+    if FOCUSED_ON.load(Ordering::Relaxed) {
+        FOCUSED.with_borrow_mut(|focused| {
+            let Some((matcher, sink)) = focused.as_mut() else {
+                return;
+            };
+            let out = &mut |action, down| sink.act(action, down);
+            match event {
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if let Some(code) = event.physical_key.to_scancode() {
+                        matcher.key(code, event.state == ElementState::Pressed, out);
+                    }
+                }
+                #[cfg(windows)]
+                WindowEvent::MouseInput { state, button, .. } => {
+                    if let Some(key) = Key::mouse(*button) {
+                        matcher.key(key.scancode, *state == ElementState::Pressed, out);
+                    }
+                }
+                WindowEvent::Focused(false) => matcher.release_all(out),
+                _ => {}
+            }
+        });
+    }
+    WindowOutcome { matched, pressed }
 }
 
 /// Watches keybinds in every app it can, until dropped.
@@ -861,6 +931,7 @@ impl Watcher {
     ) -> Self {
         let sink = Sink { toggled };
         FOCUSED.set(Some((Matcher::new(&watched), sink.clone())));
+        WINDOW_TRACKER.set(Some(Matcher::new(&watched)));
         TALK_CODES.set(
             watched
                 .iter()
@@ -914,13 +985,13 @@ impl Watcher {
     }
 
     #[cfg(windows)]
-    pub fn reserves_mouse_for_talk(&self, button: MouseButton) -> bool {
-        Key::mouse(button).is_some_and(|mouse| {
-            self.watched.iter().any(|binding| {
-                binding.action == Action::PushToTalk
-                    && binding.keys.keys.iter().any(|key| key.scancode == mouse.scancode)
+    pub fn reserves_mouse(&self, button: MouseButton) -> bool {
+        !is_paused()
+            && Key::mouse(button).is_some_and(|mouse| {
+                self.watched.iter().any(|binding| {
+                    binding.keys.keys.iter().any(|key| key.scancode == mouse.scancode)
+                })
             })
-        })
     }
 
     pub fn status(&self) -> Status {
@@ -940,8 +1011,10 @@ impl Drop for Watcher {
         if let Some((mut matcher, sink)) = FOCUSED.take() {
             matcher.release_all(&mut |action, down| sink.act(action, down));
         }
+        WINDOW_TRACKER.take();
         TALK_CODES.take();
         PRESSED_TALK_KEY.store(false, Ordering::Relaxed);
+        PRESSED_BOUND_KEY.store(false, Ordering::Relaxed);
         yapfast_core::push_to_talk::hold(false);
         yapfast_core::push_to_talk::hold_mute(false);
     }
@@ -1617,8 +1690,9 @@ mod windows {
         System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
         UI::{
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, GetKeyboardLayout, MAPVK_VK_TO_VSC_EX, MAPVK_VSC_TO_VK_EX,
-                MapVirtualKeyExW, MapVirtualKeyW, VK_XBUTTON1, VK_XBUTTON2,
+                GetAsyncKeyState, GetKeyboardLayout, MAPVK_VK_TO_VSC, MAPVK_VK_TO_VSC_EX,
+                MAPVK_VSC_TO_VK_EX, MapVirtualKeyExW, MapVirtualKeyW, VK_RSHIFT, VK_XBUTTON1,
+                VK_XBUTTON2,
             },
             WindowsAndMessaging::{
                 CallNextHookEx, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
@@ -1773,27 +1847,60 @@ mod windows {
     /// virtual key in the focused window's layout, and the code goes
     /// through winit's own mapping, as the window's key events do. None for
     /// a key Windows makes up, such as the Left Ctrl that AltGr sends.
-    fn code(key: &KBDLLHOOKSTRUCT) -> Option<u32> {
-        if key.scanCode > 0xFF {
+    pub(super) fn normalize_scancode(
+        scan_code: u32,
+        flags: u32,
+        vk_code: u32,
+        mapped_ex: u32,
+        mapped_vsc: u32,
+    ) -> Option<u32> {
+        if scan_code > 0xFF {
             return None;
         }
-        let scancode = if key.scanCode == 0 {
-            // SAFETY: these only read the foreground window's thread's
-            // layout and map a key with it.
-            unsafe {
-                let thread = GetWindowThreadProcessId(GetForegroundWindow(), ptr::null_mut());
-                MapVirtualKeyExW(key.vkCode, MAPVK_VK_TO_VSC_EX, GetKeyboardLayout(thread))
+        let scancode = if scan_code == 0 {
+            if mapped_ex != 0 {
+                mapped_ex
+            } else {
+                mapped_vsc
             }
-        } else if key.flags & LLKHF_EXTENDED != 0 {
-            key.scanCode | 0xE000
+        } else if flags & LLKHF_EXTENDED != 0
+            && scan_code != 0x36
+            && vk_code != u32::from(VK_RSHIFT)
+        {
+            scan_code | 0xE000
         } else {
-            key.scanCode
+            scan_code
         };
+        let scancode = if scancode == 0xE036 { 0x36 } else { scancode };
         (scancode != 0).then(|| {
             PhysicalKey::from_scancode(scancode)
                 .to_scancode()
                 .unwrap_or(scancode)
         })
+    }
+
+    fn code(key: &KBDLLHOOKSTRUCT) -> Option<u32> {
+        if key.scanCode > 0xFF {
+            return None;
+        }
+        let (mapped_ex, mapped_vsc) = if key.scanCode == 0 {
+            // SAFETY: these only read the foreground window's thread's
+            // layout and map a key with it.
+            unsafe {
+                let thread = GetWindowThreadProcessId(GetForegroundWindow(), ptr::null_mut());
+                let mapped_ex =
+                    MapVirtualKeyExW(key.vkCode, MAPVK_VK_TO_VSC_EX, GetKeyboardLayout(thread));
+                let mapped_vsc = if mapped_ex == 0 {
+                    MapVirtualKeyW(key.vkCode, MAPVK_VK_TO_VSC)
+                } else {
+                    0
+                };
+                (mapped_ex, mapped_vsc)
+            }
+        } else {
+            (0, 0)
+        };
+        normalize_scancode(key.scanCode, key.flags, key.vkCode, mapped_ex, mapped_vsc)
     }
 
     /// Whether Windows has `code` down now, by the virtual key it last went
@@ -2614,5 +2721,85 @@ mod tests {
             status.page_note(),
             "Your desktop doesn't offer Yapfast global shortcuts, so keybinds work only while Yapfast's window is in front."
         );
+    }
+
+    #[test]
+    fn tracker_matches_chords_and_repeats_without_firing_when_paused() {
+        let ctrl_k = Shortcut::new(vec![key(LEFT_CTRL, "Ctrl"), key(0x25, "K")]).unwrap();
+        let space = Shortcut::new(vec![key(0x39, "Space")]).unwrap();
+        let mut tracker = Matcher::new(&[
+            Watched {
+                id: "1".into(),
+                action: Action::ToggleMute,
+                keys: ctrl_k,
+            },
+            Watched {
+                id: "2".into(),
+                action: Action::ToggleDeafen,
+                keys: space,
+            },
+        ]);
+        assert!(!tracker.tracks_key(LEFT_CTRL, true), "modifier alone does not fire");
+        assert!(tracker.tracks_key(0x25, true), "chord completion matches");
+        assert!(tracker.tracks_key(0x25, true), "repeat while active still matches");
+        assert!(!tracker.tracks_key(0x25, false));
+        assert!(!tracker.tracks_key(LEFT_CTRL, false));
+
+        assert!(tracker.tracks_key(0x39, true));
+        pause(true);
+        assert!(!tracker.tracks_key(0x39, true), "paused repeat suppresses match");
+        pause(false);
+        assert!(!tracker.tracks_key(0x39, false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_scancode_keeps_right_shift_and_falls_back() {
+        use windows_sys::Win32::UI::{
+            Input::KeyboardAndMouse::VK_RSHIFT,
+            WindowsAndMessaging::LLKHF_EXTENDED,
+        };
+        assert_eq!(
+            windows::normalize_scancode(0x36, LLKHF_EXTENDED, u32::from(VK_RSHIFT), 0, 0),
+            Some(0x36)
+        );
+        assert_eq!(
+            windows::normalize_scancode(0, LLKHF_EXTENDED, u32::from(VK_RSHIFT), 0xE036, 0),
+            Some(0x36)
+        );
+        assert_eq!(
+            windows::normalize_scancode(0, 0, 0x41, 0, 0x1E),
+            Some(0x1E)
+        );
+        assert_eq!(windows::normalize_scancode(0, 0, 0, 0, 0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reserves_mouse_covers_all_bound_actions() {
+        let mouse4 = Key::mouse(MouseButton::Back).unwrap();
+        let mouse5 = Key::mouse(MouseButton::Forward).unwrap();
+        let watcher = Watcher {
+            watched: vec![
+                Watched {
+                    id: "1".into(),
+                    action: Action::ToggleMute,
+                    keys: Shortcut::new(vec![mouse4]).unwrap(),
+                },
+                Watched {
+                    id: "2".into(),
+                    action: Action::ToggleDeafen,
+                    keys: Shortcut::new(vec![mouse5]).unwrap(),
+                },
+            ],
+            status: Arc::new(Mutex::new(Status::default())),
+            global: None,
+        };
+        pause(false);
+        assert!(watcher.reserves_mouse(MouseButton::Back));
+        assert!(watcher.reserves_mouse(MouseButton::Forward));
+        pause(true);
+        assert!(!watcher.reserves_mouse(MouseButton::Back));
+        pause(false);
     }
 }

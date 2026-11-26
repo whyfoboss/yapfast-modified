@@ -203,6 +203,7 @@ pub(super) fn preview_room(id: &str, name: &str, direct: bool, members: u64) -> 
         category_id: None,
         request: false,
         person: (direct && members <= 2).then(|| format!("@{id}:preview.local")),
+        participants: vec![],
         people: vec![],
         ringing: vec![],
         incoming: false,

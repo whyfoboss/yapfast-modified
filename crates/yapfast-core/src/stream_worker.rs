@@ -89,6 +89,9 @@ pub enum Job {
         /// Encoding on the GPU's encoder, where it has one.
         #[serde(default)]
         hardware: bool,
+        /// Sibling `Worker::play` process id whose audio is captured into the stream.
+        #[serde(default)]
+        include_audio_pid: Option<u32>,
     },
     /// Receives and decodes the stream at `server`, writing pictures that
     /// fit `width` by `height` to the frames file at `frames`.
@@ -290,6 +293,8 @@ pub enum Control {
     /// stream goes on with the one shared until then, and when the dialog is
     /// cancelled.
     Switch(Source),
+    /// Updates which sibling `Worker::play` process's audio joins the stream.
+    IncludeAudioPid(Option<u32>),
     /// Play a watched stream's sound, or not, as being deafened changes.
     Hear(bool),
     /// Play a watched stream's or a video's sound this loud.
@@ -420,6 +425,7 @@ fn serve(mut input: Box<dyn BufRead + Send>, report: &mut dyn FnMut(Report)) {
             fps,
             effort,
             hardware,
+            include_audio_pid,
         } => {
             let fps = fps.clamp(1, 60);
             let sink = Sink {
@@ -427,6 +433,7 @@ fn serve(mut input: Box<dyn BufRead + Send>, report: &mut dyn FnMut(Report)) {
                 controls: received,
                 server: None,
                 sound: source != Source::TestPattern,
+                include_audio_pid,
                 video: None,
                 fps,
                 effort,
@@ -436,6 +443,7 @@ fn serve(mut input: Box<dyn BufRead + Send>, report: &mut dyn FnMut(Report)) {
                 preview_due: None,
                 thumbnail: None,
                 lost: None,
+                rgba_scratch: Vec::new(),
             };
             report(Report::Ready);
             match source {
@@ -510,6 +518,7 @@ struct Sink {
     /// Whether to share other applications' sound too: not for the test
     /// pattern.
     sound: bool,
+    include_audio_pid: Option<u32>,
     video: Option<Video>,
     fps: u32,
     effort: Effort,
@@ -523,13 +532,14 @@ struct Sink {
     /// When the stream connection ended, while Discord may still name a
     /// server it moved the stream to.
     lost: Option<Instant>,
+    rgba_scratch: Vec<u8>,
 }
 
 struct Video {
     sender: StreamSender,
     encoder: Encoder,
-    /// Other applications' sound, while sharing a screen.
-    _sound: Option<stream_audio::Capture>,
+    /// Other applications' and internal player's sound, while sharing a screen.
+    sound: Option<stream_audio::Capture>,
     /// When the stream last reported how it goes out, and the bytes it had
     /// sent then.
     measured: (Instant, u64),
@@ -598,7 +608,7 @@ impl Sink {
             },
             preview.0,
             preview.1,
-            &mut Vec::new(),
+            &mut self.rgba_scratch,
         );
         if self.preview_due.is_some_and(|due| due <= Instant::now()) && !is_black(shown) {
             match thumbnail(shown) {
@@ -616,7 +626,7 @@ impl Sink {
             let (offers, encoder) = self.offers(width, height)?;
             let sender = StreamSender::start(server, width, height, self.fps, offers)?;
             let sound = if self.sound {
-                stream_audio::Capture::start(sender.sound())
+                stream_audio::Capture::start(sender.sound(), self.include_audio_pid)
                     .inspect_err(|error| {
                         tracing::warn!(error = format!("{error:#}"), "sharing without sound")
                     })
@@ -627,7 +637,7 @@ impl Sink {
             self.video = Some(Video {
                 sender,
                 encoder,
-                _sound: sound,
+                sound,
                 measured: (Instant::now(), 0),
             });
         }
@@ -767,6 +777,16 @@ impl Sink {
             match control {
                 Control::Send(server) => self.server = Some(server),
                 Control::Switch(source) => switch = Some(source),
+                Control::IncludeAudioPid(pid) => {
+                    if self.include_audio_pid != pid {
+                        self.include_audio_pid = pid;
+                        if let Some(video) = self.video.as_mut()
+                            && let Some(sound) = video.sound.as_mut()
+                        {
+                            sound.set_include_pid(pid);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -888,10 +908,22 @@ fn watch(
     let mut last_picture = Instant::now();
     let mut last_recovery = Instant::now();
     let (mut input, mut published) = (0u64, 0u64);
+    let mut frames_fed_since_picture = 0u32;
     while !stop.load(Ordering::Relaxed) {
         if last_picture.elapsed() >= Duration::from_secs(5)
             && last_recovery.elapsed() >= Duration::from_secs(5)
         {
+            if frames_fed_since_picture > 0 {
+                tracing::warn!(
+                    target: "yapfast_stream",
+                    frames_fed = frames_fed_since_picture,
+                    codec = ?decoder.as_ref().map(|d| d.codec()),
+                    "stream decoder stalled without output; resetting decoder and waiting for keyframe"
+                );
+                decoder = None;
+                waiting = true;
+                frames_fed_since_picture = 0;
+            }
             receiver.request_keyframe();
             last_recovery = Instant::now();
         }
@@ -924,9 +956,11 @@ fn watch(
         }
         waiting = false;
         input += 1;
+        frames_fed_since_picture = frames_fed_since_picture.saturating_add(1);
         let picture = match decoder.as_mut().unwrap().decode(&frame.data) {
             Ok(Some(picture)) => {
                 consecutive_failures = 0;
+                frames_fed_since_picture = 0;
                 receiver.note_decoded();
                 picture
             }
@@ -959,6 +993,7 @@ fn watch(
             }
         };
         let (width, height) = (picture.width, picture.height);
+        let gap = last_picture.elapsed();
         last_picture = Instant::now();
         if writer.fits(width, height) && width <= max_width && height <= max_height {
             writer.write_video(picture.i420(), width, height, &mut scratch);
@@ -974,6 +1009,11 @@ fn watch(
                 width, height, codec = ?frame.codec, "stream first frame");
         }
         published += 1;
+        if gap >= Duration::from_secs(1) && published > 1 {
+            tracing::info!(target: "yapfast_stream", gap_ms = gap.as_millis() as u64,
+                elapsed_ms = started.elapsed().as_millis() as u64, published,
+                codec = ?frame.codec, keyframe = frame.keyframe, "stream worker published after a video gap");
+        }
     }
     Ok(())
 }
@@ -1513,13 +1553,86 @@ pub struct Worker {
     /// it ends without saying so.
     child: Arc<Mutex<Child>>,
     stdin: Option<ChildStdin>,
+    /// Ensures Windows kills the worker immediately if the parent process
+    /// exits or panics without running [`Drop`].
+    #[cfg(windows)]
+    _job: Option<ProcessJob>,
+}
+
+#[cfg(windows)]
+struct ProcessJob(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+// SAFETY: A Win32 Job Object handle is process-wide and not thread-affine;
+// closing it tears down assigned processes via JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+unsafe impl Send for ProcessJob {}
+
+#[cfg(windows)]
+// SAFETY: The handle is never accessed after initialization except in Drop.
+unsafe impl Sync for ProcessJob {}
+
+#[cfg(windows)]
+impl Drop for ProcessJob {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is an owned Job Object handle from `CreateJobObjectW`.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ProcessJob {
+    fn attach(child: &Child) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        // SAFETY: Valid pointers and buffer sizes for an anonymous Win32 Job Object
+        // configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+        unsafe {
+            let Ok(job) = CreateJobObjectW(None, None) else {
+                tracing::debug!("could not create stream worker job object");
+                return None;
+            };
+            let holder = Self(job);
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if let Err(error) = SetInformationJobObject(
+                holder.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) {
+                tracing::debug!(%error, "could not configure stream worker job object");
+                return None;
+            }
+            if let Err(error) = AssignProcessToJobObject(holder.0, HANDLE(child.as_raw_handle())) {
+                tracing::debug!(%error, "could not assign stream worker to job object");
+                return None;
+            }
+            Some(holder)
+        }
+    }
 }
 
 impl Worker {
+    /// Operating-system process id of this running worker.
+    pub fn pid(&self) -> u32 {
+        self.child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .id()
+    }
+
     /// Starts sharing `source`, with frames for the UI in a new [`Frames`].
     pub fn share(
         source: Source,
         quality: StreamQuality,
+        include_audio_pid: Option<u32>,
     ) -> Result<(Self, Frames, mpsc::UnboundedReceiver<Report>)> {
         let source = picked(source);
         let frames = Frames::create_i420(PREVIEW_WIDTH, PREVIEW_HEIGHT)?;
@@ -1536,6 +1649,7 @@ impl Worker {
                 Effort::Light
             },
             hardware: HARDWARE.load(Ordering::Relaxed),
+            include_audio_pid,
         };
         let (worker, reports) = Self::start(&job)?;
         Ok((worker, frames, reports))
@@ -1631,6 +1745,11 @@ impl Worker {
         self.control(&Control::Switch(picked(source)))
     }
 
+    /// Updates the sibling playback worker PID captured into shared sound.
+    pub fn include_audio_pid(&mut self, pid: Option<u32>) -> Result<()> {
+        self.control(&Control::IncludeAudioPid(pid))
+    }
+
     fn control(&mut self, control: &Control) -> Result<()> {
         let line = serde_json::to_string(control)?;
         let stdin = self
@@ -1654,11 +1773,24 @@ impl Worker {
             .stderr(crate::logging::for_worker())
             .spawn()
             .context("could not start the stream worker")?;
+        #[cfg(windows)]
+        let process_job = ProcessJob::attach(&child);
         let mut stdin = child.stdin.take();
         let stdout = child.stdout.take();
-        let line = serde_json::to_string(job)?;
-        if let Some(stdin) = stdin.as_mut() {
-            writeln!(stdin, "{line}").context("could not reach the stream worker")?;
+        let line = match serde_json::to_string(job) {
+            Ok(line) => line,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        };
+        if let Some(stdin) = stdin.as_mut()
+            && let Err(error) = writeln!(stdin, "{line}")
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("could not reach the stream worker");
         }
         let (reports, receiver) = mpsc::unbounded_channel();
         let unexpected = match job {
@@ -1670,7 +1802,7 @@ impl Worker {
         let waited = child.clone();
         // The caller's, so a test's logger hears this thread too.
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("yapfast-stream-reports".into())
             .spawn(move || {
                 let _logging = tracing::dispatcher::set_default(&dispatch);
@@ -1697,8 +1829,23 @@ impl Worker {
                     });
                 }
             })
-            .context("could not start the stream worker")?;
-        Ok((Self { child, stdin }, receiver))
+        {
+            let mut guard = child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = guard.kill();
+            let _ = guard.wait();
+            return Err(error).context("could not start the stream worker");
+        }
+        Ok((
+            Self {
+                child,
+                stdin,
+                #[cfg(windows)]
+                _job: process_job,
+            },
+            receiver,
+        ))
     }
 }
 
@@ -1848,11 +1995,12 @@ impl Drop for Worker {
         if let Some(mut stdin) = self.stdin.take() {
             let _ = writeln!(stdin, "stop");
         }
-        let Ok(mut child) = self.child.lock() else {
-            return;
-        };
+        let mut child = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The worker checks for the stop between frames.
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
             if !matches!(child.try_wait(), Ok(None)) {
                 return;
@@ -1980,6 +2128,7 @@ mod tests {
             controls: received,
             server: None,
             sound: false,
+            include_audio_pid: None,
             video: None,
             fps: 30,
             effort: Effort::Light,
@@ -1989,6 +2138,7 @@ mod tests {
             preview_due: None,
             thumbnail: None,
             lost: None,
+            rgba_scratch: Vec::new(),
         };
         let (offers, encoder) = sink.offers(320, 180).unwrap();
         eprintln!("offering {offers:?}, encoding with {}", encoder.engine());
@@ -2013,6 +2163,7 @@ mod tests {
             controls: received,
             server: None,
             sound: false,
+            include_audio_pid: None,
             video: None,
             fps: 30,
             effort: Effort::Light,
@@ -2022,6 +2173,7 @@ mod tests {
             preview_due: Some(Instant::now()),
             thumbnail: None,
             lost: None,
+            rgba_scratch: Vec::new(),
         };
         let mut reports = Vec::new();
         sink.lost_link("I/O closed".into(), &mut |report| reports.push(report));
@@ -2051,6 +2203,7 @@ mod tests {
             controls: received,
             server: None,
             sound: false,
+            include_audio_pid: None,
             video: None,
             fps: 30,
             effort: Effort::Light,
@@ -2060,6 +2213,7 @@ mod tests {
             preview_due: None,
             thumbnail: None,
             lost: None,
+            rgba_scratch: Vec::new(),
         };
         // A 1080p picture, mid-grey: luma and chroma halfway.
         let mut picture = I420Buffer::new(SHARE_WIDTH, SHARE_HEIGHT);
@@ -2088,6 +2242,7 @@ mod tests {
             controls: received,
             server: None,
             sound: false,
+            include_audio_pid: None,
             video: None,
             fps: 30,
             effort: Effort::Light,
@@ -2097,6 +2252,7 @@ mod tests {
             preview_due: None,
             thumbnail: None,
             lost: None,
+            rgba_scratch: Vec::new(),
         };
         let mut report = |_| {};
         assert_eq!(sink.check(&mut report).unwrap(), None);
@@ -2104,6 +2260,41 @@ mod tests {
         controls.send(Control::Switch(Source::Window(2))).unwrap();
         assert_eq!(sink.check(&mut report).unwrap(), Some(Source::Window(2)));
         assert_eq!(sink.check(&mut report).unwrap(), None);
+    }
+
+    #[test]
+    fn control_include_audio_pid_round_trips_and_updates_sink() {
+        let serialized_some = serde_json::to_string(&Control::IncludeAudioPid(Some(4242))).unwrap();
+        let parsed_some: Control = serde_json::from_str(&serialized_some).unwrap();
+        let serialized_none = serde_json::to_string(&Control::IncludeAudioPid(None)).unwrap();
+        let parsed_none: Control = serde_json::from_str(&serialized_none).unwrap();
+
+        let frames = Frames::create(PREVIEW_WIDTH, PREVIEW_HEIGHT).unwrap();
+        let (controls, received) = channel::channel();
+        let mut sink = Sink {
+            writer: Writer::open(&frames.path().unwrap()).unwrap(),
+            controls: received,
+            server: None,
+            sound: false,
+            include_audio_pid: None,
+            video: None,
+            fps: 30,
+            effort: Effort::Light,
+            hardware: false,
+            started: Instant::now(),
+            streaming: false,
+            preview_due: None,
+            thumbnail: None,
+            lost: None,
+            rgba_scratch: Vec::new(),
+        };
+        let mut report = |_| {};
+        controls.send(parsed_some).unwrap();
+        sink.check(&mut report).unwrap();
+        assert_eq!(sink.include_audio_pid, Some(4242));
+        controls.send(parsed_none).unwrap();
+        sink.check(&mut report).unwrap();
+        assert_eq!(sink.include_audio_pid, None);
     }
 
     #[test]
@@ -2115,6 +2306,7 @@ mod tests {
             controls: received,
             server: None,
             sound: false,
+            include_audio_pid: None,
             video: None,
             fps: 30,
             effort: Effort::Light,
@@ -2124,6 +2316,7 @@ mod tests {
             preview_due: Some(Instant::now()),
             thumbnail: None,
             lost: None,
+            rgba_scratch: Vec::new(),
         };
         let mut picture = I420Buffer::new(SHARE_WIDTH, SHARE_HEIGHT);
         let (y, u, v) = picture.data_mut();
@@ -2161,6 +2354,7 @@ mod tests {
             fps: 60,
             effort: Effort::Light,
             hardware: false,
+            include_audio_pid: None,
         };
         let (input, mut feed) = std::io::pipe().unwrap();
         writeln!(feed, "{}", serde_json::to_string(&job).unwrap()).unwrap();
@@ -2210,6 +2404,7 @@ mod tests {
             fps: 30,
             effort: Effort::Light,
             hardware: false,
+            include_audio_pid: None,
         };
         let (input, mut feed) = std::io::pipe().unwrap();
         writeln!(feed, "{}", serde_json::to_string(&job).unwrap()).unwrap();
@@ -2345,6 +2540,7 @@ mod tests {
                 fps: 30,
                 effort: Effort::Light,
                 hardware: false,
+                include_audio_pid: None,
             };
             let (input, mut feed) = std::io::pipe().unwrap();
             writeln!(feed, "{}", serde_json::to_string(&job).unwrap()).unwrap();
@@ -2398,6 +2594,7 @@ mod tests {
             fps: 30,
             effort: Effort::Light,
             hardware: false,
+            include_audio_pid: None,
         };
         let (input, mut feed) = std::io::pipe().unwrap();
         writeln!(feed, "{}", serde_json::to_string(&job).unwrap()).unwrap();
@@ -2433,6 +2630,7 @@ mod tests {
             fps: 1,
             effort: Effort::Light,
             hardware: false,
+            include_audio_pid: None,
         };
         let mut reports = Vec::new();
         let input = format!("{}\n", serde_json::to_string(&gone).unwrap());
@@ -2448,5 +2646,74 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn desktop_cursor_visibility_filters_hidden_and_transparent_cursors() {
+        use webrtc_sys::desktop_capturer::{
+            cursor_bgra_has_visible_pixel, cursor_info_is_visible,
+        };
+        const CURSOR_SHOWING: u32 = 0x0000_0001;
+        const CURSOR_SUPPRESSED: u32 = 0x0000_0002;
+
+        assert!(cursor_info_is_visible(true, CURSOR_SHOWING, true));
+        assert!(!cursor_info_is_visible(false, CURSOR_SHOWING, true));
+        assert!(!cursor_info_is_visible(true, 0, true));
+        assert!(!cursor_info_is_visible(true, CURSOR_SUPPRESSED, true));
+        assert!(!cursor_info_is_visible(true, CURSOR_SHOWING, false));
+
+        let transparent = [
+            255, 255, 255, 0, 10, 20, 30, 0, 40, 50, 60, 0, 70, 80, 90, 0,
+        ];
+        assert!(!cursor_bgra_has_visible_pixel(&transparent, 2, 2, 8));
+        let mut visible = transparent;
+        visible[15] = 255;
+        assert!(cursor_bgra_has_visible_pixel(&visible, 2, 2, 8));
+        assert!(!cursor_bgra_has_visible_pixel(&visible, 0, 2, 8));
+        assert!(!cursor_bgra_has_visible_pixel(&visible, 2, 2, 4));
+        assert!(!cursor_bgra_has_visible_pixel(&visible[..12], 2, 2, 8));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worker_drop_terminates_spawned_process() {
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        let mut child = Command::new("ping")
+            .args(["-n", "31", "127.0.0.1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let process_job = ProcessJob::attach(&child);
+        assert!(process_job.is_some(), "expected Job Object attachment to succeed");
+        let stdin = child.stdin.take();
+        let pid = child.id();
+        let worker = Worker {
+            child: Arc::new(Mutex::new(child)),
+            stdin,
+            _job: process_job,
+        };
+        let started = Instant::now();
+        drop(worker);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "Worker::drop took too long: {:?}",
+            started.elapsed()
+        );
+        // SAFETY: `OpenProcess` with `PROCESS_SYNCHRONIZE` and `WaitForSingleObject`
+        // safely check whether `pid` has already exited, and we close the handle if opened.
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                let waited = WaitForSingleObject(handle, 0);
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+                assert_eq!(waited, WAIT_OBJECT_0, "worker pid {pid} remained active");
+            }
+        }
     }
 }

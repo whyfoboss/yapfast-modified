@@ -272,7 +272,7 @@ fn iterate(mainloop: &mut Mainloop) -> Result<()> {
 }
 
 #[cfg(feature = "discord")]
-pub use others::others;
+pub use others::{others, process_loopback};
 
 /// What other applications play, for Go Live's sound.
 #[cfg(feature = "discord")]
@@ -327,6 +327,17 @@ mod others {
             .recv()
             .context("sound capture stopped before it started")??;
         Ok(thread)
+    }
+
+    /// PulseAudio's `others` captures all non-excluded sibling playback streams,
+    /// so no separate child-process monitor is needed here.
+    pub fn process_loopback(
+        _process: u32,
+        _source: u32,
+        _heard: Hear,
+        _stop: Arc<AtomicBool>,
+    ) -> Result<JoinHandle<()>> {
+        Ok(std::thread::spawn(|| {}))
     }
 
     /// What PulseAudio's callbacks found, handled after each dispatch so

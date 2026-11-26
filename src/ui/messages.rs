@@ -902,6 +902,7 @@ pub(super) fn message_row_within_with_role_colors(
         can_delete: message.can_delete,
         can_react: message.can_react,
         can_forward: message.can_forward,
+        can_report: false,
         pinned: message.pinned,
         can_pin: message.can_pin,
         thread_room: message
@@ -965,10 +966,22 @@ pub(super) fn message_row_within_with_role_colors(
             can_edit: false,
             can_react: false,
             can_forward: false,
+            can_report: false,
             ..row
         };
     }
     row
+}
+
+/// Marks whether `row` can open Discord's Report Message dialog.
+pub(super) fn mark_reportable(
+    row: &mut MessageRow,
+    room: Option<&str>,
+    message: &ChatMessage,
+    revealed: &HashSet<String>,
+) {
+    row.can_report = !collapsed(message, revealed)
+        && room.is_some_and(|room| yapfast_core::report::can_report_message(room, message));
 }
 
 /// A row of a Discord app's card, its pictures and files found among the
@@ -1299,7 +1312,7 @@ pub(super) fn found_row_with_role_colors(
     twelve_hour: bool,
     role_colors: bool,
 ) -> FoundRow {
-    found_row_styled(message, twelve_hour, role_colors, None)
+    found_row_styled(message, twelve_hour, role_colors, None, &HashSet::new())
 }
 
 pub(super) fn found_row_styled(
@@ -1307,6 +1320,7 @@ pub(super) fn found_row_styled(
     twelve_hour: bool,
     role_colors: bool,
     query: Option<&str>,
+    revealed: &HashSet<String>,
 ) -> FoundRow {
     let body = if let Some(q) = query {
         super::search::highlight_search_terms(&message.body, q)
@@ -1342,9 +1356,11 @@ pub(super) fn found_row_styled(
         .filter(|(_, attachment)| attachment.preview.is_some() || loading(attachment))
         .map(|(index, attachment)| (index, attachment, attachment.preview.as_ref()))
         .collect();
-    // Spoilers stay covered: clicking the card shows the message.
-    let (images, gallery_width, gallery_height) =
-        gallery_within(&pictures, &|_| true, FOUND_GALLERY_WIDTH);
+    let (images, gallery_width, gallery_height) = gallery_within(
+        &pictures,
+        &|index| !revealed.contains(&format!("{}/a{index}", message.item)),
+        FOUND_GALLERY_WIDTH,
+    );
     let files: Vec<&str> = message
         .attachments
         .iter()

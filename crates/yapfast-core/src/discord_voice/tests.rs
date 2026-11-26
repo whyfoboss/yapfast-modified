@@ -87,6 +87,7 @@ async fn a_call_that_cant_connect_says_why() {
             &mut received,
             &snapshots,
             None,
+            None,
         ),
     )
     .await;
@@ -99,4 +100,58 @@ async fn a_call_that_cant_connect_says_why() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn fake_deafen_state_transitions_and_wire_self_state() {
+    let (ended, _endings) = mpsc::unbounded_channel();
+    let hearing = Hearing::new(ended);
+    let mut state = State {
+        phase: Phase::Connected,
+        muted: false,
+        deafened: false,
+        fake_deafen: false,
+        ..State::default()
+    };
+    assert_eq!(wire_self_state(&state), (false, false, false));
+
+    // Enabling Fake Deafen sends (self_mute: true, self_deaf: true) while local audio stays active.
+    apply_fake_deafen_command(&mut state, &hearing, true);
+    assert!(state.fake_deafen);
+    assert!(!state.deafened);
+    assert!(!state.muted);
+    assert!(!hearing.is_deafened());
+    assert_eq!(wire_self_state(&state), (true, true, false));
+
+    // Real Mute toggle works independently without losing Fake Deafen on Gateway.
+    state.muted = true;
+    assert!(state.fake_deafen);
+    assert_eq!(wire_self_state(&state), (true, true, false));
+    state.muted = false;
+    assert!(state.fake_deafen);
+    assert_eq!(wire_self_state(&state), (true, true, false));
+
+    // Real Deafen(true) clears Fake Deafen and mutes both capture and hearing.
+    apply_deafen_command(&mut state, &hearing, true);
+    assert!(!state.fake_deafen);
+    assert!(state.deafened);
+    assert!(state.muted);
+    assert!(hearing.is_deafened());
+    assert_eq!(wire_self_state(&state), (true, true, false));
+
+    // Switching from real Deafen into Fake Deafen restores hearing without unmuting mic.
+    apply_fake_deafen_command(&mut state, &hearing, true);
+    assert!(state.fake_deafen);
+    assert!(!state.deafened);
+    assert!(!hearing.is_deafened());
+    assert!(state.muted, "must stay muted to prevent accidental hot mic");
+    assert_eq!(wire_self_state(&state), (true, true, false));
+
+    // Disabling Fake Deafen returns honest local state to Gateway.
+    state.muted = false;
+    apply_fake_deafen_command(&mut state, &hearing, false);
+    assert!(!state.fake_deafen);
+    assert!(!state.deafened);
+    assert!(!hearing.is_deafened());
+    assert_eq!(wire_self_state(&state), (false, false, false));
 }
